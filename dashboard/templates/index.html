@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="container-fluid py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+        <div>
+            <h1 class="h3 mb-1">Trading Bot Control Dashboard</h1>
+            <div class="text-secondary">Live operations, controls, strategy tuning, and audit history</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center" id="top-status-bar"></div>
+    </div>
+    <div class="row g-3 mb-3">
+        <div class="col-12">
+            <div class="card shadow-sm border-0">
+                <div class="card-body d-flex flex-wrap gap-2 justify-content-between align-items-center">
+                    <div class="d-flex flex-wrap gap-2" id="quick-actions"></div>
+                    <div class="small text-secondary" id="save-feedback">Ready.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <ul class="nav nav-pills mb-3 flex-wrap gap-2" id="dashboard-tabs">
+        <li class="nav-item"><button class="nav-link active" id="tab-overview" data-section="overview">Overview</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-bot-control" data-section="bot-control">Bot Control</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-strategies" data-section="strategies">Strategies</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-families" data-section="families">Families</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-risk" data-section="risk">Risk Management</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-sessions" data-section="sessions">Sessions</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-symbols" data-section="symbols">Symbols</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-manual-trading" data-section="manual-trading">Manual Trading</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-alerts" data-section="alerts">Alerts</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-trades" data-section="trades">Trades</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-performance" data-section="performance">Performance</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-backtest" data-section="backtest">Backtest</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-backtest-replay" data-section="backtest-replay">Backtest Replay</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-oos" data-section="oos">OOS</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-config" data-section="config">Config</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-logs" data-section="logs">Logs</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-health" data-section="health">System Health</button></li>
+    </ul>
+    <div id="section-overview" class="dashboard-section" data-dashboard-section="overview"></div>
+    <div id="section-bot-control" class="dashboard-section d-none" data-dashboard-section="bot-control"></div>
+    <div id="section-strategies" class="dashboard-section d-none" data-dashboard-section="strategies"></div>
+    <div id="section-families" class="dashboard-section d-none" data-dashboard-section="families"></div>
+    <div id="section-risk" class="dashboard-section d-none" data-dashboard-section="risk"></div>
+    <div id="section-sessions" class="dashboard-section d-none" data-dashboard-section="sessions"></div>
+    <div id="section-symbols" class="dashboard-section d-none" data-dashboard-section="symbols"></div>
+    <div id="section-manual-trading" class="dashboard-section d-none" data-dashboard-section="manual-trading"></div>
+    <div id="section-alerts" class="dashboard-section d-none" data-dashboard-section="alerts"></div>
+    <div id="section-trades" class="dashboard-section d-none" data-dashboard-section="trades"></div>
+    <div id="section-performance" class="dashboard-section d-none" data-dashboard-section="performance"></div>
+    <div id="section-backtest" class="dashboard-section d-none" data-dashboard-section="backtest"></div>
+    <div id="section-backtest-replay" class="dashboard-section d-none" data-dashboard-section="backtest-replay"></div>
+    <div id="section-oos" class="dashboard-section d-none" data-dashboard-section="oos"></div>
+    <div id="section-config" class="dashboard-section d-none" data-dashboard-section="config"></div>
+    <div id="section-logs" class="dashboard-section d-none" data-dashboard-section="logs"></div>
+    <div id="section-health" class="dashboard-section d-none" data-dashboard-section="health"></div>
+</div>
+{% endblock %}

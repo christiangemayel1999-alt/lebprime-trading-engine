@@ -1,0 +1,21 @@
+{
+  "scenario": "canonical_simulated_executor_golden_replay",
+  "candidates": 1,
+  "executable_signals": 1,
+  "pending_orders": 1,
+  "activated_trades": 1,
+  "trade_lifecycle_events": [
+    "pending_created",
+    "pending_filled",
+    "trade_partial_close",
+    "trade_closed"
+  ],
+  "tp1_count": 1,
+  "tp2_count": 1,
+  "sl_count": 0,
+  "starting_balance": 10000.0,
+  "ending_balance": 10001.5,
+  "ending_equity": 10001.5,
+  "realized_pnl": 1.5,
+  "max_drawdown": 0.0
+}

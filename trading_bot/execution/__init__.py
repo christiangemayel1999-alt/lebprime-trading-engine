@@ -1,0 +1,2 @@
+"""Unified execution adapter contracts."""
+

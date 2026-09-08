@@ -1,0 +1,750 @@
+{
+    "mt5": {
+        "symbol": "XAUUSD",
+        "terminal_path": null,
+        "magic_number": 234567,
+        "deviation": 10,
+        "timeout": 5,
+        "reconnect_retries": 3,
+        "reconnect_retry_delay_seconds": 5,
+        "tick_retries": 5,
+        "tick_retry_delay_seconds": 0.4,
+        "price_refresh_delay_seconds": 0.15,
+        "max_tick_age_seconds": 5,
+        "reconnect_cooldown_seconds": 8,
+        "order_send_transient_retries": 2,
+        "order_check_enabled": true,
+        "auto_adjust_stops": true,
+        "symbol_prepare_each_trade": true,
+        "diagnostics_order_check": true
+    },
+    "runtime": {
+        "mode": "LIVE"
+    },
+    "broker": {
+        "provider": "mt5",
+        "mt5_ref": "mt5"
+    },
+    "integrations": {
+        "telegram_ref": "telegram",
+        "dashboard_ref": "dashboard"
+    },
+    "strategies": {
+        "registry": [
+            "XAU_LEGACY_MULTI",
+            "XAU_LEBPRIM"
+        ],
+        "enabled_from": "strategy.setup_controls"
+    },
+    "timeframes": {
+        "trend": "5min",
+        "setup": "3min",
+        "trigger": "1min",
+        "bars_to_fetch": 320
+    },
+    "indicators": {
+        "ema_fast": 20,
+        "ema_slow": 50,
+        "ema_trend": 200,
+        "rsi_period": 14,
+        "atr_period": 14,
+        "adx_period": 14,
+        "volume_period": 20,
+        "regime_efficiency_lookback": 8,
+        "regime_overlap_lookback": 6
+    },
+    "bot": {
+        "loop_sleep_seconds": 15,
+        "trading_mode": "LIVE",
+        "execution_mode": "V1_BASELINE",
+        "demo_mode": false,
+        "dry_run": false,
+        "test_mode": false,
+        "allow_live_execution": true,
+        "close_positions_on_shutdown": false,
+        "auto_recover_live_positions": false,
+        "auto_restart_on_error": true,
+        "rollout_phase": 3,
+        "force_reduced_risk_mode": false,
+        "manual_reset_id": 1,
+        "enable_startup_trade_reconciliation": true,
+        "analytics_auto_generate": true,
+        "analytics_report_hour_utc": 22,
+        "backtest_mode": false
+    },
+    "strategy": {
+        "setup_expiry_bars": 4,
+        "setup_replace_score_delta": 8.0,
+        "bias_alignment_required": true,
+        "require_trend_alignment": false,
+        "min_score_to_trade": 52.0,
+        "lebprim_mode": "off",
+        "lebprim_restricted_min_entry_score": 60.0,
+        "lebprim_research_min_entry_score": 52.0,
+        "lebprim_min_regime_confidence": 62.0,
+        "lebprim_min_session_quality": 80.0,
+        "lebprim_research_min_session_quality": 68.0,
+        "live_thresholds": {
+            "live_min_trend_score": 40.0,
+            "live_min_setup_score": 48.0,
+            "live_min_trigger_score": 25.0,
+            "live_min_entry_score": 47.0
+        },
+        "dry_run_thresholds": {
+            "dry_run_min_trend_score": 56.0,
+            "dry_run_min_setup_score": 58.0,
+            "dry_run_min_trigger_score": 56.0,
+            "dry_run_min_entry_score": 60.0
+        },
+        "entry_modes": {
+            "aggressive_enabled": true,
+            "aggressive_min_entry_score": 60,
+            "confirmed_min_entry_score": 50,
+            "fallback_enabled": false,
+            "fallback_min_entry_score": 70.0
+        },
+        "setup_families": {
+            "lebprim_scalp": {
+                "enabled": false,
+                "live_allowed": false,
+                "sessions": [
+                    "ASIA",
+                    "LONDON_OPEN",
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP",
+                    "LATE_NY"
+                ],
+                "regimes": [
+                    "TREND_CONTINUATION",
+                    "HIGH_VOLATILITY_BREAKOUT"
+                ]
+            },
+            "trend_pullback_reclaim": {
+                "enabled": false,
+                "live_allowed": false,
+                "sessions": [
+                    "LONDON_OPEN",
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP"
+                ],
+                "regimes": [
+                    "TREND_CONTINUATION"
+                ]
+            },
+            "breakout_retest_continuation": {
+                "enabled": true,
+                "live_allowed": true,
+                "sessions": [
+                    "LONDON_OPEN",
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP"
+                ],
+                "regimes": [
+                    "TREND_CONTINUATION"
+                ]
+            },
+            "liquidity_sweep_reversal": {
+                "enabled": false,
+                "live_allowed": false,
+                "sessions": [
+                    "LONDON_OPEN",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP"
+                ],
+                "regimes": [
+                    "RANGE_CHOP"
+                ]
+            },
+            "compression_release": {
+                "enabled": true,
+                "live_allowed": true,
+                "sessions": [
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP"
+                ],
+                "regimes": [
+                    "TREND_CONTINUATION"
+                ]
+            }
+        },
+        "setup_controls": {
+            "trend_pullback_reclaim": {
+                "enabled": false,
+                "min_entry_score": 50,
+                "confirmation_required": false,
+                "allowed_sessions": [
+                    "LONDON_OPEN",
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP",
+                    "LATE_NY"
+                ],
+                "max_spread_points": 25,
+                "sl_multiplier": 1,
+                "tp_multiplier": 1,
+                "cooldown_minutes": 8,
+                "max_trades_per_session": 3,
+                "allowed_regimes": [
+                    "TREND_CONTINUATION"
+                ],
+                "allow_long": true,
+                "allow_short": true,
+                "min_trend_score": 45,
+                "min_setup_score": 52,
+                "min_trigger_score": 28,
+                "require_trend_alignment": true,
+                "live_allowed": false
+            },
+            "breakout_retest_continuation": {
+                "enabled": true,
+                "min_entry_score": 50,
+                "confirmation_required": false,
+                "allowed_sessions": [
+                    "LONDON_OPEN",
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP",
+                    "LATE_NY"
+                ],
+                "max_spread_points": 25,
+                "sl_multiplier": 1,
+                "tp_multiplier": 1,
+                "cooldown_minutes": 8,
+                "max_trades_per_session": 3,
+                "allowed_regimes": [
+                    "TREND_CONTINUATION",
+                    "HIGH_VOLATILITY_BREAKOUT"
+                ],
+                "allow_long": true,
+                "allow_short": true,
+                "min_trend_score": 45,
+                "min_setup_score": 52,
+                "min_trigger_score": 28,
+                "require_trend_alignment": true,
+                "live_allowed": true
+            },
+            "liquidity_sweep_reversal": {
+                "enabled": false,
+                "min_trend_score": 40,
+                "min_setup_score": 50,
+                "min_trigger_score": 25,
+                "min_entry_score": 47,
+                "confirmation_required": false,
+                "require_trend_alignment": false,
+                "allowed_sessions": [
+                    "ASIA",
+                    "LONDON_OPEN",
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP",
+                    "LATE_NY"
+                ],
+                "max_spread_points": 25,
+                "sl_multiplier": 1,
+                "tp_multiplier": 1,
+                "cooldown_minutes": 8,
+                "max_trades_per_session": 3,
+                "allowed_regimes": [
+                    "RANGE_MEAN_REVERSION",
+                    "HIGH_VOLATILITY_BREAKOUT"
+                ],
+                "allow_long": true,
+                "allow_short": true,
+                "live_allowed": false
+            },
+            "compression_release": {
+                "enabled": true,
+                "min_trend_score": 40,
+                "min_setup_score": 50,
+                "min_trigger_score": 25,
+                "min_entry_score": 47,
+                "confirmation_required": false,
+                "allowed_sessions": [
+                    "LONDON",
+                    "NY_OPEN",
+                    "LONDON_NY_OVERLAP",
+                    "LATE_NY"
+                ],
+                "max_spread_points": 25,
+                "sl_multiplier": 1,
+                "tp_multiplier": 1,
+                "cooldown_minutes": 8,
+                "max_trades_per_session": 3,
+                "allowed_regimes": [
+                    "TREND_CONTINUATION",
+                    "HIGH_VOLATILITY_BREAKOUT"
+                ],
+                "allow_long": true,
+                "allow_short": true,
+                "require_trend_alignment": true,
+                "live_allowed": true
+            },
+            "lebprim_scalp": {
+                "enabled": false,
+                "live_allowed": false,
+                "min_entry_score": 52,
+                "min_trend_score": 40,
+                "min_setup_score": 55,
+                "min_trigger_score": 45,
+                "confirmation_required": false,
+                "require_trend_alignment": false,
+                "max_spread_points": 25,
+                "sl_multiplier": 1,
+                "tp_multiplier": 1,
+                "cooldown_minutes": 5,
+                "max_trades_per_session": 4,
+                "allowed_regimes": [
+                    "TREND_CONTINUATION",
+                    "HIGH_VOLATILITY_BREAKOUT"
+                ],
+                "allow_long": true,
+                "allow_short": true,
+                "allowed_sessions": []
+            }
+        },
+        "lebprim_compression_ratio_max": 0.62,
+        "lebprim_max_atr_ratio": 2.2,
+        "lebprim_min_bias_delta": 12.0,
+        "lebprim_short_bias_delta_min": 25.0,
+        "lebprim_short_ema_slope_min_atr": 0.05,
+        "lebprim_max_trigger_range_atr": 1.0,
+        "lebprim_max_stop_distance_price": 6.5,
+        "lebprim_max_stop_distance_atr": 1.75,
+        "bias_min_score": 65.0,
+        "bias_min_delta": 18.0,
+        "liquidity_sweep_min_depth_atr": 0.5
+    },
+    "regime": {
+        "allow_range_regime": true,
+        "ema_slope_min_atr": 0.08,
+        "ema_alignment_min_atr": 0.1,
+        "trend_efficiency_min": 0.42,
+        "chop_efficiency_max": 0.28,
+        "overlap_chop_min": 0.58,
+        "compression_ratio_max": 0.78,
+        "high_volatility_atr_ratio": 1.85,
+        "low_volatility_atr_ratio": 0.7,
+        "distance_from_value_extreme_atr": 1.4,
+        "spread_instability_ratio": 1.1
+    },
+    "sessions": {
+        "timezone": "UTC",
+        "allow_asia_session": true,
+        "session_close": "21:40",
+        "buckets": [
+            {
+                "name": "ASIA",
+                "start": "00:00",
+                "end": "06:59",
+                "live_allowed": true
+            },
+            {
+                "name": "LONDON_OPEN",
+                "start": "07:00",
+                "end": "08:59",
+                "live_allowed": true
+            },
+            {
+                "name": "LONDON",
+                "start": "09:00",
+                "end": "12:29",
+                "live_allowed": true
+            },
+            {
+                "name": "NY_OPEN",
+                "start": "12:30",
+                "end": "14:29",
+                "live_allowed": true
+            },
+            {
+                "name": "LONDON_NY_OVERLAP",
+                "start": "14:30",
+                "end": "16:30",
+                "live_allowed": true
+            },
+            {
+                "name": "LATE_NY",
+                "start": "16:31",
+                "end": "21:39",
+                "live_allowed": true
+            }
+        ],
+        "live_allowed_buckets": [
+            "ASIA",
+            "LONDON_OPEN",
+            "LONDON",
+            "NY_OPEN",
+            "LONDON_NY_OVERLAP",
+            "LATE_NY"
+        ]
+    },
+    "entry": {
+        "setup_entry_distance_atr_tolerance": 0.85,
+        "max_trigger_candle_size_atr": 1.1,
+        "value_zone_min_confluence_count": 2,
+        "breakout_retest_distance_atr_tolerance": 0.35,
+        "impulse_extension_limit_atr": 1.25,
+        "micro_structure_lookback_bars": 5,
+        "retest_lookback_bars": 4,
+        "reclaim_body_ratio_min": 0.45,
+        "rejection_wick_ratio_min": 0.35,
+        "breakout_buffer_atr": 0.12,
+        "max_setup_age_minutes": 15
+    },
+    "analytics": {
+        "decision_logging": {
+            "enabled": true,
+            "log_dir": "logs/strategy_decisions",
+            "retention_days": 90
+        },
+        "shadow_testing": {
+            "enabled": true,
+            "families": [
+                "TREND_PULLBACK_RECLAIM",
+                "LIQUIDITY_SWEEP_REVERSAL"
+            ],
+            "min_samples_before_recommendation": 50,
+            "required_win_rate": 0.45,
+            "required_expectancy": 0.2
+        },
+        "correlation_monitoring": {
+            "enabled": true,
+            "correlation_threshold": 0.7,
+            "concentration_threshold": 0.8
+        }
+    },
+    "position_sizing": {
+        "dynamic_enabled": true,
+        "base_risk_percent": 1.0,
+        "max_risk_percent": 2.0,
+        "min_risk_percent": 0.25,
+        "regime_multipliers": {
+            "TREND_CONTINUATION": 1.2,
+            "HIGH_VOLATILITY_BREAKOUT": 0.4,
+            "RANGE_MEAN_REVERSION": 0.6
+        }
+    },
+    "execution": {
+        "max_spread_points": 30.0,
+        "allow_high_volatility_reduced_risk": false,
+        "enable_adaptive_execution": false,
+        "enable_contextual_entry_mode": false,
+        "aggressive_entry_allowed": true,
+        "market_entry_max_drift_atr": 0.22,
+        "aggressive_limit_min_quality_score": 66.0,
+        "aggressive_limit_max_drift_atr": 0.55,
+        "limit_entry_max_drift_atr": 1.1,
+        "limit_trigger_max_atr": 1.55,
+        "allow_pyramiding": false,
+        "allow_multi_position": false,
+        "max_concurrent_positions": 1,
+        "max_positions_per_family": 1,
+        "max_total_open_risk_pct": 1.25,
+        "max_directional_risk_pct": 1.0,
+        "allow_same_direction_multi_strategy": false,
+        "allow_same_family_stack": false,
+        "hard_extension_atr": 1.8,
+        "breakout_wait_retest_max_atr": 1.2,
+        "compress_wait_retest_max_atr": 1.35,
+        "compress_limit_trigger_atr": 1.45,
+        "quality_tiers": {
+            "high_min_score": 64.0,
+            "medium_min_score": 54.0
+        },
+        "pending_policy": {
+            "default_expiry_minutes": 5,
+            "default_expiry_bars": 3
+        },
+        "manual_trading_enabled": true,
+        "manual_trade_comment_tag_dashboard": "MANUAL_DASH",
+        "manual_trade_comment_tag_telegram": "MANUAL_TG",
+        "order_comment_tag": "XAU_BOT",
+        "min_seconds_between_duplicate_attempts": 45,
+        "hard_rejection_cooldown_seconds": 180,
+        "post_send_verify_seconds": 2.0,
+        "post_send_verify_retries": 4,
+        "duplicate_history_minutes": 45
+    },
+    "validation": {
+        "enabled": true,
+        "daily_report_enabled": true,
+        "session_report_enabled": true,
+        "journal_consistency_enabled": false,
+        "disable_live_on_validation_failure": false,
+        "max_validation_failures_before_disable": 5,
+        "report_top_block_reasons_limit": 5,
+        "diagnostics_include_csv_consistency": false
+    },
+    "shorts": {
+        "require_strong_bearish_bias": true,
+        "min_bearish_score": 64.0,
+        "min_bias_delta": 24.0,
+        "min_bearish_slope_atr": 0.1,
+        "min_structure_score": 58.0,
+        "min_reward_headroom_atr": 0.9,
+        "max_extension_from_origin_atr": 1.45
+    },
+    "risk": {
+        "risk_percent": 1,
+        "min_balance": 500.0,
+        "live_risk_multiplier": 1.0,
+        "reduced_risk_multiplier_after_drawdown": 0.5,
+        "reduced_risk_trigger_drawdown_pct": 0.75,
+        "live_max_lot": 0.5,
+        "max_lot": 2,
+        "min_lot": 0.01,
+        "min_practical_volume": 0.01,
+        "max_trades_per_day": 20,
+        "max_trades_per_symbol": 20,
+        "max_daily_drawdown_pct": 3,
+        "max_session_drawdown_pct": 1.0,
+        "max_weekly_loss_percent": 8.0,
+        "max_consecutive_losses": 3,
+        "pause_after_losses_hours": 6,
+        "min_margin_level": 300,
+        "margin_protection_enabled": true,
+        "min_free_margin_buffer": 0.0,
+        "min_fitted_volume_ratio": 0.0,
+        "high_vol_atr_ratio_threshold": 1.5,
+        "high_vol_risk_multiplier": 0.5,
+        "short_risk_multiplier": 0.8,
+        "quality_buckets": {
+            "aplus_min_score": 82.0,
+            "aplus_risk_multiplier": 1.0,
+            "a_min_score": 70.0,
+            "a_risk_multiplier": 0.9,
+            "b_min_score": 58.0,
+            "b_risk_multiplier": 0.65,
+            "c_risk_multiplier": 0.0
+        },
+        "family_risk_multipliers": {
+            "lebprim_scalp": 0.9
+        }
+    },
+    "cooldowns": {
+        "execution_cooldown_minutes": 8,
+        "execution_cooldown_candles": 1,
+        "post_loss_cooldown_minutes": 45,
+        "consecutive_loss_cooldown_minutes": 90
+    },
+    "exit": {
+        "enable_family_specific_management": false,
+        "sl_buffer_atr": 0.35,
+        "sl_buffer_pips": 5,
+        "sl_min_pips": 30,
+        "sl_max_pips": 90,
+        "partial_tp_enabled": true,
+        "partial_tp_rr": 1.0,
+        "partial_min_rr": 0.95,
+        "partial_close_fraction": 0.5,
+        "breakeven_after_tp1": true,
+        "breakeven_activation_rr": 1.0,
+        "breakeven_min_bars": 2,
+        "breakeven_buffer_pips": 4,
+        "trailing_enabled": true,
+        "trailing_mode": "structure_atr",
+        "trailing_activation_rr": 1.8,
+        "trailing_atr_multiplier": 1.0,
+        "min_trailing_stop_pips": 18,
+        "max_trade_duration_minutes": 25,
+        "time_stop_early_minutes": 12.0,
+        "time_stop_mid_minutes": 24.0,
+        "time_stop_early_min_rr": 0.1,
+        "time_stop_mid_min_rr": 0.25,
+        "time_stop_min_progress_rr": 0.3,
+        "momentum_failure_exit_enabled": true,
+        "momentum_failure_min_bars": 3,
+        "momentum_failure_bars": 3,
+        "momentum_failure_min_progress_rr": 0.12,
+        "momentum_failure_max_adverse_close_fraction": 0.67,
+        "structure_break_exit_enabled": true,
+        "trailing_structure_lookback_bars": 3,
+        "final_tp_rr": 2.2,
+        "trade_history_resolve_lookback_minutes": 1440,
+        "min_sl_atr_multiplier": 1.5,
+        "family_profiles": {
+            "breakout": {
+                "label": "BreakoutManagementProfile",
+                "sl_buffer_atr_multiplier": 1.0,
+                "partial_tp_rr": 1.0,
+                "partial_min_rr": 1.0,
+                "final_tp_rr": 2.35,
+                "tp_extension_rr": 0.2,
+                "breakeven_after_tp1": true,
+                "breakeven_activation_rr": 1.05,
+                "breakeven_min_bars": 2,
+                "trailing_enabled": true,
+                "trailing_activation_rr": 1.9,
+                "max_trade_duration_minutes": 32,
+                "time_stop_early_minutes": 15.0,
+                "time_stop_mid_minutes": 26.0,
+                "time_stop_early_min_rr": 0.12,
+                "time_stop_mid_min_rr": 0.28,
+                "momentum_failure_exit_enabled": true,
+                "momentum_failure_min_bars": 4,
+                "momentum_failure_bars": 4,
+                "momentum_failure_rr_grace": 0.45,
+                "momentum_failure_min_progress_rr": 0.18,
+                "structure_break_exit_enabled": true,
+                "structure_break_lookback_bars": 3
+            },
+            "compress": {
+                "label": "CompressManagementProfile",
+                "sl_buffer_atr_multiplier": 1.08,
+                "partial_tp_rr": 0.95,
+                "partial_min_rr": 0.95,
+                "final_tp_rr": 2.1,
+                "tp_extension_rr": 0.15,
+                "breakeven_after_tp1": true,
+                "breakeven_activation_rr": 0.9,
+                "breakeven_min_bars": 2,
+                "trailing_enabled": true,
+                "trailing_activation_rr": 1.6,
+                "max_trade_duration_minutes": 35,
+                "time_stop_early_minutes": 14.0,
+                "time_stop_mid_minutes": 28.0,
+                "time_stop_early_min_rr": 0.1,
+                "time_stop_mid_min_rr": 0.24,
+                "momentum_failure_exit_enabled": true,
+                "momentum_failure_min_bars": 4,
+                "momentum_failure_bars": 5,
+                "momentum_failure_rr_grace": 0.4,
+                "momentum_failure_min_progress_rr": 0.15,
+                "structure_break_exit_enabled": true,
+                "structure_break_lookback_bars": 4
+            },
+            "lebprim": {
+                "label": "LebprimManagementProfile",
+                "sl_buffer_atr_multiplier": 0.9,
+                "partial_tp_rr": 0.8,
+                "partial_min_rr": 0.85,
+                "final_tp_rr": 1.45,
+                "marginal_final_tp_rr_cap": 1.2,
+                "breakeven_after_tp1": true,
+                "breakeven_activation_rr": 0.8,
+                "breakeven_min_bars": 3,
+                "trailing_enabled": false,
+                "trailing_activation_rr": 1.25,
+                "max_trade_duration_minutes": 18,
+                "time_stop_early_minutes": 8.0,
+                "time_stop_mid_minutes": 14.0,
+                "time_stop_early_min_rr": 0.05,
+                "time_stop_mid_min_rr": 0.18,
+                "momentum_failure_exit_enabled": true,
+                "momentum_failure_min_bars": 3,
+                "momentum_failure_bars": 2,
+                "momentum_failure_rr_grace": 0.65,
+                "momentum_failure_min_progress_rr": 0.1,
+                "structure_break_exit_enabled": true,
+                "structure_break_lookback_bars": 2
+            }
+        }
+    },
+    "journaling": {
+        "csv_retry_count": 3,
+        "csv_retry_delay_seconds": 0.25,
+        "setup_registry_retention_hours": 72,
+        "signal_registry_max_entries": 1500,
+        "analytics_summary_hour_utc": 21
+    },
+    "safety": {
+        "max_infra_failures_before_degraded": 3,
+        "degraded_mode_cooldown_minutes": 10,
+        "disable_live_on_journal_failure": true,
+        "max_journal_failures_before_disable": 2,
+        "require_manual_reset_after_daily_lock": true
+    },
+    "blackout_times": [
+        {
+            "start": "07:55",
+            "end": "08:10",
+            "reason": "London Open Whipsaw"
+        },
+        {
+            "start": "12:55",
+            "end": "13:10",
+            "reason": "NY Open Whipsaw"
+        }
+    ],
+    "telegram": {
+        "timeout_seconds": 5,
+        "signal_alerts": true,
+        "execution_success_alerts": true,
+        "execution_blocked_alerts": true,
+        "error_alerts": true,
+        "daily_summary_alerts": true,
+        "dashboard_change_alerts": true,
+        "remote_control_enabled": true,
+        "manual_trade_commands_enabled": true,
+        "admin_chat_ids": [
+            "1718493044"
+        ],
+        "admin_user_ids": [
+            "1718493044"
+        ],
+        "confirmation_required_commands": [
+            "LIVE",
+            "KILLSWITCH_OFF",
+            "CLOSE",
+            "CLOSEALL",
+            "BUY",
+            "SELL"
+        ],
+        "confirmation_ttl_seconds": 120,
+        "poll_interval_seconds": 3,
+        "polling_timeout_seconds": 20,
+        "enabled": true
+    },
+    "dashboard": {
+        "default_port": 8501,
+        "host": "0.0.0.0",
+        "refresh_seconds": 5,
+        "stale_heartbeat_seconds": 90,
+        "readonly_mode": false,
+        "theme": "dark"
+    },
+    "symbols": {
+        "XAUUSD": {
+            "enabled": true,
+            "display_name": "Gold Spot",
+            "tradeable": true
+        }
+    },
+    "storage": {
+        "database_path": "storage/bot.db",
+        "state_path": "storage/state.json",
+        "state_save_retry_count": 3,
+        "state_save_retry_delay_seconds": 0.35
+    },
+    "logging": {
+        "log_trades": true,
+        "log_signals": true,
+        "log_errors": true,
+        "console_output": true,
+        "daily_summary": true,
+        "execution_verbosity": "detailed",
+        "max_bytes": 2000000,
+        "backup_count": 5
+    },
+    "backtest": {
+        "selected_strategies": [
+            "XAU_BOT_BREAKOUT",
+            "XAU_BOT_COMPRESS"
+        ],
+        "execution_model": "current_bar_close",
+        "spread_model": {
+            "type": "fixed_points",
+            "points": 20
+        },
+        "slippage_model": {
+            "type": "fixed_points",
+            "points": 1
+        },
+        "commission_per_lot": 7.0,
+        "warmup_bars": 300
+    }
+}

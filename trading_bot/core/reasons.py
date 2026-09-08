@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from enum import Enum
+
+
+class ReasonCode(str, Enum):
+    """Shared reason vocabulary for order, lifecycle, and journal events."""
+
+    CANDIDATE_REJECTED_STRATEGY = "candidate_rejected_strategy"
+    CANDIDATE_REJECTED_RISK = "candidate_rejected_risk"
+    CANDIDATE_REJECTED_SYSTEM = "candidate_rejected_system"
+    EXECUTION_PLAN_CREATED = "execution_plan_created"
+    ORDER_RESIZED_AND_SUBMITTED = "order_resized_and_submitted"
+    ORDER_MISSED_DRIFT = "order_missed_drift"
+    ORDER_MISSED_STATE_BLOCK = "order_missed_state_block"
+    ORDER_MISSED_RISK_BLOCK = "order_missed_risk_block"
+    ORDER_REJECTED = "order_rejected"
+    ORDER_PENDING = "pending_order_created"
+    ORDER_FILLED = "pending_order_filled"
+    ORDER_EXPIRED = "pending_order_expired"
+    ORDER_CANCELLED = "pending_order_cancelled"
+    ORDER_MISSING = "pending_order_missing"
+    BROKER_FAILURE = "broker_failure"
+    SYNC_FAILURE = "sync_failure"
+    STOP_MODIFIED = "stop_modified"
+    BREAKEVEN_ACTIVATED = "breakeven_activated"
+    TRAILING_ACTIVATED = "trailing_activated"
+    PARTIAL_CLOSE = "partial_close"
+    CLOSE_FULL = "close_full"
+    TIME_STOP_EXIT = "time_stop_exit"
+    MAX_DURATION_EXIT = "MAX_DURATION_EXIT"
+    MOMENTUM_FAILURE_EXIT = "momentum_failure_exit"
+    STRUCTURE_BREAK_EXIT = "structure_break_exit"
+    STOP_LOSS_EXIT = "sl_hit"
+    TAKE_PROFIT_EXIT = "tp_hit"
+    MANUAL_CLOSE = "manual_close"
+    EMERGENCY_CLOSE = "emergency_close"
+    POSITION_CLOSED = "position_closed"
+    FORCED_END_OF_TEST = "forced_end_of_test"
+    STOP_TOO_WIDE_POINTS = "stop_too_wide_points"
+    STOP_TOO_WIDE_ATR = "stop_too_wide_atr"
+    NOISY_TRIGGER_CANDLE = "noisy_trigger_candle"
+    OVERSIZED_TRIGGER_CANDLE = "oversized_trigger_candle"
+    EXHAUSTION_TRIGGER_CANDLE = "exhaustion_trigger_candle"
+    CHASING_ENTRY = "chasing_entry"
+    ENTRY_DRIFT_TOO_FAR = "entry_drift_too_far"
+    WEAK_SHORT_BIAS = "weak_short_bias"
+    WEAK_SHORT_SLOPE = "weak_short_slope"
+    SHORT_REWARD_CONSTRAINED = "short_reward_constrained"
+
+
+class JournalEventType(str, Enum):
+    """Journal event names shared across live, manual, and replay paths."""
+
+    CANDIDATE_CREATED = "CANDIDATE_CREATED"
+    CANDIDATE_REJECTED_STRATEGY = "CANDIDATE_REJECTED_STRATEGY"
+    CANDIDATE_REJECTED_RISK = "CANDIDATE_REJECTED_RISK"
+    CANDIDATE_REJECTED_SYSTEM = "CANDIDATE_REJECTED_SYSTEM"
+    EXECUTION_PLAN_CREATED = "EXECUTION_PLAN_CREATED"
+    ORDER_SUBMITTED = "ORDER_SUBMITTED"
+    ORDER_RESIZED_AND_SUBMITTED = "ORDER_RESIZED_AND_SUBMITTED"
+    ORDER_PENDING = "ORDER_PENDING"
+    ORDER_FILLED = "ORDER_FILLED"
+    ORDER_EXPIRED = "ORDER_EXPIRED"
+    ORDER_CANCELLED = "ORDER_CANCELLED"
+    ORDER_MISSED_DRIFT = "ORDER_MISSED_DRIFT"
+    ORDER_MISSED_STATE_BLOCK = "ORDER_MISSED_STATE_BLOCK"
+    ORDER_MISSED_RISK_BLOCK = "ORDER_MISSED_RISK_BLOCK"
+    TRADE_OPENED = "TRADE_OPENED"
+    TRADE_MANAGED = "TRADE_MANAGED"
+    TRADE_CLOSED = "TRADE_CLOSED"
+    TRADE_FINALIZED = "TRADE_FINALIZED"
+    EXECUTION_FAILURE = "EXECUTION_FAILURE"
+
+
+class ManagementAction(str, Enum):
+    """Normalized management action names emitted by the risk manager."""
+
+    PARTIAL_CLOSE = "partial_close"
+    MOVE_STOP = "move_stop"
+    CLOSE_FULL = "close_full"
