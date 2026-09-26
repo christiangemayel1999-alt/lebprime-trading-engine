@@ -90,6 +90,8 @@
         },
         indicatorLabUi: { dirty: false, pauseRefreshUntil: 0, submitting: false, message: "", error: "", lastCreatedCampaignId: null },
         lebprimeLive: null,
+        lebprimeTrades: { pending: [], open: [], closed: [], failed: [], summary: {} },
+        lebprimePerformance: { summary: {}, by_status: [], breakdown: [], notes: [] },
         activeSection: "overview",
     };
     let preservedUiState = null;
@@ -311,7 +313,7 @@
     };
 
     const replayState = () => state.backtestReplay || {};
-    const replayIsVisible = () => state.activeSection === "backtest-replay";
+    const replayIsVisible = () => state.activeSection === "research" && document.getElementById("research-replay")?.classList.contains("active");
     const replayEventTone = (type) => {
         const normalized = textOr(type, "UNKNOWN").toLowerCase();
         if (normalized.includes("blocked")) return "warning";
@@ -808,7 +810,9 @@
             replay.runStatus = runState;
             replay.loading = false;
             if (!options.silent) {
-                state.activeSection = "backtest-replay";
+                state.activeSection = "research";
+                activateSection("research");
+                document.querySelector('[data-bs-target="#research-replay"]')?.click();
             }
             replaySetMessage(`Loaded replay run #${targetRunId} (${runState.toLowerCase()}).`);
             scheduleReplayRender();
@@ -1832,27 +1836,6 @@
         }
     }
 
-    async function runManual(path, payload = {}, refresh = true) {
-        if (isReadonly() && path !== "/api/manual/positions") {
-            setFeedback("Dashboard is in readonly mode.", true);
-            return;
-        }
-        try {
-            const result = path === "/api/manual/positions"
-                ? await api(path)
-                : await api(path, { method: "POST", body: JSON.stringify({ actor: "dashboard", ...payload }) });
-            setFeedback(result.message || "Manual action completed");
-            if (refresh) {
-                await refreshPositions();
-                await refreshStatus();
-                await refreshLogs();
-            }
-            return result;
-        } catch (error) {
-            setFeedback(error.message, true);
-            throw error;
-        }
-    }
 
     async function switchMode(mode) {
         if (isReadonly()) {
@@ -1989,31 +1972,6 @@
         }
     }
 
-    function blockedFamilySummary(blocked) {
-        const counts = {};
-        (blocked || []).forEach((item) => {
-            const key = `${item.setup_family || "UNKNOWN"} | ${item.reason_code || "unknown"}`;
-            counts[key] = (counts[key] || 0) + 1;
-        });
-        return Object.entries(counts)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 6);
-    }
-
-    function latestBlockLookup(entries) {
-        const lookup = {};
-        (entries || []).forEach((entry) => {
-            const key = entry.group_name || "UNKNOWN";
-            if (!lookup[key]) {
-                lookup[key] = [];
-            }
-            lookup[key].push(`${entry.reason_code} (${entry.count})`);
-        });
-        Object.keys(lookup).forEach((key) => {
-            lookup[key] = lookup[key].slice(0, 3).join(", ");
-        });
-        return lookup;
-    }
 
     async function exportConfigText() {
         try {
@@ -2058,7 +2016,7 @@
         const metadata = state.configMetadata || {};
         const lastApply = control.last_config_apply || {};
         const restartReasons = control.restart_required_reasons || [];
-        document.getElementById("section-config").innerHTML = `
+        document.getElementById("section-config-core").innerHTML = `
             <div class="row g-3">
                 <div class="col-12 col-xl-5">
                     <div class="card border-0 shadow-sm">
@@ -2125,307 +2083,46 @@
         return `<div class="card border-0 metric-card shadow-sm ${danger ? "live-warning" : ""}"><div class="card-body"><div class="text-secondary small">${esc(label)}</div><div class="metric-value">${esc(value)}</div></div></div>`;
     }
 
+
     function renderOverview() {
-        const runtime = state.status.runtime || {};
-        const metrics = runtime.metrics || {};
-        const control = state.status.control || {};
-        const runtimeControl = control.runtime || {};
-        const blocked = runtime.blocked_setups || [];
-        const rejections = runtime.rejection_summary || [];
-        const familySummary = blockedFamilySummary(blocked);
+        const control = asObject(state.status.control);
+        const runtimeControl = asObject(control.runtime);
+        const worker = currentWorkerStatus();
+        const lebprime = asObject(state.lebprimeLive);
+        const trades = asObject(state.lebprimeTrades.summary);
+        const contexts = asArray(lebprime.contexts);
+        const unhealthyContexts = contexts.filter((row) => !["HEALTHY", "IDLE"].includes(textOr(row.status).toUpperCase()));
         document.getElementById("section-overview").innerHTML = `
             <div class="row g-3 mb-3">
-                <div class="col-12 col-xl-8"><div class="section-grid">
-                    ${metric("Bot Status", metrics.bot_status || "N/A")}
-${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode || "N/A", (state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE")}
-                    ${metric("Open Positions", num(metrics.open_positions).toFixed(0))}
-                    ${metric("Today PnL", num(metrics.today_pnl).toFixed(2))}
-                    ${metric("Daily Loss Used", `${num(metrics.daily_loss_used_pct).toFixed(1)}%`)}
-                    ${metric("Current Spread", num(metrics.spread).toFixed(2))}
-                    ${metric("Session", runtimeControl.session || "N/A")}
-                    ${metric("Regime", runtimeControl.regime || "N/A")}
-                    ${metric("Win Rate", `${num(metrics.win_rate).toFixed(2)}%`)}
-                    ${metric("Active Strategies", num(metrics.enabled_strategy_count).toFixed(0))}
-                    ${metric("Enabled Families", num(metrics.enabled_family_count).toFixed(0))}
-                </div></div>
-<div class="col-12 col-xl-4"><div class="card border-0 shadow-sm ${((state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE") ? "live-warning" : ""}"><div class="card-body">
-                    <h2 class="h5">Live Monitoring</h2>
-                    <div>Last heartbeat: ${esc(runtimeControl.heartbeat_at || "N/A")}</div>
-                    <div>Last execution: ${esc(runtimeControl.last_execution_result || "N/A")}</div>
-                    <div>Broker login: ${esc(runtimeControl.account_login || "N/A")}</div>
-                    <div>Trade allowed: ${runtimeControl.trade_allowed ? "Yes" : "No"}</div>
-                    <div>Execution paused: ${control.execution_paused ? "Yes" : "No"}</div>
-                </div></div></div>
+                <div class="col-6 col-lg-3">${metric("LebPrime", lebprime.started ? "RUNNING" : "STOPPED", !lebprime.started)}</div>
+                <div class="col-6 col-lg-3">${metric("Execution", lebprime.execution_mode || "DRY", lebprime.execution_mode === "LIVE")}</div>
+                <div class="col-6 col-lg-3">${metric("MT5 Trade Allowed", runtimeControl.trade_allowed ? "YES" : "NO", !runtimeControl.trade_allowed)}</div>
+                <div class="col-6 col-lg-3">${metric("Worker", workerStateLabel(worker), workerStateLabel(worker) !== "RUNNING")}</div>
+                <div class="col-6 col-lg-3">${metric("Contexts", contexts.length.toFixed(0), unhealthyContexts.length > 0)}</div>
+                <div class="col-6 col-lg-3">${metric("Pending Orders", num(trades.pending).toFixed(0))}</div>
+                <div class="col-6 col-lg-3">${metric("Open Entries", num(trades.open).toFixed(0))}</div>
+                <div class="col-6 col-lg-3">${metric("Failed Orders", num(trades.failed).toFixed(0), num(trades.failed) > 0)}</div>
             </div>
             <div class="row g-3">
-                <div class="col-12 col-xl-4"><div class="card border-0 shadow-sm mb-3"><div class="card-body">
-                    <h2 class="h5">Top Rejections (24h)</h2>
-                    ${(rejections.length ? rejections : [{ reason_code: "none", count: 0 }]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item.reason_code)}</span><span class="badge text-bg-dark">${esc(item.count)}</span></div>`).join("")}
-                </div></div><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Blocked Families</h2>
-                    ${(familySummary.length ? familySummary : [["none", 0]]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item[0])}</span><span class="badge text-bg-secondary">${esc(item[1])}</span></div>`).join("")}
+                <div class="col-12 col-xl-5"><div class="card border-0 shadow-sm"><div class="card-body">
+                    <h2 class="h5">Operational State</h2>
+                    <div>LebPrime heartbeat: ${esc(lebprime.service_heartbeat || "N/A")}</div>
+                    <div>LebPrime PID: ${esc(lebprime.service_pid || "N/A")}</div>
+                    <div>Startup block: ${esc(lebprime.startup_block_reason || "none")}</div>
+                    <div>MT5 account: ${esc(runtimeControl.account_login || "N/A")}</div>
+                    <div>Runtime heartbeat: ${esc(runtimeControl.heartbeat_at || "N/A")}</div>
+                    <div>Execution paused: ${control.execution_paused ? "Yes" : "No"}</div>
+                    <div>Kill switch: ${control.kill_switch ? "Enabled" : "Disabled"}</div>
+                    <div>New entries: ${control.signal_generation_enabled === false ? "Disabled" : "Enabled"}</div>
                 </div></div></div>
-                <div class="col-12 col-xl-8"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Recently Blocked Setups</h2>
-                    <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Time</th><th>Family</th><th>Context</th><th>Reason</th><th>Scores</th></tr></thead>
-                    <tbody>${blocked.map((item) => `<tr><td>${esc(item.timestamp)}</td><td>${esc(item.setup_family)}</td><td>${esc(item.side)} | ${esc(item.session_name)} | ${esc(item.regime_name)}</td><td><span class="badge text-bg-secondary">${esc(item.reason_code)}</span><div class="small text-secondary mt-1">${esc(item.reason)}</div></td><td class="small">T ${num(item.trend_score).toFixed(0)} / S ${num(item.setup_score).toFixed(0)} / G ${num(item.trigger_score).toFixed(0)} / E ${num(item.entry_score).toFixed(1)}</td></tr>`).join("") || `<tr><td colspan="5" class="text-secondary">No blocked setups found.</td></tr>`}</tbody></table></div>
+                <div class="col-12 col-xl-7"><div class="card border-0 shadow-sm"><div class="card-body">
+                    <h2 class="h5">LebPrime Contexts</h2>
+                    <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Symbol</th><th>Timeframe</th><th>Status</th><th>Last Scan</th><th>Zones</th><th>Pending</th><th>Active</th><th>Error</th></tr></thead><tbody>${contexts.map((row) => `<tr><td>${esc(row.logical_symbol)}</td><td>${esc(row.timeframe)}</td><td>${badge(row.status || "IDLE", row.status === "HEALTHY" ? "success" : row.status === "ERROR" ? "danger" : "secondary")}</td><td>${esc(row.last_scan_time || "-")}</td><td>${esc(row.live_zones ?? 0)}</td><td>${esc(row.pending_limits ?? 0)}</td><td>${esc(row.active_trades ?? 0)}</td><td>${esc(row.last_error || "-")}</td></tr>`).join("") || `<tr><td colspan="8" class="text-secondary">LebPrime contexts will appear after runtime initialization.</td></tr>`}</tbody></table></div>
                 </div></div></div>
             </div>`;
     }
 
-    function renderBotControl() {
-        const bot = state.config.bot || {};
-        const execution = state.config.execution || {};
-        const control = state.status.control || {};
-        const entryModes = state.config.strategy?.entry_modes || {};
-        const executionMode = currentExecutionMode();
-        const options = normalizeModeOptions(state.modeControl.options);
-        const selectedExecutionMode = executionMode.selected_mode || "V2_FULL";
-        const container = safeSetHtml("section-bot-control", `
-            <div class="row g-3">
-                <div class="col-12 col-xl-7"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Mode And Execution</h2>
-                    ${select("bot-trading-mode", "Trading Mode", ["DRY_RUN", "LIVE", "DEMO", "VALIDATION_TEST", "BACKTEST"], bot.trading_mode)}
-                    <div class="dashboard-subpanel mb-3">
-                        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
-                            <div>
-                                <div class="text-uppercase small text-secondary fw-semibold">Execution Mode</div>
-                                <div class="small text-secondary">Switch between the baseline engine and the full V2 orchestration path.</div>
-                            </div>
-                            ${badge(executionMode.selected_mode || "UNKNOWN", stateTone(executionMode.selected_mode))}
-                        </div>
-                        <div class="dashboard-mode-switch" role="radiogroup" aria-label="Execution Mode">
-                            ${options.map((option, index) => `
-                                <input class="btn-check" type="radio" name="bot-execution-mode" id="bot-execution-mode-${index}" value="${esc(option.value)}" ${option.value === selectedExecutionMode ? "checked" : ""}>
-                                <label class="btn btn-outline-light" for="bot-execution-mode-${index}">
-                                    <span class="d-block fw-semibold">${esc(option.value)}</span>
-                                    <span class="small text-secondary">${esc(option.label)}</span>
-                                </label>
-                            `).join("")}
-                        </div>
-                        <div class="dashboard-summary-card mt-3">
-                            <div class="small text-uppercase text-secondary fw-semibold mb-2">Resolved Summary</div>
-                            ${renderExecutionModeSummary(executionMode)}
-                        </div>
-                        ${state.modeControl.loading ? `<div class="small text-secondary mt-3">Loading execution mode from /api/mode...</div>` : ""}
-                        ${state.modeControl.error ? `<div class="alert alert-danger mt-3 mb-0 py-2">${esc(state.modeControl.error)} <button class="btn btn-sm btn-outline-light ms-2" id="retry-execution-mode">Retry</button></div>` : ""}
-                    </div>
-                    ${field("bot-rollout-phase", "Rollout Phase", bot.rollout_phase, "number", "1")}
-                    ${toggle("bot-force-reduced-risk", "Force Reduced Risk Mode", !!bot.force_reduced_risk_mode)}
-                    <div class="small text-secondary">Allow Live Execution: ${bot.allow_live_execution ? "Yes" : "No"} (derived from trading mode)</div>
-                    ${toggle("control-auto-execution", "Auto Execution Enabled", !(control.auto_execution_enabled === false))}
-                    ${toggle("control-new-entries", "New Entries / Signals Enabled", !(control.signal_generation_enabled === false))}
-                    ${toggle("manual-trading-enabled", "Manual Trading Enabled", execution.manual_trading_enabled !== false)}
-                    ${field("execution-order-comment", "Order Comment Tag", execution.order_comment_tag || "", "text")}
-                    ${field("execution-slippage", "Slippage Tolerance", state.config.mt5?.deviation || 10, "number", "1")}
-                    ${field("entry-confirmed-score", "Confirmed Entry Score", entryModes.confirmed_min_entry_score || 78, "number", "0.1")}
-                    ${field("entry-aggressive-score", "Aggressive Entry Score", entryModes.aggressive_min_entry_score || 88, "number", "0.1")}
-                    <button class="btn btn-primary mt-3" id="save-bot-control">Save Mode And Controls</button>
-                </div></div></div>
-                <div class="col-12 col-xl-5"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Runtime Controls</h2>
-                    ${toggle("control-paused", "Pause Execution", !!control.execution_paused)}
-                    ${toggle("control-kill-switch", "Kill Switch Enabled", !!control.kill_switch)}
-                    ${toggle("dashboard-readonly-mode", "Readonly Dashboard", !!state.config.dashboard?.readonly_mode)}
-                    <div class="small text-secondary mt-2">Auth ${state.auth?.enabled ? `enabled for ${esc(state.auth.username || "configured user")}` : "disabled"}</div>
-                    <button class="btn btn-outline-light mt-3" id="apply-runtime-control">Apply Runtime Controls</button>
-                </div></div></div>
-            </div>`);
-        if (!container) return;
-        dashboardLog("render", "renderBotControl started", { container: "section-bot-control", selectedMode: selectedExecutionMode });
-        const retryModeButton = document.getElementById("retry-execution-mode");
-        if (retryModeButton) {
-            retryModeButton.onclick = () => refreshExecutionMode();
-        }
-        document.getElementById("save-bot-control").onclick = async () => {
-            const desiredMode = val("bot-trading-mode");
-            const desiredExecutionMode = radioValue("bot-execution-mode", selectedExecutionMode);
-            if (desiredMode !== bot.trading_mode) {
-                const modeApplied = await switchMode(desiredMode);
-                if (!modeApplied) {
-                    return;
-                }
-            }
-            let modeUpdated = false;
-            if (desiredExecutionMode !== selectedExecutionMode) {
-                try {
-                    dashboardLog("mode", "POST /api/mode", { execution_mode: desiredExecutionMode });
-                    const modeResult = await api("/api/mode", { method: "POST", body: JSON.stringify({ actor: "dashboard", execution_mode: desiredExecutionMode }) });
-                    const normalizedMode = normalizeModeData(modeResult.mode || modeResult);
-                    state.config.mode = normalizedMode;
-                    state.modeControl.mode = normalizedMode;
-                    state.modeControl.options = normalizeModeOptions(modeResult.options);
-                    state.modeControl.error = null;
-                    modeUpdated = true;
-                    dashboardLog("mode", "execution mode payload received", normalizedMode);
-                } catch (error) {
-                    state.modeControl.error = error.message;
-                    setFeedback(error.message, true);
-                    renderAll({ force: true });
-                    return;
-                }
-            }
-            const updates = {
-                bot: { rollout_phase: num(val("bot-rollout-phase")), force_reduced_risk_mode: on("bot-force-reduced-risk") },
-                mt5: { deviation: num(val("execution-slippage")) },
-                execution: { order_comment_tag: val("execution-order-comment"), manual_trading_enabled: on("manual-trading-enabled") },
-                strategy: { entry_modes: { confirmed_min_entry_score: num(val("entry-confirmed-score")), aggressive_min_entry_score: num(val("entry-aggressive-score")) } },
-            };
-            const needsPatch = (
-                num(bot.rollout_phase) !== num(updates.bot.rollout_phase)
-                || !!bot.force_reduced_risk_mode !== !!updates.bot.force_reduced_risk_mode
-                || num(state.config.mt5?.deviation) !== num(updates.mt5.deviation)
-                || textOr(execution.order_comment_tag) !== textOr(updates.execution.order_comment_tag)
-                || !!(execution.manual_trading_enabled !== false) !== !!updates.execution.manual_trading_enabled
-                || num(entryModes.confirmed_min_entry_score) !== num(updates.strategy.entry_modes.confirmed_min_entry_score)
-                || num(entryModes.aggressive_min_entry_score) !== num(updates.strategy.entry_modes.aggressive_min_entry_score)
-            );
-            if (needsPatch) {
-                await saveConfigPatch(updates, "bot_control_update");
-            } else if (modeUpdated) {
-                setFeedback(`Execution mode saved as ${desiredExecutionMode}.`);
-                await refreshConfig();
-                await refreshStatus();
-            } else {
-                setFeedback("No bot-control changes detected.");
-            }
-        };
-        document.getElementById("apply-runtime-control").onclick = async () => {
-            await runControl(on("control-paused") ? "/api/control/pause" : "/api/control/resume", { enabled: true });
-            await runControl("/api/runtime/live-enabled", { enabled: on("control-auto-execution") });
-            await runControl("/api/runtime/new-entries", { enabled: on("control-new-entries") });
-            await runControl("/api/control/kill-switch", { enabled: on("control-kill-switch"), reason: on("control-kill-switch") ? "dashboard_kill_switch" : null });
-            try {
-                await api("/api/control/readonly", { method: "POST", body: JSON.stringify({ actor: "dashboard", enabled: on("dashboard-readonly-mode") }) });
-                await refreshConfig();
-                await refreshStatus();
-            } catch (error) {
-                setFeedback(error.message, true);
-            }
-        };
-    }
 
-    function renderFamilies() {
-        const families = state.config.strategy?.setup_families || {};
-        const familyBlocks = latestBlockLookup(state.status.runtime?.family_block_matrix || []);
-        document.getElementById("section-families").innerHTML = `
-            <div class="card border-0 shadow-sm"><div class="card-body">
-                <h2 class="h5">Strategy Families</h2>
-                <div class="table-responsive"><table class="table strategy-table"><thead><tr><th>Family</th><th>Enabled</th><th>Live Allowed</th><th>Sessions</th><th>Regimes</th><th>Recent Blocks</th></tr></thead>
-                <tbody>${Object.entries(families).map(([key, family]) => `<tr><td>${esc(key)}</td><td><input type="checkbox" data-family-enabled="${key}" ${family.enabled ? "checked" : ""}></td><td><input type="checkbox" data-family-live="${key}" ${family.live_allowed ? "checked" : ""}></td><td>${small(`family-sessions-${key}`, (family.sessions || []).join(", "))}</td><td>${small(`family-regimes-${key}`, (family.regimes || []).join(", "))}</td><td class="small text-secondary">${esc(familyBlocks[key] || "none")}</td></tr>`).join("")}</tbody></table></div>
-                <button class="btn btn-primary" id="save-families">Save Family Controls</button>
-            </div></div>`;
-        document.getElementById("save-families").onclick = async () => {
-            const updates = { strategy: { setup_families: {} } };
-            Object.keys(families).forEach((key) => {
-                updates.strategy.setup_families[key] = { ...families[key], enabled: document.querySelector(`[data-family-enabled="${key}"]`).checked, live_allowed: document.querySelector(`[data-family-live="${key}"]`).checked, sessions: csv(val(`family-sessions-${key}`)), regimes: csv(val(`family-regimes-${key}`)) };
-            });
-            await saveConfigPatch(updates, "family_toggle_update");
-        };
-    }
-
-    function renderStrategies() {
-        const controls = state.config.strategy?.setup_controls || {};
-        const lebprimeConfig = state.config.lebprime_v3_4_0 || {};
-        const lebprimeStatus = state.lebprimeLive || {};
-        const lebprimeContexts = asArray(lebprimeStatus.contexts);
-        const selectedSymbols = new Set(asArray(lebprimeConfig.symbols));
-        const selectedTimeframes = new Set(asArray(lebprimeConfig.timeframes));
-        const allSessions = [...new Set(Object.values(controls).flatMap((setup) => setup.allowed_sessions || []))].sort();
-        const strategyBlocks = latestBlockLookup(state.status.runtime?.strategy_block_matrix || []);
-        document.getElementById("section-strategies").innerHTML = `
-            <div class="card border-0 shadow-sm mb-3"><div class="card-body">
-                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-                    <div><h2 class="h5 mb-1">lebprime_v3_4_0</h2><div class="small text-secondary">${esc(lebprimeStatus.startup_block_reason || (lebprimeStatus.started ? "Runtime active" : "Disabled or awaiting startup"))}</div></div>
-                    <div>${badge(lebprimeConfig.enabled ? (lebprimeConfig.execution_mode === "LIVE" ? "LIVE DEMO" : "DRY") : "DISABLED", lebprimeConfig.enabled ? "warning" : "secondary")}</div>
-                </div>
-                <div class="row g-3 mb-3">
-                    <div class="col-md-2"><label class="form-label small text-secondary">Enabled</label><div><input type="checkbox" id="lebprime-live-enabled" ${lebprimeConfig.enabled ? "checked" : ""}></div></div>
-                    <div class="col-md-2"><label class="form-label small text-secondary">Live / Dry</label><select class="form-select" id="lebprime-live-mode"><option value="DRY" ${lebprimeConfig.execution_mode !== "LIVE" ? "selected" : ""}>Dry</option><option value="LIVE" ${lebprimeConfig.execution_mode === "LIVE" ? "selected" : ""}>Live (demo only)</option></select></div>
-                    <div class="col-md-4"><label class="form-label small text-secondary">Symbols</label><div class="d-flex flex-wrap gap-3">${["XAUUSD", "US30", "NAS100"].map((symbol) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-symbol="${symbol}" ${selectedSymbols.has(symbol) ? "checked" : ""}>${symbol}</label>`).join("")}</div></div>
-                    <div class="col-md-4"><label class="form-label small text-secondary">Timeframes</label><div class="d-flex flex-wrap gap-3">${["M1", "M3", "M5", "M15", "M30", "M45"].map((timeframe) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-timeframe="${timeframe}" ${selectedTimeframes.has(timeframe) ? "checked" : ""}>${timeframe}</label>`).join("")}</div></div>
-                </div>
-                <div class="row g-2 mb-3">
-                    <div class="col-6 col-md-3"><div class="small text-secondary">Active zone families</div><div class="h5 mb-0">${num(lebprimeStatus.active_zone_families).toFixed(0)}</div></div>
-<div class="col-6 col-md-3"><div class="small text-secondary">Internal Pending LIMITs</div><div class="h5 mb-0">${num(lebprimeStatus.pending_orders).toFixed(0)}</div></div>
-<div class="col-6 col-md-3"><div class="small text-secondary">Broker Filled Positions</div><div class="h5 mb-0">${num(lebprimeStatus.active_positions).toFixed(0)}</div></div>
-                    <div class="col-6 col-md-3"><div class="small text-secondary">Duplicate suppressed</div><div class="h5 mb-0">${num(lebprimeStatus.duplicate_suppressed_zones).toFixed(0)}</div></div>
-                </div>
-                <div class="table-responsive mb-3"><table class="table table-sm strategy-table"><thead><tr><th>Context</th><th>Health</th><th>Last Closed Candle</th><th>Last Scan</th><th>Candidates</th><th>Live Zones</th><th>Pending LIMITs</th><th>Active Trades</th><th>Last Error</th><th>Heartbeat</th></tr></thead><tbody>
-                    ${lebprimeContexts.map((row) => `<tr><td>${esc(row.logical_symbol)} ${esc(row.timeframe)}</td><td>${badge(row.status || "IDLE", row.status === "HEALTHY" ? "success" : row.status === "ERROR" ? "danger" : "secondary")}</td><td>${esc(row.last_closed_candle || "-")}</td><td>${esc(row.last_scan_time || "-")}</td><td>${num(row.candidate_count).toFixed(0)}</td><td>${num(row.live_zones).toFixed(0)}</td><td>${num(row.pending_limits).toFixed(0)}</td><td>${num(row.active_trades).toFixed(0)}</td><td>${esc(row.last_error || "-")}</td><td>${esc(row.heartbeat || "-")}</td></tr>`).join("") || `<tr><td colspan="10" class="text-secondary">Context status will appear after the runtime initializes.</td></tr>`}
-                </tbody></table></div>
-                <button class="btn btn-primary" id="save-lebprime-live">Save LebPrime v3.4.0</button>
-            </div></div>
-            <div class="card border-0 shadow-sm"><div class="card-body">
-                <div class="row g-2 align-items-end mb-3">
-                    <div class="col-md-4"><label class="form-label small text-secondary">Search</label><input class="form-control" id="strategy-filter" placeholder="Search strategy"></div>
-                    <div class="col-md-2"><label class="form-label small text-secondary">Enabled</label><select class="form-select" id="strategy-enabled-filter"><option value="">All</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></div>
-                    <div class="col-md-2"><label class="form-label small text-secondary">Direction</label><select class="form-select" id="strategy-direction-filter"><option value="">Any</option><option value="long">Long Enabled</option><option value="short">Short Enabled</option><option value="both">Both Enabled</option></select></div>
-                    <div class="col-md-2"><label class="form-label small text-secondary">Session</label><select class="form-select" id="strategy-session-filter"><option value="">All</option>${allSessions.map((session) => `<option>${esc(session)}</option>`).join("")}</select></div>
-                    <div class="col-md-2"><button class="btn btn-outline-light w-100" id="strategy-apply-filter">Filter</button></div>
-                </div>
-                <div class="table-responsive"><table class="table strategy-table" id="strategies-table"><thead><tr><th>Strategy</th><th>Enabled</th><th>Confirm</th><th>Trend Align</th><th>Trend</th><th>Setup</th><th>Trigger</th><th>Entry</th><th>Spread</th><th>SLx</th><th>TPx</th><th>Cooldown</th><th>Max/Session</th><th>Sessions</th><th>Regimes</th><th>Recent Blocks</th><th>Long</th><th>Short</th></tr></thead>
-                <tbody>${Object.entries(controls).map(([key, setup]) => `<tr data-strategy="${key}" data-enabled="${setup.enabled ? "enabled" : "disabled"}" data-long="${setup.allow_long ? "1" : "0"}" data-short="${setup.allow_short ? "1" : "0"}" data-sessions="${esc((setup.allowed_sessions || []).join('|'))}"><td>${esc(key)}</td><td><input type="checkbox" data-setup-enabled="${key}" ${setup.enabled ? "checked" : ""}></td><td><input type="checkbox" data-setup-confirm="${key}" ${setup.confirmation_required !== false ? "checked" : ""}></td><td><input type="checkbox" data-setup-trend-align="${key}" ${setup.require_trend_alignment !== false ? "checked" : ""}></td><td>${small(`setup-min-trend-${key}`, setup.min_trend_score ?? "", "number", "0.1")}</td><td>${small(`setup-min-setup-${key}`, setup.min_setup_score ?? "", "number", "0.1")}</td><td>${small(`setup-min-trigger-${key}`, setup.min_trigger_score ?? "", "number", "0.1")}</td><td>${small(`setup-min-entry-${key}`, setup.min_entry_score ?? 75, "number", "0.1")}</td><td>${small(`setup-spread-${key}`, setup.max_spread_points ?? 25, "number", "0.1")}</td><td>${small(`setup-sl-${key}`, setup.sl_multiplier ?? 1, "number", "0.1")}</td><td>${small(`setup-tp-${key}`, setup.tp_multiplier ?? 1, "number", "0.1")}</td><td>${small(`setup-cooldown-${key}`, setup.cooldown_minutes ?? 20, "number", "1")}</td><td>${small(`setup-max-session-${key}`, setup.max_trades_per_session ?? 2, "number", "1")}</td><td>${small(`setup-sessions-${key}`, (setup.allowed_sessions || []).join(", "))}</td><td>${small(`setup-regimes-${key}`, (setup.allowed_regimes || []).join(", "))}</td><td class="small text-secondary">${esc(strategyBlocks[key] || "none")}</td><td><input type="checkbox" data-setup-long="${key}" ${setup.allow_long ? "checked" : ""}></td><td><input type="checkbox" data-setup-short="${key}" ${setup.allow_short ? "checked" : ""}></td></tr>`).join("")}</tbody></table></div>
-                <button class="btn btn-primary" id="save-strategies">Save Strategy Controls</button>
-            </div></div>`;
-
-        document.getElementById("save-lebprime-live").onclick = async () => {
-            const symbols = Array.from(document.querySelectorAll("[data-lebprime-symbol]:checked")).map((node) => node.dataset.lebprimeSymbol);
-            const timeframes = Array.from(document.querySelectorAll("[data-lebprime-timeframe]:checked")).map((node) => node.dataset.lebprimeTimeframe);
-            await saveConfigPatch({
-                lebprime_v3_4_0: {
-                    ...lebprimeConfig,
-                    enabled: on("lebprime-live-enabled"),
-                    execution_mode: val("lebprime-live-mode") || "DRY",
-                    symbols,
-                    timeframes,
-                },
-            }, "lebprime_v3_4_0_update");
-            await refreshStatus();
-        };
-
-        const applyFilter = () => {
-            const query = val("strategy-filter").toLowerCase();
-            const enabledFilter = val("strategy-enabled-filter");
-            const directionFilter = val("strategy-direction-filter");
-            const sessionFilter = val("strategy-session-filter");
-            document.querySelectorAll("#strategies-table tbody tr").forEach((row) => {
-                const longEnabled = row.dataset.long === "1";
-                const shortEnabled = row.dataset.short === "1";
-                const matchDirection = !directionFilter || (directionFilter === "long" && longEnabled) || (directionFilter === "short" && shortEnabled) || (directionFilter === "both" && longEnabled && shortEnabled);
-                const sessionMatches = !sessionFilter || (row.dataset.sessions || "").split("|").includes(sessionFilter);
-                const match = row.dataset.strategy.toLowerCase().includes(query) && (!enabledFilter || row.dataset.enabled === enabledFilter) && matchDirection && sessionMatches;
-                row.classList.toggle("d-none", !match);
-            });
-        };
-        document.getElementById("strategy-apply-filter").onclick = applyFilter;
-        document.getElementById("strategy-filter").addEventListener("input", applyFilter);
-        document.getElementById("save-strategies").onclick = async () => {
-            const updates = { strategy: { setup_controls: {} } };
-            Object.keys(controls).forEach((key) => {
-                updates.strategy.setup_controls[key] = {
-                    ...controls[key],
-                    enabled: document.querySelector(`[data-setup-enabled="${key}"]`).checked,
-                    confirmation_required: document.querySelector(`[data-setup-confirm="${key}"]`).checked,
-                    require_trend_alignment: document.querySelector(`[data-setup-trend-align="${key}"]`).checked,
-                    min_trend_score: val(`setup-min-trend-${key}`) === "" ? null : num(val(`setup-min-trend-${key}`)),
-                    min_setup_score: val(`setup-min-setup-${key}`) === "" ? null : num(val(`setup-min-setup-${key}`)),
-                    min_trigger_score: val(`setup-min-trigger-${key}`) === "" ? null : num(val(`setup-min-trigger-${key}`)),
-                    min_entry_score: num(val(`setup-min-entry-${key}`)),
-                    max_spread_points: num(val(`setup-spread-${key}`)),
-                    sl_multiplier: num(val(`setup-sl-${key}`), 1),
-                    tp_multiplier: num(val(`setup-tp-${key}`), 1),
-                    cooldown_minutes: num(val(`setup-cooldown-${key}`)),
-                    max_trades_per_session: num(val(`setup-max-session-${key}`), 2),
-                    allowed_sessions: csv(val(`setup-sessions-${key}`)),
-                    allowed_regimes: csv(val(`setup-regimes-${key}`)),
-                    allow_long: document.querySelector(`[data-setup-long="${key}"]`).checked,
-                    allow_short: document.querySelector(`[data-setup-short="${key}"]`).checked,
-                };
-            });
-            await saveConfigPatch(updates, "strategy_control_update");
-        };
-    }
 
     function lebprimeConfigDraft() {
         const source = asObject(state.config.lebprime_v3_4_0);
@@ -2698,156 +2395,6 @@ const brokerEntries = asArray(status.broker_entries);
         };
     }
 
-    function renderSessions() {
-        const sessions = state.config.sessions || {};
-        const buckets = sessions.buckets || [];
-        document.getElementById("section-sessions").innerHTML = `
-            <div class="card border-0 shadow-sm"><div class="card-body">
-                <h2 class="h5">Session Controls</h2>
-                <div class="row g-3 mb-3"><div class="col-md-4">${toggle("allow-asia-session", "Allow Asia Session", !!sessions.allow_asia_session)}</div><div class="col-md-4">${field("session-close", "Session Close", sessions.session_close || "21:40", "text")}</div></div>
-                <div class="table-responsive"><table class="table"><thead><tr><th>Session</th><th>Start</th><th>End</th><th>Enabled</th></tr></thead><tbody>${buckets.map((bucket, index) => `<tr><td>${esc(bucket.name)}</td><td>${small(`session-start-${index}`, bucket.start)}</td><td>${small(`session-end-${index}`, bucket.end)}</td><td><input type="checkbox" data-session-enabled="${index}" ${bucket.live_allowed ? "checked" : ""}></td></tr>`).join("")}</tbody></table></div>
-                <button class="btn btn-primary" id="save-sessions">Save Sessions</button>
-            </div></div>`;
-        document.getElementById("save-sessions").onclick = async () => {
-            const updatedBuckets = buckets.map((bucket, index) => ({ ...bucket, start: val(`session-start-${index}`), end: val(`session-end-${index}`), live_allowed: document.querySelector(`[data-session-enabled="${index}"]`).checked }));
-            await saveConfigPatch({ sessions: { allow_asia_session: on("allow-asia-session"), session_close: val("session-close"), buckets: updatedBuckets, live_allowed_buckets: updatedBuckets.filter((bucket) => bucket.live_allowed).map((bucket) => bucket.name) } }, "session_update");
-        };
-    }
-
-    function renderSymbols() {
-        const symbols = state.config.symbols || {};
-        document.getElementById("section-symbols").innerHTML = `
-            <div class="card border-0 shadow-sm"><div class="card-body">
-                <h2 class="h5">Symbol Controls</h2>
-                <div class="table-responsive"><table class="table"><thead><tr><th>Symbol</th><th>Enabled</th><th>Tradeable</th><th>Display</th></tr></thead><tbody>${Object.entries(symbols).map(([symbol, cfg]) => `<tr><td>${esc(symbol)}</td><td><input type="checkbox" data-symbol-enabled="${symbol}" ${cfg.enabled ? "checked" : ""}></td><td><input type="checkbox" data-symbol-tradeable="${symbol}" ${cfg.tradeable !== false ? "checked" : ""}></td><td>${esc(cfg.display_name || symbol)}</td></tr>`).join("")}</tbody></table></div>
-                <button class="btn btn-primary" id="save-symbols">Save Symbols</button>
-            </div></div>`;
-        document.getElementById("save-symbols").onclick = async () => {
-            const updates = { symbols: {} };
-            Object.entries(symbols).forEach(([symbol, cfg]) => {
-                updates.symbols[symbol] = { ...cfg, enabled: document.querySelector(`[data-symbol-enabled="${symbol}"]`).checked, tradeable: document.querySelector(`[data-symbol-tradeable="${symbol}"]`).checked };
-            });
-            await saveConfigPatch(updates, "symbol_update");
-        };
-    }
-
-    function renderManualTrading() {
-        const symbol = val("manual-symbol") || state.config.mt5?.symbol || "XAUUSD";
-        const currentSide = val("manual-side") || "BUY";
-        const currentVolume = val("manual-volume") || "0.01";
-        const currentSl = val("manual-sl") || "";
-        const currentTp = val("manual-tp") || "";
-        const currentComment = val("manual-comment") || "";
-        const positions = state.positions || [];
-        document.getElementById("section-manual-trading").innerHTML = `
-            <div class="row g-3">
-                <div class="col-12 col-xl-4">
-                    <div class="card border-0 shadow-sm"><div class="card-body">
-                        <h2 class="h5">Open Manual Trade</h2>
-                        <div class="small text-secondary mb-3">Manual orders use the same MT5 execution path, validations, and audit trail as Telegram remote control.</div>
-                        ${field("manual-symbol", "Symbol", symbol, "text")}
-                        ${select("manual-side", "Side", ["BUY", "SELL"], currentSide)}
-                        ${field("manual-volume", "Volume", currentVolume, "number", "0.01")}
-                        ${field("manual-sl", "Stop Loss", currentSl, "number", "0.01")}
-                        ${field("manual-tp", "Take Profit", currentTp, "number", "0.01")}
-                        ${field("manual-comment", "Comment", currentComment, "text")}
-                        <div class="d-flex gap-2 mt-3">
-                            <button class="btn btn-primary" id="manual-open-trade">Open Trade</button>
-                            <button class="btn btn-outline-light" id="manual-refresh-positions">Refresh Positions</button>
-                        </div>
-                        <button class="btn btn-outline-danger mt-3" id="manual-close-all">Emergency Close All Positions</button>
-                    </div></div>
-                </div>
-                <div class="col-12 col-xl-8">
-                    <div class="card border-0 shadow-sm"><div class="card-body">
-                        <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
-                            <div>
-                                <h2 class="h5 mb-1">Open Positions</h2>
-                                <div class="small text-secondary">Bot-managed live positions on the configured symbol.</div>
-                            </div>
-                            <div class="badge text-bg-secondary">${positions.length} open</div>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table strategy-table">
-                                <thead>
-                                    <tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Volume</th><th>Open</th><th>SL</th><th>TP</th><th>Profit</th><th>Opened</th><th>Source</th><th>Actions</th></tr>
-                                </thead>
-                                <tbody>
-                                    ${positions.map((position) => `
-                                        <tr>
-                                            <td>${esc(position.ticket)}</td>
-                                            <td>${esc(position.symbol)}</td>
-                                            <td>${esc(position.side)}</td>
-                                            <td>${num(position.volume).toFixed(2)}</td>
-                                            <td>${num(position.open_price).toFixed(5)}</td>
-                                            <td>${num(position.sl).toFixed(5)}</td>
-                                            <td>${num(position.tp).toFixed(5)}</td>
-                                            <td class="${num(position.profit) < 0 ? "text-danger" : "text-success"}">${num(position.profit).toFixed(2)}</td>
-                                            <td>${esc(position.opened_at)}</td>
-                                            <td>${esc(position.comment || position.source || "manual")}</td>
-                                            <td class="d-flex flex-wrap gap-2">
-                                                <button class="btn btn-sm btn-outline-danger" data-manual-close="${position.ticket}">Close</button>
-                                                <button class="btn btn-sm btn-outline-warning" data-manual-partial="${position.ticket}">Partial</button>
-                                                <button class="btn btn-sm btn-outline-info" data-manual-modify="${position.ticket}">Edit SL/TP</button>
-                                                <button class="btn btn-sm btn-outline-success" data-manual-breakeven="${position.ticket}">Break-even</button>
-                                            </td>
-                                        </tr>
-                                    `).join("") || `<tr><td colspan="11" class="text-secondary">No open positions.</td></tr>`}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div></div>
-                </div>
-            </div>`;
-
-        document.getElementById("manual-refresh-positions").onclick = () => refreshPositions();
-        document.getElementById("manual-open-trade").onclick = async () => {
-            await runManual("/api/manual/open", {
-                symbol: val("manual-symbol"),
-                side: val("manual-side"),
-                volume: num(val("manual-volume")),
-                sl: val("manual-sl") === "" ? null : num(val("manual-sl")),
-                tp: val("manual-tp") === "" ? null : num(val("manual-tp")),
-                comment: val("manual-comment") || null,
-            });
-        };
-        document.getElementById("manual-close-all").onclick = async () => {
-            if (!window.confirm("Close all open bot-managed positions now?")) return;
-            await runManual("/api/manual/close-all", { enabled: true });
-        };
-        document.querySelectorAll("[data-manual-close]").forEach((button) => {
-            button.onclick = async () => {
-                const ticket = Number(button.dataset.manualClose);
-                if (!window.confirm(`Close position ${ticket}?`)) return;
-                await runManual("/api/manual/close", { ticket });
-            };
-        });
-        document.querySelectorAll("[data-manual-partial]").forEach((button) => {
-            button.onclick = async () => {
-                const ticket = Number(button.dataset.manualPartial);
-                const volume = window.prompt(`Enter partial-close volume for position ${ticket}`);
-                if (volume === null) return;
-                await runManual("/api/manual/partial-close", { ticket, volume: num(volume) });
-            };
-        });
-        document.querySelectorAll("[data-manual-modify]").forEach((button) => {
-            button.onclick = async () => {
-                const ticket = Number(button.dataset.manualModify);
-                const sl = window.prompt(`Enter new SL for position ${ticket} (leave blank to keep current)`, "");
-                if (sl === null) return;
-                const tp = window.prompt(`Enter new TP for position ${ticket} (leave blank to keep current)`, "");
-                if (tp === null) return;
-                await runManual("/api/manual/modify", { ticket, sl: sl === "" ? null : num(sl), tp: tp === "" ? null : num(tp) });
-            };
-        });
-        document.querySelectorAll("[data-manual-breakeven]").forEach((button) => {
-            button.onclick = async () => {
-                const ticket = Number(button.dataset.manualBreakeven);
-                if (!window.confirm(`Move position ${ticket} stop loss to break-even?`)) return;
-                await runManual("/api/manual/breakeven", { ticket });
-            };
-        });
-    }
 
     function renderAlerts() {
         const telegram = state.config.telegram || {};
@@ -2890,106 +2437,84 @@ const brokerEntries = asArray(status.broker_entries);
         };
     }
 
+
+
+    function renderLebprimeEntryTable(title, description, rows, emptyMessage) {
+        return `<div class="card border-0 shadow-sm"><div class="card-body">
+            <h2 class="h5 mb-1">${esc(title)}</h2>
+            <div class="small text-secondary mb-3">${esc(description)}</div>
+            <div class="table-responsive"><table class="table table-sm strategy-table align-middle">
+                <thead><tr><th>Symbol / TF</th><th>Zone / Entry</th><th>Side / Type</th><th>Requested / Normalized</th><th>Volume</th><th>Strategy SL / Broker SL</th><th>TP1 / TP2</th><th>Order / Deal / Position</th><th>Status</th><th>Created / Filled / Closed</th><th>Close / PnL</th><th>Failure / Retries</th></tr></thead>
+                <tbody>${rows.map((row) => `<tr>
+                    <td><div>${esc(row.symbol || row.broker_symbol || "-")}</div><div class="small text-secondary">${esc(row.timeframe || "-")}</div></td>
+                    <td><div>${esc(row.zone_id || "-")}</div><div class="small text-secondary">Entry ${esc(row.entry_number ?? "-")}</div></td>
+                    <td><div>${esc(row.side || "-")}</div><div class="small text-secondary">${esc(row.order_type || "-")}</div></td>
+                    <td><div>${esc(row.requested_entry ?? "-")}</div><div class="small text-secondary">${esc(row.normalized_entry ?? "-")}</div></td>
+                    <td>${esc(row.volume ?? "-")}</td>
+                    <td><div>${esc(row.strategy_sl ?? "-")}</div><div class="small text-secondary">${esc(row.broker_sl ?? "-")}</div></td>
+                    <td><div>${esc(row.tp1 ?? "-")}</div><div class="small text-secondary">${esc(row.tp2 ?? "-")}</div></td>
+                    <td><div>${esc(row.mt5_order_ticket || "-")}</div><div class="small text-secondary">D ${esc(row.mt5_deal_ticket || "-")} / P ${esc(row.mt5_position_ticket || "-")}</div></td>
+                    <td>${badge(row.status || "UNKNOWN", row.status === "CLOSED" || row.status === "FILLED" ? "success" : row.status === "PENDING" ? "info" : "warning")}</td>
+                    <td><div>${esc(row.created_at || "-")}</div><div class="small text-secondary">F ${esc(row.filled_at || "-")} / C ${esc(row.closed_at || "-")}</div></td>
+                    <td><div>${esc(row.close_price ?? "Unknown")}</div><div class="small text-secondary">PnL ${esc(row.realized_pnl ?? "Unknown")}</div></td>
+                    <td><div>${esc(row.failure_reason || "-")}</div><div class="small text-secondary">${num(row.retry_count).toFixed(0)} retries</div></td>
+                </tr>`).join("") || `<tr><td colspan="12" class="text-secondary">${esc(emptyMessage)}</td></tr>`}</tbody>
+            </table></div>
+        </div></div>`;
+    }
+
     function renderTrades() {
-        const unresolved = state.status.runtime?.unresolved_trades || [];
-        const recentClosed = state.status.runtime?.recent_closed_trades || [];
-        const unresolvedCount = unresolved.length;
-        const closedCount = recentClosed.length;
+        const snapshot = asObject(state.lebprimeTrades);
+        const summary = asObject(snapshot.summary);
         document.getElementById("section-trades").innerHTML = `
             <div class="row g-3">
-                <div class="col-12"><div class="card border-0 shadow-sm ${unresolvedCount > 0 ? "live-warning" : ""}"><div class="card-body">
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body">
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
-                        <div>
-                            <h2 class="h5 mb-1">Trade Recovery</h2>
-                            <div class="small text-secondary">Review open, pending, and recently finalized trades in one place.</div>
-                        </div>
+                        <div><h2 class="h5 mb-1">LebPrime Broker Lifecycle</h2><div class="small text-secondary">Read-only records from the persisted LebPrime broker-entry lifecycle. MT5 remains authoritative.</div></div>
                         <div class="d-flex flex-wrap gap-2">
-                            <div class="badge text-bg-warning">Unresolved: ${unresolvedCount}</div>
-                            <div class="badge text-bg-success">Recent closes: ${closedCount}</div>
+                            ${badge(`Pending ${num(summary.pending).toFixed(0)}`, "info")}
+                            ${badge(`Open ${num(summary.open).toFixed(0)}`, "success")}
+                            ${badge(`Closed ${num(summary.closed).toFixed(0)}`, "secondary")}
+                            ${badge(`Failed ${num(summary.failed).toFixed(0)}`, "danger")}
+                            ${badge(`Canceled ${num(summary.canceled).toFixed(0)}`, "warning")}
+                            ${badge(`Expired ${num(summary.expired).toFixed(0)}`, "warning")}
                         </div>
                     </div>
+                    <div class="small text-secondary mt-2">Historical replay excluded: ${num(summary.historical_replay_excluded).toFixed(0)}. Realized PnL stays unknown until an exact value is persisted.</div>
                 </div></div></div>
-                <div class="col-12 col-xl-6"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <div>
-                            <h2 class="h5 mb-1">Unresolved Trades</h2>
-                            <div class="small text-secondary">These trades are waiting for MT5 history to be matched and finalized.</div>
-                        </div>
-                    </div>
-                    <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Ticket</th><th>Setup / Regime</th><th>Status</th><th>Reason</th><th>Attempts</th><th>Last Try</th></tr></thead>
-                    <tbody>${unresolved.map((row) => `<tr><td>${esc(row.mt5_ticket || row.trade_id)}</td><td><div>${esc(row.setup_family || row.setup || "")}</div><div class="small text-secondary">${esc(row.regime || "")} | ${esc(row.session || "")}</div></td><td><span class="badge text-bg-warning">${esc(row.status || "PENDING")}</span></td><td><div>${esc(row.unresolved_reason || row.close_reason || "pending")}</div><div class="small text-secondary">${esc(row.note || "")}</div></td><td>${esc(row.resolution_attempts || 0)}</td><td>${esc(row.last_resolution_attempt_at || row.created_at || row.updated_at || "")}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No unresolved trades.</td></tr>`}</tbody></table></div>
-                </div></div></div>
-                <div class="col-12 col-xl-6"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Recently Closed Trades</h2>
-                    <div class="small text-secondary mb-3">Finalized outcomes with realized PnL, R multiple, and exit reason.</div>
-                    <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Time</th><th>Ticket</th><th>Outcome</th><th>PnL</th><th>R</th><th>Close Reason</th><th>Exec Reason</th></tr></thead>
-                    <tbody>${recentClosed.map((row) => `<tr><td>${esc(row.closed_at || row.updated_at || row.timestamp || "")}</td><td>${esc(row.mt5_ticket || row.trade_id)}</td><td><span class="badge text-bg-${(row.outcome_label || row.win_loss) === "WIN" ? "success" : (row.outcome_label || row.win_loss) === "LOSS" ? "danger" : "secondary"}">${esc(row.outcome_label || row.win_loss || "UNKNOWN")}</span></td><td>${num(row.pnl).toFixed(2)}</td><td>${num(row.realized_r).toFixed(2)}</td><td>${esc(row.close_reason || row.execution_reason || "")}</td><td>${esc(row.execution_reason || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="text-secondary">No closed trades yet.</td></tr>`}</tbody></table></div>
-                </div></div></div>
+                <div class="col-12">${renderLebprimeEntryTable("Pending Orders", "Orders being placed, retrying, pending at MT5, or awaiting final broker history classification.", asArray(snapshot.pending), "No pending LebPrime orders.")}</div>
+                <div class="col-12">${renderLebprimeEntryTable("Open / Filled Entries", "Broker-confirmed entries with an active filled lifecycle state.", asArray(snapshot.open), "No open or filled LebPrime entries.")}</div>
+                <div class="col-12">${renderLebprimeEntryTable("Closed Entries / Positions", "Broker-confirmed closed lifecycle records; unavailable outcome fields remain unknown.", asArray(snapshot.closed), "No closed LebPrime entries.")}</div>
+                <div class="col-12">${renderLebprimeEntryTable("Failed / Rejected / Canceled / Expired Orders", "Terminal placement failures and broker cancellation outcomes.", asArray(snapshot.failed), "No failed, rejected, canceled, or expired LebPrime orders.")}</div>
             </div>`;
     }
 
     function renderPerformance() {
-        const perf = state.status.runtime?.daily_performance || {};
-        const summary = perf.summary || {};
-        const rows = perf.performance_rows || [];
-        const sortedRows = [...rows].sort((a, b) => (num(b.total_r) - num(a.total_r)) || (num(b.average_r) - num(a.average_r)) || (num(b.trade_count) - num(a.trade_count)));
-        const bestSetup = sortedRows[0] || {};
-        const worstSetup = [...rows].sort((a, b) => (num(a.total_r) - num(b.total_r)) || (num(a.average_r) - num(b.average_r)) || (num(a.trade_count) - num(b.trade_count)))[0] || {};
-        const topBlocked = Object.entries(summary.by_blocked_reason || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-        const topClose = Object.entries(summary.by_close_reason || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-        const topExec = Object.entries(summary.by_execution_reason || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+        const payload = asObject(state.lebprimePerformance);
+        const summary = asObject(payload.summary);
+        const metrics = [
+            ["Zones Created", summary.zones_created], ["Orders Created", summary.orders_created],
+            ["Orders Accepted", summary.orders_accepted], ["Orders Filled", summary.orders_filled],
+            ["Orders Failed", summary.orders_failed], ["Orders Canceled", summary.orders_canceled],
+            ["Orders Expired", summary.orders_expired], ["Open Entries", summary.open_entries],
+            ["Closed Entries", summary.closed_entries],
+        ];
         document.getElementById("section-performance").innerHTML = `
             <div class="row g-3">
-                <div class="col-12">
-                    <div class="card border-0 shadow-sm"><div class="card-body">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
-                            <div>
-                                <h2 class="h5 mb-1">Daily Performance</h2>
-                                <div class="small text-secondary">Strategy-level outcome review for ${esc(perf.day || summary.day || "today")}.</div>
-                            </div>
-                            <div class="d-flex flex-wrap gap-2">
-                                <div class="badge text-bg-dark">Trades ${num(summary.live_trades).toFixed(0)}</div>
-                                <div class="badge text-bg-dark">Win ${num(summary.win_rate * 100).toFixed(1)}%</div>
-                                <div class="badge text-bg-dark">PF ${num(summary.profit_factor).toFixed(2)}</div>
-                            </div>
-                        </div>
-                    </div></div>
-                </div>
-                <div class="col-12 col-xl-8">
-                    <div class="card border-0 shadow-sm mb-3"><div class="card-body">
-                        <div class="row g-2">
-                            <div class="col-6 col-md-3">${metric("Trades", num(summary.live_trades).toFixed(0))}</div>
-                            <div class="col-6 col-md-3">${metric("Win Rate", `${(num(summary.win_rate) * 100).toFixed(2)}%`)}</div>
-                            <div class="col-6 col-md-3">${metric("Total PnL", num(summary.total_pnl).toFixed(2))}</div>
-                            <div class="col-6 col-md-3">${metric("Total R", num(summary.total_r).toFixed(2))}</div>
-                            <div class="col-6 col-md-3">${metric("Expectancy", num(summary.expectancy).toFixed(2))}</div>
-                            <div class="col-6 col-md-3">${metric("Profit Factor", num(summary.profit_factor).toFixed(2))}</div>
-                            <div class="col-6 col-md-3">${metric("Avg Hold", `${num(summary.average_hold_minutes).toFixed(1)}m`)}</div>
-                            <div class="col-6 col-md-3">${metric("Breakevens", num(summary.breakevens).toFixed(0))}</div>
-                        </div>
-                    </div></div>
-                    <div class="card border-0 shadow-sm"><div class="card-body">
-                        <h2 class="h5">Setup / Regime Performance</h2>
-                        <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Setup</th><th>Regime</th><th>Session</th><th>Count</th><th>Avg PnL</th><th>Avg R</th><th>Total R</th><th>Hold Mins</th><th>Close Reason</th><th>Blocked Reason</th></tr></thead>
-                        <tbody>${sortedRows.map((row) => `<tr><td>${esc(row.setup_name || row.setup_family || "UNKNOWN")}</td><td>${esc(row.regime_name || "UNKNOWN")}</td><td>${esc(row.session_name || "UNKNOWN")}</td><td>${esc(row.trade_count || 0)}</td><td>${num(row.average_pnl).toFixed(2)}</td><td>${num(row.average_r).toFixed(2)}</td><td>${num(row.total_r).toFixed(2)}</td><td>${num(row.average_hold_minutes).toFixed(1)}</td><td>${esc(row.close_reason || "")}</td><td>${esc(row.blocked_reason || "")}</td></tr>`).join("") || `<tr><td colspan="10" class="text-secondary">No performance rows available yet.</td></tr>`}</tbody></table></div>
-                    </div></div>
-                </div>
-                <div class="col-12 col-xl-4">
-                    <div class="card border-0 shadow-sm mb-3"><div class="card-body">
-                        <h2 class="h5">Best / Worst</h2>
-                        <div class="mb-2"><strong>Best Setup:</strong> ${esc(bestSetup.setup_name || "N/A")} <span class="text-secondary">(${num(bestSetup.total_r).toFixed(2)} R)</span></div>
-                        <div><strong>Worst Setup:</strong> ${esc(worstSetup.setup_name || "N/A")} <span class="text-secondary">(${num(worstSetup.total_r).toFixed(2)} R)</span></div>
-                    </div></div>
-                    <div class="card border-0 shadow-sm"><div class="card-body">
-                        <h2 class="h5">Daily Breakdowns</h2>
-                        <div class="small text-secondary mb-2">Close reasons</div>
-                        ${(topClose.length ? topClose : [["none", 0]]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item[0])}</span><span class="badge text-bg-dark">${esc(item[1])}</span></div>`).join("")}
-                        <div class="small text-secondary mt-3 mb-2">Execution reasons</div>
-                        ${(topExec.length ? topExec : [["none", 0]]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item[0])}</span><span class="badge text-bg-dark">${esc(item[1])}</span></div>`).join("")}
-                        <div class="small text-secondary mt-3 mb-2">Blocked reasons</div>
-                        ${(topBlocked.length ? topBlocked : [["none", 0]]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item[0])}</span><span class="badge text-bg-dark">${esc(item[1])}</span></div>`).join("")}
-                    </div></div>
-                </div>
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body">
+                    <h2 class="h5 mb-1">LebPrime Lifecycle Performance</h2>
+                    <div class="small text-secondary">Counts come from persisted production zone and broker-entry records; historical replay is excluded.</div>
+                    <div class="row g-2 mt-2">${metrics.map(([label, value]) => `<div class="col-6 col-md-4 col-xl">${metric(label, num(value).toFixed(0), label.includes("Failed"))}</div>`).join("")}</div>
+                    <div class="alert alert-secondary mt-3 mb-0">Realized PnL and win rate: <strong>Unknown</strong>. The LebPrime broker-entry table does not currently persist exact realized outcomes, so this dashboard does not infer them from candle touches or unrelated trade models.</div>
+                </div></div></div>
+                <div class="col-12 col-xl-4"><div class="card border-0 shadow-sm"><div class="card-body">
+                    <h2 class="h5">By Status</h2>
+                    <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>${asArray(payload.by_status).map((row) => `<tr><td>${esc(row.status)}</td><td>${esc(row.count)}</td></tr>`).join("") || `<tr><td colspan="2" class="text-secondary">No lifecycle records.</td></tr>`}</tbody></table></div>
+                </div></div></div>
+                <div class="col-12 col-xl-8"><div class="card border-0 shadow-sm"><div class="card-body">
+                    <h2 class="h5">Symbol / Timeframe / Entry / Side</h2>
+                    <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Symbol</th><th>Timeframe</th><th>Entry</th><th>Side</th><th>Status</th><th>Count</th></tr></thead><tbody>${asArray(payload.breakdown).map((row) => `<tr><td>${esc(row.symbol)}</td><td>${esc(row.timeframe || "-")}</td><td>${esc(row.entry_number)}</td><td>${esc(row.side)}</td><td>${esc(row.status)}</td><td>${esc(row.count)}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No lifecycle breakdown is available.</td></tr>`}</tbody></table></div>
+                </div></div></div>
             </div>`;
     }
 
@@ -3821,7 +3346,7 @@ const brokerEntries = asArray(status.broker_entries);
     async function refreshStatus() {
         const [statusPayload, lebprimePayload] = await Promise.all([
             api("/api/status"),
-            api("/api/strategies/lebprime-v3-4-0/status"),
+            api("/api/lebprime/status"),
         ]);
         state.status = statusPayload;
         state.lebprimeLive = lebprimePayload;
@@ -3840,11 +3365,6 @@ const brokerEntries = asArray(status.broker_entries);
         state.workerStatus = payload.worker || {};
         renderAll();
     }
-    async function refreshPositions() {
-        const positionsPayload = await api("/api/manual/positions");
-        state.positions = positionsPayload.positions || [];
-        renderAll();
-    }
     async function refreshLogs() {
         const logsPayload = await api(`/api/logs?limit=100&level=${encodeURIComponent(val("log-level"))}&source=${encodeURIComponent(val("log-source"))}&search=${encodeURIComponent(val("log-search"))}&date_from=${encodeURIComponent(val("log-date"))}`);
         const auditPayload = await api("/api/audit?limit=50");
@@ -3858,7 +3378,7 @@ const brokerEntries = asArray(status.broker_entries);
         if (!state.backtestReplay.selectedRunId && state.backtestRuns.length > 0) {
             state.backtestReplay.selectedRunId = Number(state.backtestRuns[0].id) || null;
         }
-        if (state.activeSection === "backtest-replay" && state.backtestReplay.selectedRunId) {
+        if (replayIsVisible() && state.backtestReplay.selectedRunId) {
             const selectedRun = state.backtestRuns.find((row) => num(row.id) === num(state.backtestReplay.selectedRunId)) || null;
             if (selectedRun && (!state.backtestReplay.summary || num(state.backtestReplay.summary.run?.id) !== num(selectedRun.id))) {
                 await replayLoadRun(selectedRun.id, { silent: true });
@@ -3950,6 +3470,15 @@ const brokerEntries = asArray(status.broker_entries);
         if (!state.oosStatus.history?.length && state.oosHistory.length) {
             state.oosStatus.history = state.oosHistory;
         }
+        renderAll();
+    }
+    async function refreshLebprimeReadModels() {
+        const [tradesPayload, performancePayload] = await Promise.all([
+            api("/api/trades/lebprime?limit_per_category=200"),
+            api("/api/performance/lebprime"),
+        ]);
+        state.lebprimeTrades = tradesPayload;
+        state.lebprimePerformance = performancePayload;
         renderAll();
     }
 
@@ -4553,8 +4082,8 @@ const brokerEntries = asArray(status.broker_entries);
 
     function activateSection(section) {
         const sectionName = textOr(section, "overview");
-        if (state.activeSection === "strategies" && sectionName !== "strategies" && state.strategiesUi.dirty) {
-            if (!window.confirm("You have unsaved LebPrime changes. Leave Strategies and discard them?")) return false;
+        if (state.activeSection === "lebprime" && sectionName !== "lebprime" && state.strategiesUi.dirty) {
+            if (!window.confirm("You have unsaved LebPrime changes. Leave LebPrime and discard them?")) return false;
             state.strategiesUi.dirty = false;
             state.strategiesUi.draft = null;
             syncLebprimeStrategyEditor();
@@ -4569,15 +4098,19 @@ const brokerEntries = asArray(status.broker_entries);
         document.querySelectorAll(".dashboard-section").forEach((node) => node.classList.add("d-none"));
         target.classList.remove("d-none");
         dashboardLog("tabs", "mounted section", { section: sectionName, container: target.id });
-        if (sectionName === "backtest-replay" && state.backtestReplay.selectedRunId && (!state.backtestReplay.summary || num(state.backtestReplay.summary.run?.id) !== num(state.backtestReplay.selectedRunId))) {
-            replayLoadRun(state.backtestReplay.selectedRunId, { silent: true }).catch((error) => replaySetMessage(error.message, true));
-        }
         return true;
     }
 
     function bindTabs() {
         document.querySelectorAll("#dashboard-tabs .nav-link").forEach((button) => {
             button.addEventListener("click", () => activateSection(button.dataset.section));
+        });
+        document.querySelectorAll('[data-bs-target="#research-replay"]').forEach((button) => {
+            button.addEventListener("shown.bs.tab", () => {
+                if (state.backtestReplay.selectedRunId && (!state.backtestReplay.summary || num(state.backtestReplay.summary.run?.id) !== num(state.backtestReplay.selectedRunId))) {
+                    replayLoadRun(state.backtestReplay.selectedRunId, { silent: true }).catch((error) => replaySetMessage(error.message, true));
+                }
+            });
         });
         activateSection(state.activeSection);
     }
@@ -4608,11 +4141,8 @@ const brokerEntries = asArray(status.broker_entries);
         renderTopStatusBar();
         renderQuickActions();
         safeRenderSection("section-overview", "Overview", renderOverview);
-        safeRenderSection("section-strategies", "Strategies", renderStrategies);
+        safeRenderSection("section-strategies", "LebPrime", renderStrategies);
         safeRenderSection("section-risk", "Risk Management", renderRisk);
-        safeRenderSection("section-sessions", "Sessions", renderSessions);
-        safeRenderSection("section-symbols", "Symbols", renderSymbols);
-        safeRenderSection("section-manual-trading", "Manual Trading", renderManualTrading);
         safeRenderSection("section-alerts", "Alerts", renderAlerts);
         safeRenderSection("section-trades", "Trades", renderTrades);
         safeRenderSection("section-performance", "Performance", renderPerformance);
@@ -4624,13 +4154,13 @@ const brokerEntries = asArray(status.broker_entries);
             safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab);
         }
         safeRenderSection("section-oos", "OOS", renderOOS);
-        safeRenderSection("section-config", "Config", renderConfig);
+        safeRenderSection("section-config-core", "Config", renderConfig);
         safeRenderSection("section-logs", "Logs", renderLogs);
         safeRenderSection("section-health", "System Health", renderHealth);
         restoreUiState();
         activateSection(state.activeSection);
         if (isReadonly()) {
-            document.querySelectorAll("#section-strategies input, #section-strategies select, #section-strategies button, #section-risk input, #section-risk button, #section-sessions input, #section-sessions button, #section-symbols input, #section-symbols button, #section-manual-trading input, #section-manual-trading select, #section-manual-trading button, #section-alerts input, #section-alerts button, #section-trades input, #section-trades button, #section-performance input, #section-performance button, #section-backtest input, #section-backtest select, #section-backtest button, #section-indicator-lab input, #section-indicator-lab select, #section-indicator-lab button, #section-oos input, #section-oos select, #section-oos button, #section-config input, #section-config button, #section-config textarea").forEach((node) => {
+            document.querySelectorAll("#section-strategies input, #section-strategies select, #section-strategies button, #section-risk input, #section-risk button, #section-alerts input, #section-alerts button, #section-trades input, #section-trades button, #section-performance input, #section-performance button, #section-backtest input, #section-backtest select, #section-backtest button, #section-indicator-lab input, #section-indicator-lab select, #section-indicator-lab button, #section-oos input, #section-oos select, #section-oos button, #section-config input, #section-config button, #section-config textarea").forEach((node) => {
                 if (node.id !== "dashboard-readonly-mode" && node.id !== "apply-runtime-control") {
                     node.disabled = true;
                 }
@@ -4655,7 +4185,7 @@ const brokerEntries = asArray(status.broker_entries);
         const loaders = [
             refreshStatus,
             refreshConfig,
-            refreshPositions,
+            refreshLebprimeReadModels,
             refreshLogs,
             fetchBacktests,
             fetchJobs,
@@ -4673,7 +4203,7 @@ const brokerEntries = asArray(status.broker_entries);
         }
         const refreshSeconds = Math.max(2, num(state.config.dashboard?.refresh_seconds || 5, 5));
         setInterval(refreshStatus, refreshSeconds * 1000);
-        setInterval(refreshPositions, Math.max(5, refreshSeconds) * 1000);
+        setInterval(refreshLebprimeReadModels, Math.max(5, refreshSeconds) * 1000);
         setInterval(refreshLogs, 15000);
         setInterval(fetchBacktests, 30000);
         setInterval(fetchJobs, 5000);
