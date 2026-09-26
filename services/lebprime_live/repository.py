@@ -467,6 +467,172 @@ class LebPrimeLiveRepository:
             rows = connection.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
+    def dashboard_trade_snapshot(self, limit_per_category: int = 200) -> dict[str, Any]:
+        """Return a read-only, broker-authoritative dashboard view of live entries."""
+        limit = max(1, min(int(limit_per_category), 1000))
+        pending_statuses = ("PLACING", "RETRY_SCHEDULED", "PENDING", "ORDER_HISTORY")
+        open_statuses = ("FILLED",)
+        closed_statuses = ("CLOSED",)
+        canceled_statuses = ("CANCELLED", "CANCELED", "CANCEL_FAILED")
+        expired_statuses = ("EXPIRED",)
+        failed_statuses = (
+            "PERMANENT_FAILURE", "REJECTED", "REJECTED_BY_BROKER",
+            "BLOCKED_PRECHECK", "RISK_BLOCKED", "NOT_PLACED",
+        )
+
+        def placeholders(values: tuple[str, ...]) -> str:
+            return ",".join("?" for _ in values)
+
+        select_sql = """
+            SELECT
+                broker.idempotency_key,
+                broker.zone_id,
+                broker.context_key,
+                broker.entry_number,
+                broker.logical_symbol AS symbol,
+                zone.timeframe,
+                broker.broker_symbol,
+                broker.side,
+                broker.order_type,
+                broker.entry_price AS requested_entry,
+                broker.normalized_price AS normalized_entry,
+                broker.volume,
+                zone.stop_loss AS strategy_sl,
+                broker.sl AS broker_sl,
+                zone.tp1,
+                zone.tp2,
+                broker.mt5_order_ticket,
+                broker.mt5_deal_ticket,
+                broker.mt5_position_ticket,
+                broker.broker_status AS status,
+                COALESCE(broker.broker_created_at, zone.created_at, broker.updated_at) AS created_at,
+                broker.broker_filled_at AS filled_at,
+                broker.broker_closed_at AS closed_at,
+                NULL AS close_price,
+                NULL AS realized_pnl,
+                COALESCE(broker.last_failure, broker.failure_reason) AS failure_reason,
+                broker.attempt_count AS retry_count,
+                broker.retryable,
+                broker.updated_at
+            FROM lebprime_broker_entries AS broker
+            LEFT JOIN lebprime_live_zones AS zone ON zone.zone_id = broker.zone_id
+            WHERE broker.historical = 0 AND broker.broker_status IN ({statuses})
+            ORDER BY COALESCE(broker.broker_closed_at, broker.broker_filled_at,
+                              broker.broker_created_at, zone.created_at, broker.updated_at) DESC
+            LIMIT ?
+        """
+
+        def fetch_category(connection: sqlite3.Connection, statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+            rows = connection.execute(
+                select_sql.format(statuses=placeholders(statuses)),
+                (*statuses, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+        with self._lock, self._connect() as connection:
+            pending = fetch_category(connection, pending_statuses)
+            open_entries = fetch_category(connection, open_statuses)
+            closed = fetch_category(connection, closed_statuses)
+            failed = fetch_category(connection, failed_statuses + canceled_statuses + expired_statuses)
+            status_rows = connection.execute(
+                """
+                SELECT broker_status, COUNT(*) AS count
+                FROM lebprime_broker_entries
+                WHERE historical = 0
+                GROUP BY broker_status
+                """
+            ).fetchall()
+            historical_excluded = connection.execute(
+                "SELECT COUNT(*) FROM lebprime_broker_entries WHERE historical = 1"
+            ).fetchone()[0]
+
+        status_counts = {str(row["broker_status"]): int(row["count"] or 0) for row in status_rows}
+        return {
+            "pending": pending,
+            "open": open_entries,
+            "closed": closed,
+            "failed": failed,
+            "summary": {
+                "pending": sum(status_counts.get(status, 0) for status in pending_statuses),
+                "open": sum(status_counts.get(status, 0) for status in open_statuses),
+                "closed": sum(status_counts.get(status, 0) for status in closed_statuses),
+                "failed": sum(status_counts.get(status, 0) for status in failed_statuses),
+                "canceled": sum(status_counts.get(status, 0) for status in canceled_statuses),
+                "expired": sum(status_counts.get(status, 0) for status in expired_statuses),
+                "historical_replay_excluded": int(historical_excluded or 0),
+                "realized_pnl_available": False,
+            },
+        }
+
+    def dashboard_performance_snapshot(self) -> dict[str, Any]:
+        """Aggregate only facts persisted by the LebPrime zone/broker lifecycle."""
+        failed_statuses = ("PERMANENT_FAILURE", "REJECTED", "REJECTED_BY_BROKER", "BLOCKED_PRECHECK", "RISK_BLOCKED", "NOT_PLACED")
+        with self._lock, self._connect() as connection:
+            zones_created = connection.execute(
+                """
+                SELECT COUNT(*) FROM lebprime_live_zones AS zone
+                WHERE zone.execution_status != 'HISTORICAL_REPLAY'
+                  AND (zone.execution_primary = 1 OR EXISTS (
+                      SELECT 1 FROM lebprime_broker_entries AS broker
+                      WHERE broker.zone_id = zone.zone_id AND broker.historical = 0
+                  ))
+                """
+            ).fetchone()[0]
+            status_rows = connection.execute(
+                """
+                SELECT broker_status, COUNT(*) AS count
+                FROM lebprime_broker_entries
+                WHERE historical = 0
+                GROUP BY broker_status
+                """
+            ).fetchall()
+            orders_accepted = connection.execute(
+                """
+                SELECT COUNT(*) FROM lebprime_broker_entries
+                WHERE historical = 0
+                  AND NULLIF(mt5_order_ticket, '') IS NOT NULL
+                """
+            ).fetchone()[0]
+            breakdown_rows = connection.execute(
+                """
+                SELECT broker.logical_symbol AS symbol, zone.timeframe, broker.entry_number,
+                       broker.side, broker.broker_status AS status, COUNT(*) AS count
+                FROM lebprime_broker_entries AS broker
+                LEFT JOIN lebprime_live_zones AS zone ON zone.zone_id = broker.zone_id
+                WHERE broker.historical = 0
+                GROUP BY broker.logical_symbol, zone.timeframe, broker.entry_number,
+                         broker.side, broker.broker_status
+                ORDER BY broker.logical_symbol, zone.timeframe, broker.entry_number,
+                         broker.side, broker.broker_status
+                """
+            ).fetchall()
+
+        status_counts = {str(row["broker_status"]): int(row["count"] or 0) for row in status_rows}
+        orders_created = sum(status_counts.values())
+        summary = {
+            "zones_created": int(zones_created or 0),
+            "orders_created": orders_created,
+            "orders_accepted": int(orders_accepted or 0),
+            "orders_filled": status_counts.get("FILLED", 0) + status_counts.get("CLOSED", 0),
+            "orders_failed": sum(status_counts.get(status, 0) for status in failed_statuses),
+            "orders_canceled": status_counts.get("CANCELLED", 0) + status_counts.get("CANCELED", 0),
+            "orders_expired": status_counts.get("EXPIRED", 0),
+            "open_entries": status_counts.get("FILLED", 0),
+            "closed_entries": status_counts.get("CLOSED", 0),
+            "realized_pnl": None,
+            "win_rate": None,
+        }
+        return {
+            "summary": summary,
+            "by_status": [{"status": key, "count": value} for key, value in sorted(status_counts.items())],
+            "breakdown": [dict(row) for row in breakdown_rows],
+            "notes": [
+                "Broker lifecycle records are authoritative.",
+                "Historical replay entries are excluded.",
+                "Realized PnL and win rate remain unknown because they are not persisted on LebPrime broker entries.",
+            ],
+        }
+
     def retryable_broker_entries(self, now_iso: str) -> list[dict[str, Any]]:
         with self._lock, self._connect() as connection:
             rows = connection.execute(

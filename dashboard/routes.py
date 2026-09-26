@@ -324,6 +324,31 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         lebprime_live_service.refresh_config(config_manager.dashboard_view())
         return {"ok": True, "available": True, **lebprime_live_service.status_snapshot()}
 
+    @router.get("/api/lebprime/status")
+    async def get_lebprime_status(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        """Canonical LebPrime operational status endpoint."""
+        if lebprime_live_service is None:
+            return {"ok": False, "strategy": "lebprime_v3_4_0", "available": False}
+        lebprime_live_service.refresh_config(config_manager.dashboard_view())
+        return {"ok": True, "available": True, **lebprime_live_service.status_snapshot()}
+
+    @router.get("/api/trades/lebprime")
+    async def get_lebprime_trades(
+        limit_per_category: int = 200,
+        _: None = Depends(dashboard_auth.dependency),
+    ) -> dict[str, Any]:
+        """Read-only normalized view of persisted LebPrime broker entries."""
+        if lebprime_live_service is None:
+            return {"ok": False, "available": False, "pending": [], "open": [], "closed": [], "failed": [], "summary": {}}
+        return {"ok": True, "available": True, **lebprime_live_service.dashboard_trade_snapshot(limit_per_category)}
+
+    @router.get("/api/performance/lebprime")
+    async def get_lebprime_performance(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        """Read-only lifecycle metrics based on LebPrime persistence."""
+        if lebprime_live_service is None:
+            return {"ok": False, "available": False, "summary": {}, "by_status": [], "breakdown": []}
+        return {"ok": True, "available": True, **lebprime_live_service.dashboard_performance_snapshot()}
+
     @router.patch("/api/strategies/settings")
     @router.post("/api/strategies/settings")
     async def update_strategy_settings(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:

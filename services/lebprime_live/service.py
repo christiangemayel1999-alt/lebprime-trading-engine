@@ -1966,6 +1966,14 @@ class LebPrimeLiveService:
             **{key: value for key, value in snapshot.items() if key != "contexts"},
         }
 
+    def dashboard_trade_snapshot(self, limit_per_category: int = 200) -> dict[str, Any]:
+        """Expose the persisted broker lifecycle without mutating runtime state."""
+        return self.repository.dashboard_trade_snapshot(limit_per_category=limit_per_category)
+
+    def dashboard_performance_snapshot(self) -> dict[str, Any]:
+        """Expose persisted LebPrime lifecycle counts for dashboard reporting."""
+        return self.repository.dashboard_performance_snapshot()
+
     def shutdown(self) -> None:
         for connector in self.connectors.values():
             if hasattr(connector, "shutdown"):
