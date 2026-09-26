@@ -2440,24 +2440,41 @@ const brokerEntries = asArray(status.broker_entries);
 
 
     function renderLebprimeEntryTable(title, description, rows, emptyMessage) {
+        const known = (value, decimals = null) => {
+            if (value === null || value === undefined || value === "") return "—";
+            return decimals === null ? esc(value) : esc(num(value).toFixed(decimals));
+        };
+        const statusTone = (status) => {
+            const value = textOr(status, "UNKNOWN").toUpperCase();
+            if (["CLOSED", "FILLED"].includes(value)) return "success";
+            if (value === "PENDING") return "info";
+            if (["REJECTED", "REJECTED_BY_BROKER", "PERMANENT_FAILURE", "BLOCKED_PRECHECK", "RISK_BLOCKED", "NOT_PLACED"].includes(value)) return "danger";
+            return "warning";
+        };
+        const statusLabel = (row) => {
+            const value = textOr(row.status, "UNKNOWN").toUpperCase();
+            if (row.final_exit_reason === "REJECTED") return "REJECTED";
+            if (["BLOCKED_PRECHECK", "RISK_BLOCKED", "NOT_PLACED"].includes(value)) return "FAILED_PRECHECK";
+            return value;
+        };
         return `<div class="card border-0 shadow-sm"><div class="card-body">
             <h2 class="h5 mb-1">${esc(title)}</h2>
             <div class="small text-secondary mb-3">${esc(description)}</div>
             <div class="table-responsive"><table class="table table-sm strategy-table align-middle">
-                <thead><tr><th>Symbol / TF</th><th>Zone / Entry</th><th>Side / Type</th><th>Requested / Normalized</th><th>Volume</th><th>Strategy SL / Broker SL</th><th>TP1 / TP2</th><th>Order / Deal / Position</th><th>Status</th><th>Created / Filled / Closed</th><th>Close / PnL</th><th>Failure / Retries</th></tr></thead>
+                <thead><tr><th>Symbol / TF</th><th>Zone / Entry</th><th>Side / Type</th><th>Entry / Fill</th><th>Volume</th><th>Strategy SL / Broker SL</th><th>TP1 / TP2</th><th>Order / Deal / Position</th><th>Status</th><th>Created / Filled / Closed</th><th>Close / PnL / Exit</th><th>Failure / Retries</th></tr></thead>
                 <tbody>${rows.map((row) => `<tr>
                     <td><div>${esc(row.symbol || row.broker_symbol || "-")}</div><div class="small text-secondary">${esc(row.timeframe || "-")}</div></td>
                     <td><div>${esc(row.zone_id || "-")}</div><div class="small text-secondary">Entry ${esc(row.entry_number ?? "-")}</div></td>
                     <td><div>${esc(row.side || "-")}</div><div class="small text-secondary">${esc(row.order_type || "-")}</div></td>
-                    <td><div>${esc(row.requested_entry ?? "-")}</div><div class="small text-secondary">${esc(row.normalized_entry ?? "-")}</div></td>
-                    <td>${esc(row.volume ?? "-")}</td>
+                    <td><div>${known(row.entry)}</div><div class="small text-secondary">Fill ${known(row.fill_price)}</div></td>
+                    <td><div>${known(row.volume)}</div><div class="small text-secondary">Closed ${known(row.closed_volume)} / Remaining ${known(row.remaining_volume)}</div></td>
                     <td><div>${esc(row.strategy_sl ?? "-")}</div><div class="small text-secondary">${esc(row.broker_sl ?? "-")}</div></td>
                     <td><div>${esc(row.tp1 ?? "-")}</div><div class="small text-secondary">${esc(row.tp2 ?? "-")}</div></td>
-                    <td><div>${esc(row.mt5_order_ticket || "-")}</div><div class="small text-secondary">D ${esc(row.mt5_deal_ticket || "-")} / P ${esc(row.mt5_position_ticket || "-")}</div></td>
-                    <td>${badge(row.status || "UNKNOWN", row.status === "CLOSED" || row.status === "FILLED" ? "success" : row.status === "PENDING" ? "info" : "warning")}</td>
+                    <td><div>${esc(row.order_ticket || "—")}</div><div class="small text-secondary">D ${esc(row.deal_ticket || "—")} / P ${esc(row.position_ticket || "—")}</div></td>
+                    <td>${badge(statusLabel(row), statusTone(row.status))}<div class="small text-secondary mt-1">${esc(row.position_model || "UNKNOWN")}${row.outcome_complete ? " / complete" : ""}</div></td>
                     <td><div>${esc(row.created_at || "-")}</div><div class="small text-secondary">F ${esc(row.filled_at || "-")} / C ${esc(row.closed_at || "-")}</div></td>
-                    <td><div>${esc(row.close_price ?? "Unknown")}</div><div class="small text-secondary">PnL ${esc(row.realized_pnl ?? "Unknown")}</div></td>
-                    <td><div>${esc(row.failure_reason || "-")}</div><div class="small text-secondary">${num(row.retry_count).toFixed(0)} retries</div></td>
+                    <td><div>${known(row.close_price)}</div><div class="small ${row.realized_pnl == null ? "text-secondary" : num(row.realized_pnl) < 0 ? "text-danger" : "text-success"}">PnL ${known(row.realized_pnl, 2)}</div><div class="small text-secondary">${esc(row.final_exit_reason || "UNKNOWN")}${row.outcome_complete ? "" : " / incomplete"}</div></td>
+                    <td><div>${esc(row.failure_reason || "—")}</div><div class="small text-secondary">${num(row.retry_count).toFixed(0)} attempts / retcode ${esc(row.broker_retcode || "—")}</div></td>
                 </tr>`).join("") || `<tr><td colspan="12" class="text-secondary">${esc(emptyMessage)}</td></tr>`}</tbody>
             </table></div>
         </div></div>`;
@@ -2476,13 +2493,14 @@ const brokerEntries = asArray(status.broker_entries);
                             ${badge(`Open ${num(summary.open).toFixed(0)}`, "success")}
                             ${badge(`Closed ${num(summary.closed).toFixed(0)}`, "secondary")}
                             ${badge(`Failed ${num(summary.failed).toFixed(0)}`, "danger")}
+                            ${badge(`Rejected ${num(summary.rejected).toFixed(0)}`, "danger")}
                             ${badge(`Canceled ${num(summary.canceled).toFixed(0)}`, "warning")}
                             ${badge(`Expired ${num(summary.expired).toFixed(0)}`, "warning")}
                         </div>
                     </div>
-                    <div class="small text-secondary mt-2">Historical replay excluded: ${num(summary.historical_replay_excluded).toFixed(0)}. Realized PnL stays unknown until an exact value is persisted.</div>
+                    <div class="small text-secondary mt-2">Historical replay excluded: ${num(summary.historical_replay_excluded).toFixed(0)}. Complete broker outcomes: ${num(summary.complete_outcomes).toFixed(0)}. Unknown values are never rendered as zero.</div>
                 </div></div></div>
-                <div class="col-12">${renderLebprimeEntryTable("Pending Orders", "Orders being placed, retrying, pending at MT5, or awaiting final broker history classification.", asArray(snapshot.pending), "No pending LebPrime orders.")}</div>
+                <div class="col-12">${renderLebprimeEntryTable("Pending Orders", "Broker-accepted pending orders confirmed by the current MT5 orders list.", asArray(snapshot.pending), "No pending LebPrime orders.")}</div>
                 <div class="col-12">${renderLebprimeEntryTable("Open / Filled Entries", "Broker-confirmed entries with an active filled lifecycle state.", asArray(snapshot.open), "No open or filled LebPrime entries.")}</div>
                 <div class="col-12">${renderLebprimeEntryTable("Closed Entries / Positions", "Broker-confirmed closed lifecycle records; unavailable outcome fields remain unknown.", asArray(snapshot.closed), "No closed LebPrime entries.")}</div>
                 <div class="col-12">${renderLebprimeEntryTable("Failed / Rejected / Canceled / Expired Orders", "Terminal placement failures and broker cancellation outcomes.", asArray(snapshot.failed), "No failed, rejected, canceled, or expired LebPrime orders.")}</div>
@@ -2492,20 +2510,32 @@ const brokerEntries = asArray(status.broker_entries);
     function renderPerformance() {
         const payload = asObject(state.lebprimePerformance);
         const summary = asObject(payload.summary);
+        const known = (value, decimals = 0, suffix = "") => value === null || value === undefined ? "—" : `${num(value).toFixed(decimals)}${suffix}`;
         const metrics = [
-            ["Zones Created", summary.zones_created], ["Orders Created", summary.orders_created],
-            ["Orders Accepted", summary.orders_accepted], ["Orders Filled", summary.orders_filled],
-            ["Orders Failed", summary.orders_failed], ["Orders Canceled", summary.orders_canceled],
-            ["Orders Expired", summary.orders_expired], ["Open Entries", summary.open_entries],
-            ["Closed Entries", summary.closed_entries],
+            ["Zones Created", summary.zones_created], ["Orders Submitted", summary.broker_orders_submitted],
+            ["Orders Accepted", summary.broker_orders_accepted], ["Fills", summary.fills],
+            ["Open Positions", summary.open_positions], ["Closed Entries", summary.closed_entries],
+            ["Canceled", summary.canceled], ["Expired", summary.expired],
+            ["Rejected", summary.rejected], ["Failed Precheck", summary.failed_precheck],
         ];
+        const outcomeMetrics = [
+            ["Complete Outcomes", known(summary.complete_outcomes)], ["Incomplete Outcomes", known(summary.incomplete_outcomes)],
+            ["TP Closes", known(summary.tp_closes)], ["SL Closes", known(summary.sl_closes)],
+            ["Manual Closes", known(summary.manual_closes)], ["Other Closes", known(summary.other_closes)],
+            ["Net Realized PnL", known(summary.net_realized_pnl, 2)], ["Gross Profit", known(summary.gross_profit, 2)],
+            ["Gross Loss", known(summary.gross_loss, 2)], ["Win Rate", known(summary.win_rate == null ? null : summary.win_rate * 100, 2, "%")],
+            ["Profit Factor", known(summary.profit_factor, 2)], ["Average Winner", known(summary.average_winner, 2)],
+            ["Average Loser", known(summary.average_loser, 2)], ["Average R", "—"],
+        ];
+        const outcomeTable = (title, rows, field) => `<div class="card border-0 shadow-sm h-100"><div class="card-body"><h2 class="h6">${esc(title)}</h2><div class="table-responsive"><table class="table table-sm"><thead><tr><th>Group</th><th>Complete</th><th>Incomplete</th><th>Net PnL</th></tr></thead><tbody>${asArray(rows).map((row) => `<tr><td>${esc(row[field] ?? "UNKNOWN")}</td><td>${esc(row.complete_outcomes)}</td><td>${esc(row.incomplete_outcomes)}</td><td>${known(row.net_realized_pnl, 2)}</td></tr>`).join("") || `<tr><td colspan="4" class="text-secondary">No closed outcomes.</td></tr>`}</tbody></table></div></div></div>`;
         document.getElementById("section-performance").innerHTML = `
             <div class="row g-3">
                 <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body">
                     <h2 class="h5 mb-1">LebPrime Lifecycle Performance</h2>
                     <div class="small text-secondary">Counts come from persisted production zone and broker-entry records; historical replay is excluded.</div>
                     <div class="row g-2 mt-2">${metrics.map(([label, value]) => `<div class="col-6 col-md-4 col-xl">${metric(label, num(value).toFixed(0), label.includes("Failed"))}</div>`).join("")}</div>
-                    <div class="alert alert-secondary mt-3 mb-0">Realized PnL and win rate: <strong>Unknown</strong>. The LebPrime broker-entry table does not currently persist exact realized outcomes, so this dashboard does not infer them from candle touches or unrelated trade models.</div>
+                    <div class="row g-2 mt-3">${outcomeMetrics.map(([label, value]) => `<div class="col-6 col-md-3">${metric(label, value, label === "Gross Loss")}</div>`).join("")}</div>
+                    <div class="alert alert-secondary mt-3 mb-0">PnL and win-rate metrics use only ${known(summary.complete_outcomes)} broker-complete closed entries. ${known(summary.incomplete_outcomes)} closed entries remain excluded because attribution is incomplete. Average R is unknown until a reliable per-entry risk basis is persisted.</div>
                 </div></div></div>
                 <div class="col-12 col-xl-4"><div class="card border-0 shadow-sm"><div class="card-body">
                     <h2 class="h5">By Status</h2>
@@ -2515,6 +2545,9 @@ const brokerEntries = asArray(status.broker_entries);
                     <h2 class="h5">Symbol / Timeframe / Entry / Side</h2>
                     <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Symbol</th><th>Timeframe</th><th>Entry</th><th>Side</th><th>Status</th><th>Count</th></tr></thead><tbody>${asArray(payload.breakdown).map((row) => `<tr><td>${esc(row.symbol)}</td><td>${esc(row.timeframe || "-")}</td><td>${esc(row.entry_number)}</td><td>${esc(row.side)}</td><td>${esc(row.status)}</td><td>${esc(row.count)}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No lifecycle breakdown is available.</td></tr>`}</tbody></table></div>
                 </div></div></div>
+                <div class="col-12 col-xl-4">${outcomeTable("Results by Symbol", payload.results_by_symbol, "symbol")}</div>
+                <div class="col-12 col-xl-4">${outcomeTable("Results by Timeframe", payload.results_by_timeframe, "timeframe")}</div>
+                <div class="col-12 col-xl-4">${outcomeTable("Results by Entry", payload.results_by_entry_number, "entry_number")}</div>
             </div>`;
     }
 
