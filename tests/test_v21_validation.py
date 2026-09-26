@@ -131,6 +131,7 @@ def test_entry_distance_rejects_chasing() -> None:
 
 def test_risk_engine_resizes_before_rejecting() -> None:
     config = _config()
+    config["risk"]["min_lot"] = 0.01
     config["risk"]["risk_percent"] = 0.003
     config["risk"]["short_risk_multiplier"] = 0.5
     config["risk"]["quality_buckets"]["b_risk_multiplier"] = 0.2

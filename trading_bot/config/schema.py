@@ -168,7 +168,7 @@ class ConfigSchema:
             },
         )
         cfg["backtest"].setdefault("fill_model", cfg["backtest"].get("execution_model", "next_bar_open"))
-        cfg, _ = apply_execution_mode_to_config(cfg)
+        cfg, _ = apply_execution_mode_to_config(cfg, apply_legacy_strategy_controls=False)
         return cfg
 
     @staticmethod

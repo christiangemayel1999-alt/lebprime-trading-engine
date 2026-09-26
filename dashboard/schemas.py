@@ -239,6 +239,81 @@ class JobCancelRequest(ActorRequest):
     job_id: int
 
 
+class IndicatorDatasetCreateRequest(ActorRequest):
+    """Freeze an MT5 candle dataset for Indicator Lab."""
+
+    name: str
+    symbol: str = "XAUUSD"
+    timeframe: str = "M1"
+    start_date: str
+    end_date: str
+    source: str = "MT5"
+    notes: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name is required")
+        return cleaned
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_indicator_symbol(cls, value: str) -> str:
+        cleaned = value.strip().upper()
+        if not cleaned:
+            raise ValueError("symbol is required")
+        return cleaned
+
+    @field_validator("timeframe")
+    @classmethod
+    def validate_indicator_timeframe(cls, value: str) -> str:
+        cleaned = value.strip().upper()
+        if cleaned not in {"M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1"}:
+            raise ValueError("Unsupported timeframe")
+        return cleaned
+
+    @field_validator("start_date", "end_date", mode="before")
+    @classmethod
+    def validate_indicator_dates(cls, value: Any, info: Any) -> str:
+        return _normalize_iso_date(value, str(info.field_name))
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        cleaned = value.strip().upper()
+        if cleaned != "MT5":
+            raise ValueError("Only MT5 dataset creation is currently supported")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_dataset_range(self) -> "IndicatorDatasetCreateRequest":
+        if date.fromisoformat(self.start_date) > date.fromisoformat(self.end_date):
+            raise ValueError("start_date must be before or equal to end_date")
+        return self
+
+
+class IndicatorCampaignRequest(ActorRequest):
+    """Preview or create an Indicator Lab campaign."""
+
+    dataset_id: int
+    indicator: str
+    fixed_parameters: dict[str, Any] = Field(default_factory=dict)
+    optimization_grid: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = None
+    notes: str | None = None
+    confirm_large: bool = False
+
+    @field_validator("indicator")
+    @classmethod
+    def validate_indicator(cls, value: str) -> str:
+        cleaned = value.strip().upper()
+        if cleaned not in {"LEBPRIME", "VSS3"}:
+            raise ValueError("indicator must be LEBPRIME or VSS3")
+        return cleaned
+
+
 class ToggleRequest(ActorRequest):
     """Toggle-style control request."""
 

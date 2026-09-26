@@ -16,6 +16,13 @@ body {
     backdrop-filter: blur(10px);
 }
 
+.panel {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 1rem;
+}
+
 .metric-card .metric-value {
     font-size: 1.55rem;
     font-weight: 700;

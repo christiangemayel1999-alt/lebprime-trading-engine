@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import os
@@ -10,7 +11,6 @@ import sys
 import time
 import traceback
 import argparse
-import subprocess
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,13 +30,15 @@ from services.database import DatabaseService
 from services.execution_flow import normalize_final_outcome, resolve_spread_limit, should_mark_duplicate_or_cooldown
 from services.control_state import ControlStateService
 from services.heartbeat import HeartbeatService
+from services.instance_lock import InstanceLock, pid_is_alive
+from services.lebprime_live import LebPrimeLiveService
 from services.manual_trade_service import ManualTradeService
 from services.operator_service import OperatorService
 from services.trade_journal import TradeJournalService
 from services.state_manager import StateManager
 from services.telegram_notifier import TelegramNotifier
 from services.telegram_command_service import TelegramCommandService
-from strategy_factory import build_strategy_engine
+from strategy_factory import build_live_runtime_support_engine as build_strategy_engine
 from trading_bot.execution.decision_engine import BLOCK, ExecutionDecisionEngine
 from trading_bot.execution.canonical import CanonicalExecutionPlan, build_execution_request_from_plan
 from trading_bot.execution.exposure_policy import ExposurePolicy, ExposureSnapshot
@@ -71,6 +73,7 @@ class TradingBot:
         self._boot_mode_snapshot = normalize_trading_mode(self._boot_bot_config.get("trading_mode", "DRY_RUN"))
         self.instance_lock_path = self.base_dir / "storage" / "bot_instance.lock"
         self.instance_lock_acquired = False
+        self._instance_lock = InstanceLock(self.instance_lock_path, self.base_dir)
         self.control_state = ControlStateService(self.base_dir)
         self._boot_control_state_runtime_mode = ((self.control_state.load().get("runtime") or {}).get("mode"))
         self._sync_runtime_mode_from_control_state(log_change=False)
@@ -197,6 +200,15 @@ class TradingBot:
         )
         self.risk_manager = RiskManager(self.config, logger=self.logger)
         self.risk_engine = RiskEngine(self.config, self.risk_manager, logger=self.logger)
+        self.lebprime_v3_4_0 = LebPrimeLiveService(
+            self.config,
+            self.database.db_path,
+            logger=self.logger,
+            connector_factory=self._build_lebprime_connector,
+            risk_manager=self.risk_manager,
+            risk_state=self.state,
+            notifier=self.notifier,
+        )
         self.journal_repository = JournalRepository(self.logger, self.trade_journal)
         self.live_lifecycle = LivePositionLifecycleManager(
             config=self.config,
@@ -252,30 +264,18 @@ class TradingBot:
         )
         self._acquire_instance_lock()
 
+    def _build_lebprime_connector(self, mapping: Any) -> MT5Connector:
+        """Build a symbol-bound connector while sharing the existing XAU connection."""
+        if str(self.connector.symbol).upper() == str(mapping.mt5_symbol).upper():
+            return self.connector
+        symbol_config = copy.deepcopy(self.config)
+        symbol_config.setdefault("mt5", {})["symbol"] = mapping.mt5_symbol
+        return MT5Connector(symbol_config, self.logger)
+
     def _acquire_instance_lock(self) -> None:
         """Ensure only one bot process runs at a time."""
-        self.instance_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"pid": os.getpid(), "started_at": utc_now().isoformat()}
-        while True:
-            try:
-                fd = os.open(str(self.instance_lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle)
-                self.instance_lock_acquired = True
-                return
-            except FileExistsError:
-                existing: dict[str, Any] = {}
-                try:
-                    existing = json.loads(self.instance_lock_path.read_text(encoding="utf-8"))
-                except Exception:
-                    existing = {}
-                existing_pid = int(existing.get("pid") or 0)
-                if existing_pid and self._pid_is_alive(existing_pid):
-                    raise RuntimeError(f"Another bot instance is already running with PID {existing_pid}")
-                try:
-                    self.instance_lock_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    raise RuntimeError("Unable to clear stale bot instance lock") from exc
+        self._instance_lock.acquire()
+        self.instance_lock_acquired = True
 
     def _sync_runtime_mode_from_control_state(self, log_change: bool = True) -> str:
         """Keep the cached runtime mode aligned with the shared control state."""
@@ -336,44 +336,11 @@ class TradingBot:
     @staticmethod
     def _pid_is_alive(pid: int) -> bool:
         """Return whether a pid still exists."""
-        if pid <= 0:
-            return False
-        if os.name == "nt":
-            try:
-                result = subprocess.run(
-                    [
-                        "powershell",
-                        "-NoProfile",
-                        "-Command",
-                        f"Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue | Select-Object -First 1 | Format-Table -HideTableHeaders",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                return bool((result.stdout or "").strip())
-            except Exception:
-                return False
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
+        return pid_is_alive(pid)
 
     def _release_instance_lock(self) -> None:
         """Release the owned single-instance lock on shutdown."""
-        if not self.instance_lock_acquired:
-            return
-        try:
-            existing = json.loads(self.instance_lock_path.read_text(encoding="utf-8"))
-        except Exception:
-            existing = {}
-        if int(existing.get("pid") or 0) == os.getpid():
-            try:
-                self.instance_lock_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        self._instance_lock.release()
         self.instance_lock_acquired = False
 
     def _apply_runtime_updates(self) -> None:
@@ -423,6 +390,9 @@ class TradingBot:
                 self.connector.mt5_config = refreshed["mt5"]
                 self.execution_service = ExecutionService(MT5Broker(self.connector))
                 self.strategy = new_strategy
+                lebprime_live = getattr(self, "lebprime_v3_4_0", None)
+                if lebprime_live is not None:
+                    lebprime_live.refresh_config(refreshed)
                 if self.shadow_runner is not None:
                     self.shadow_runner.engine = self.strategy
                 
@@ -1408,6 +1378,9 @@ class TradingBot:
             self.telegram_command_service.start()
         except Exception as exc:
             self._log_exception("telegram_command_service_start_failed", "Telegram command service failed to start", exc, notify=False)
+        lebprime_live = getattr(self, "lebprime_v3_4_0", None)
+        if lebprime_live is not None and lebprime_live.enabled:
+            lebprime_live.start()
         self.save_state()
 
     def run(self) -> None:
@@ -2167,6 +2140,49 @@ class TradingBot:
                 self.connector.account_info,
                 0,
                 "backtest_mode_requires_dashboard_runner",
+            )
+            self.save_state()
+            return
+        lebprime_status: dict[str, Any] = {}
+        try:
+            lebprime_live = getattr(self, "lebprime_v3_4_0", None)
+            if lebprime_live is not None:
+                execution_block_reason = None
+                if self.state.get("locks", {}).get("kill_switch", False):
+                    execution_block_reason = "KILL_SWITCH_ACTIVE"
+                elif self.execution_paused:
+                    execution_block_reason = "EXECUTION_PAUSED"
+                elif not self.auto_execution_enabled:
+                    execution_block_reason = "AUTO_EXECUTION_DISABLED"
+                elif not self.signal_generation_enabled:
+                    execution_block_reason = "SIGNAL_GENERATION_DISABLED"
+                lebprime_status = lebprime_live.scan_once(
+                    now_utc,
+                    execution_enabled=execution_block_reason is None,
+                    execution_block_reason=execution_block_reason,
+                )
+        except Exception as exc:
+            self._log_exception(
+                "lebprime_v3_4_0_cycle_failed",
+                "LebPrime v3.4.0 cycle failed",
+                exc,
+                notify=False,
+            )
+            lebprime_status = {"started": False, "startup_block_reason": str(exc), "active_positions": 0}
+        if isinstance(self.config.get("lebprime_v3_4_0"), dict):
+            enabled = bool(self.config["lebprime_v3_4_0"].get("enabled", False))
+            started = bool(lebprime_status.get("started", False))
+            status = "LEBPRIME_ACTIVE" if enabled and started else "LEBPRIME_IDLE"
+            reason = lebprime_status.get("startup_block_reason") or (None if enabled else "lebprime_v3_4_0_disabled")
+            self.state["execution_status"] = "active" if status == "LEBPRIME_ACTIVE" else "idle"
+            self.state["execution_reason_code"] = reason or "lebprime_v3_4_0_cycle_complete"
+            self._write_heartbeat(
+                status,
+                None,
+                {"session": {"session_name": "LEBPRIME"}, "regime": {"regime_name": "LEBPRIME"}, "bias": {"direction": "NONE"}},
+                self.connector.account_info,
+                int(lebprime_status.get("active_positions", 0) or 0),
+                reason,
             )
             self.save_state()
             return
@@ -4474,6 +4490,12 @@ class TradingBot:
         finally:
             try:
                 self.telegram_command_service.stop()
+            except Exception:
+                pass
+            try:
+                lebprime_live = getattr(self, "lebprime_v3_4_0", None)
+                if lebprime_live is not None:
+                    lebprime_live.shutdown()
             except Exception:
                 pass
             self.connector.shutdown()

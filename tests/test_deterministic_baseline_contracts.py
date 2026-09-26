@@ -226,7 +226,8 @@ def test_scenario_k_margin_rejection_is_deterministic() -> None:
         margin_for_volume=lambda volume: 1000.0 * float(volume),
     )
     assert result["valid"] is False
-    assert result["reason_code"] == "margin_constraint"
+    assert result["reason_code"] == "MARGIN_FREE_INSUFFICIENT"
+    assert result["fit_candidates"][-1]["rejection_reason"] == "MARGIN_FREE_INSUFFICIENT"
 
 
 def test_scenario_l_account_protection_consecutive_loss_contract() -> None:

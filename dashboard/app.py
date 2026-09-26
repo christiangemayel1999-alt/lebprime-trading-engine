@@ -23,7 +23,9 @@ from services.config_manager import ConfigManager  # noqa: E402
 from services.control_plane_service import ControlPlaneService  # noqa: E402
 from services.control_state import ControlStateService  # noqa: E402
 from services.database import DatabaseService  # noqa: E402
+from services.indicator_lab import IndicatorLabService  # noqa: E402
 from services.job_service import JobService  # noqa: E402
+from services.lebprime_live import LebPrimeLiveService  # noqa: E402
 from services.manual_trade_service import ManualTradeService  # noqa: E402
 from services.operator_service import OperatorService  # noqa: E402
 from services.oos_service import OOSService  # noqa: E402
@@ -44,6 +46,8 @@ def create_app() -> FastAPI:
     manual_trade_service = ManualTradeService(PROJECT_ROOT, config_manager, control_state, audit_service)
     operator_service = OperatorService(PROJECT_ROOT, config_manager, audit_service, bot_control, control_plane_service)
     oos_service = OOSService(PROJECT_ROOT, config_manager, database)
+    indicator_lab_service = IndicatorLabService(PROJECT_ROOT, database, config)
+    lebprime_live_service = LebPrimeLiveService(config, database.db_path)
     job_service = JobService(PROJECT_ROOT, config_manager, database, oos_service, ensure_worker_on_backtest_create=True)
     telegram_command_service = TelegramCommandService(
         PROJECT_ROOT,
@@ -78,6 +82,8 @@ def create_app() -> FastAPI:
                 "database": database,
                 "dashboard_auth": dashboard_auth,
                 "oos_service": oos_service,
+                "indicator_lab_service": indicator_lab_service,
+                "lebprime_live_service": lebprime_live_service,
                 "job_service": job_service,
             },
             templates,

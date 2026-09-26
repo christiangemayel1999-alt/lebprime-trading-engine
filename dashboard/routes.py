@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from dashboard.schemas import (
@@ -15,6 +15,8 @@ from dashboard.schemas import (
     ConfigPatchRequest,
     ExecutionModeRequest,
     FamilyToggleRequest,
+    IndicatorCampaignRequest,
+    IndicatorDatasetCreateRequest,
     JobBacktestRequest,
     JobCancelRequest,
     JobOOSRequest,
@@ -49,6 +51,8 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     audit_service = services["audit_service"]
     dashboard_auth = services["dashboard_auth"]
     oos_service = services.get("oos_service")
+    indicator_lab_service = services.get("indicator_lab_service")
+    lebprime_live_service = services.get("lebprime_live_service")
     job_service = services.get("job_service")
     base_dir = Path(services["base_dir"])
 
@@ -313,6 +317,13 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     async def get_strategies(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, **control_plane.get_section("strategies")}
 
+    @router.get("/api/strategies/lebprime-v3-4-0/status")
+    async def get_lebprime_v3_4_0_status(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if lebprime_live_service is None:
+            return {"ok": False, "strategy": "lebprime_v3_4_0", "available": False}
+        lebprime_live_service.refresh_config(config_manager.dashboard_view())
+        return {"ok": True, "available": True, **lebprime_live_service.status_snapshot()}
+
     @router.patch("/api/strategies/settings")
     @router.post("/api/strategies/settings")
     async def update_strategy_settings(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
@@ -563,6 +574,203 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         )
         audit_service.log_action(payload.actor, "oos_job_created", payload.symbol, {"request": request_payload, "job_id": result.get("id")})
         return {"ok": True, "job": result}
+
+    @router.get("/api/indicator-lab/datasets")
+    async def indicator_lab_datasets(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        return {"ok": True, "datasets": indicator_lab_service.dataset_service.list_datasets()}
+
+    @router.post("/api/indicator-lab/datasets/mt5")
+    async def indicator_lab_create_dataset(payload: IndicatorDatasetCreateRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        assert_not_readonly()
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        try:
+            dataset = indicator_lab_service.dataset_service.create_mt5_dataset(
+                name=payload.name,
+                symbol=payload.symbol,
+                timeframe=payload.timeframe,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
+                notes=payload.notes,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit_service.log_action(payload.actor, "indicator_dataset_created", payload.name, {"dataset_id": dataset.get("id"), "symbol": payload.symbol, "timeframe": payload.timeframe})
+        return {"ok": True, "dataset": dataset}
+
+    @router.get("/api/indicator-lab/datasets/{dataset_id}")
+    async def indicator_lab_get_dataset(dataset_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        dataset = indicator_lab_service.dataset_service.get_dataset(dataset_id)
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        return {"ok": True, "dataset": dataset, "hash": indicator_lab_service.dataset_service.verify_hash(dataset_id)}
+
+    @router.delete("/api/indicator-lab/datasets/{dataset_id}")
+    async def indicator_lab_delete_dataset(dataset_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        assert_not_readonly()
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        try:
+            indicator_lab_service.dataset_service.delete_dataset(dataset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @router.get("/api/indicator-lab/parameters/{indicator}")
+    async def indicator_lab_parameters(indicator: str, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        try:
+            return {"ok": True, **indicator_lab_service.parameter_schema(indicator), "pine_reference_hash": indicator_lab_service.pine_hash(indicator)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/api/indicator-lab/campaigns/preview")
+    async def indicator_lab_preview_campaign(payload: IndicatorCampaignRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        try:
+            preview = indicator_lab_service.preview_campaign(dataset_id=payload.dataset_id, indicator=payload.indicator, fixed_parameters=payload.fixed_parameters, optimization_grid=payload.optimization_grid)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "preview": preview}
+
+    @router.post("/api/indicator-lab/campaigns")
+    async def indicator_lab_create_campaign(payload: IndicatorCampaignRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        assert_not_readonly()
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        try:
+            result = indicator_lab_service.create_campaign(
+                dataset_id=payload.dataset_id,
+                indicator=payload.indicator,
+                fixed_parameters=payload.fixed_parameters,
+                optimization_grid=payload.optimization_grid,
+                name=payload.name,
+                notes=payload.notes,
+                confirm_large=payload.confirm_large,
+                actor=payload.actor,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit_service.log_action(payload.actor, "indicator_campaign_created", payload.indicator, {"campaign_id": (result.get("campaign") or {}).get("id"), "job_id": result.get("job_id")})
+        return {"ok": True, **result}
+
+    @router.get("/api/indicator-lab/campaigns")
+    async def indicator_lab_campaigns(limit: int = 30, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        return {"ok": True, "campaigns": indicator_lab_service.list_campaigns(limit=limit)}
+
+    @router.get("/api/indicator-lab/campaigns/{campaign_id}")
+    async def indicator_lab_get_campaign(campaign_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        campaign = indicator_lab_service.get_campaign(campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return {"ok": True, "campaign": campaign}
+
+    @router.post("/api/indicator-lab/campaigns/{campaign_id}/pause")
+    async def indicator_lab_pause_campaign(campaign_id: int, payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        assert_not_readonly()
+        campaign = indicator_lab_service.set_campaign_state(campaign_id, "PAUSED")
+        return {"ok": True, "campaign": campaign}
+
+    @router.post("/api/indicator-lab/campaigns/{campaign_id}/resume")
+    async def indicator_lab_resume_campaign(campaign_id: int, payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        assert_not_readonly()
+        campaign = indicator_lab_service.set_campaign_state(campaign_id, "QUEUED")
+        job_id = database.create_job({"job_type": "INDICATOR_CAMPAIGN", "state": "QUEUED", "payload_json": {"campaign_id": campaign_id, "actor": payload.actor}, "related_run_type": "indicator_campaign", "related_run_id": campaign_id})
+        return {"ok": True, "campaign": campaign, "job_id": job_id}
+
+    @router.post("/api/indicator-lab/campaigns/{campaign_id}/cancel")
+    async def indicator_lab_cancel_campaign(campaign_id: int, payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        assert_not_readonly()
+        campaign = indicator_lab_service.set_campaign_state(campaign_id, "CANCELED")
+        return {"ok": True, "campaign": campaign}
+
+    @router.get("/api/indicator-lab/campaigns/{campaign_id}/results")
+    async def indicator_lab_campaign_results(campaign_id: int, limit: int = 500, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        return {"ok": True, "results": indicator_lab_service.campaign_results(campaign_id, limit=limit)}
+
+    @router.get("/api/indicator-lab/campaigns/{campaign_id}/results/export.csv")
+    async def indicator_lab_campaign_results_csv(campaign_id: int, _: None = Depends(dashboard_auth.dependency)) -> Response:
+        campaign = indicator_lab_service.get_campaign(campaign_id)
+        indicator = (campaign or {}).get("indicator") or "indicator"
+        filename = f"{indicator}_campaign_{campaign_id}_results.csv"
+        return Response(
+            indicator_lab_service.campaign_results_csv(campaign_id),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/api/indicator-lab/tests/{test_id}")
+    async def indicator_lab_get_test(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        test = indicator_lab_service.get_test(test_id)
+        if not test:
+            raise HTTPException(status_code=404, detail="Test not found")
+        return {"ok": True, "test": test}
+
+    @router.get("/api/indicator-lab/tests/{test_id}/zones")
+    async def indicator_lab_test_zones(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        return {"ok": True, "zones": indicator_lab_service.test_zones(test_id)}
+
+    @router.get("/api/indicator-lab/tests/{test_id}/zones/export.csv")
+    async def indicator_lab_test_zones_csv(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> Response:
+        test = indicator_lab_service.get_test(test_id) or {}
+        filename = f"{test.get('indicator', 'indicator')}_test_{test_id}_zones.csv"
+        return Response(
+            indicator_lab_service.zones_csv(test_id),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/api/indicator-lab/tests/{test_id}/candidates/export.csv")
+    async def indicator_lab_test_candidates_csv(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> Response:
+        test = indicator_lab_service.get_test(test_id) or {}
+        filename = f"{test.get('indicator', 'indicator')}_test_{test_id}_candidates.csv"
+        return Response(
+            indicator_lab_service.candidates_csv(test_id),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/api/indicator-lab/zones/{zone_id}")
+    async def indicator_lab_zone_detail(zone_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        zone = indicator_lab_service.get_zone(zone_id)
+        if not zone:
+            raise HTTPException(status_code=404, detail="Zone not found")
+        return {"ok": True, "zone": zone}
+
+    @router.get("/api/indicator-lab/zones/{zone_id}/events")
+    async def indicator_lab_zone_events(zone_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        return {"ok": True, "events": indicator_lab_service.zone_events(zone_id)}
+
+    @router.get("/api/indicator-lab/tests/{test_id}/events")
+    async def indicator_lab_test_events(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        return {"ok": True, "events": indicator_lab_service.test_events(test_id)}
+
+    @router.get("/api/indicator-lab/tests/{test_id}/events/export.csv")
+    async def indicator_lab_test_events_csv(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> Response:
+        test = indicator_lab_service.get_test(test_id) or {}
+        filename = f"{test.get('indicator', 'indicator')}_test_{test_id}_events.csv"
+        return Response(
+            indicator_lab_service.events_csv(test_id),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/api/indicator-lab/tests/{test_id}/replay")
+    async def indicator_lab_test_replay(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        try:
+            return {"ok": True, "result": indicator_lab_service.test_replay(test_id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.get("/api/jobs/{job_id}")
     async def get_job(job_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:

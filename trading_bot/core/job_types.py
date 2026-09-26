@@ -8,6 +8,7 @@ from enum import Enum
 class JobType(str, Enum):
     BACKTEST = "BACKTEST"
     OOS_MATRIX = "OOS_MATRIX"
+    INDICATOR_CAMPAIGN = "INDICATOR_CAMPAIGN"
 
 
 def normalize_job_type(value: str | JobType | None, default: str = JobType.BACKTEST.value) -> str:

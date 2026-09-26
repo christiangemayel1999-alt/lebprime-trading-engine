@@ -19,7 +19,7 @@
         "diagnostics_order_check": true
     },
     "runtime": {
-        "mode": "LIVE"
+        "mode": "DRY"
     },
     "broker": {
         "provider": "mt5",
@@ -56,7 +56,6 @@
     "bot": {
         "loop_sleep_seconds": 15,
         "trading_mode": "LIVE",
-        "execution_mode": "V1_BASELINE",
         "demo_mode": false,
         "dry_run": false,
         "test_mode": false,
@@ -64,7 +63,6 @@
         "close_positions_on_shutdown": false,
         "auto_recover_live_positions": false,
         "auto_restart_on_error": true,
-        "rollout_phase": 3,
         "force_reduced_risk_mode": false,
         "manual_reset_id": 1,
         "enable_startup_trade_reconciliation": true,
@@ -134,8 +132,8 @@
                 ]
             },
             "breakout_retest_continuation": {
-                "enabled": true,
-                "live_allowed": true,
+                "enabled": false,
+                "live_allowed": false,
                 "sessions": [
                     "LONDON_OPEN",
                     "LONDON",
@@ -159,8 +157,8 @@
                 ]
             },
             "compression_release": {
-                "enabled": true,
-                "live_allowed": true,
+                "enabled": false,
+                "live_allowed": false,
                 "sessions": [
                     "LONDON",
                     "NY_OPEN",
@@ -200,7 +198,7 @@
                 "live_allowed": false
             },
             "breakout_retest_continuation": {
-                "enabled": true,
+                "enabled": false,
                 "min_entry_score": 50,
                 "confirmation_required": false,
                 "allowed_sessions": [
@@ -225,7 +223,7 @@
                 "min_setup_score": 52,
                 "min_trigger_score": 28,
                 "require_trend_alignment": true,
-                "live_allowed": true
+                "live_allowed": false
             },
             "liquidity_sweep_reversal": {
                 "enabled": false,
@@ -257,7 +255,7 @@
                 "live_allowed": false
             },
             "compression_release": {
-                "enabled": true,
+                "enabled": false,
                 "min_trend_score": 40,
                 "min_setup_score": 50,
                 "min_trigger_score": 25,
@@ -281,7 +279,7 @@
                 "allow_long": true,
                 "allow_short": true,
                 "require_trend_alignment": true,
-                "live_allowed": true
+                "live_allowed": false
             },
             "lebprim_scalp": {
                 "enabled": false,
@@ -496,11 +494,11 @@
         "reduced_risk_trigger_drawdown_pct": 0.75,
         "live_max_lot": 0.5,
         "max_lot": 2,
-        "min_lot": 0.01,
+        "min_lot": 0.05,
         "min_practical_volume": 0.01,
-        "max_trades_per_day": 20,
-        "max_trades_per_symbol": 20,
-        "max_daily_drawdown_pct": 3,
+        "max_trades_per_day": 2000,
+        "max_trades_per_symbol": 2000,
+        "max_daily_drawdown_pct": 14,
         "max_session_drawdown_pct": 1.0,
         "max_weekly_loss_percent": 8.0,
         "max_consecutive_losses": 3,
@@ -707,6 +705,37 @@
         "readonly_mode": false,
         "theme": "dark"
     },
+    "lebprime_v3_4_0": {
+        "enabled": true,
+        "execution_mode": "LIVE",
+        "symbols": [
+            "XAUUSD",
+            "US30",
+            "NAS100"
+        ],
+        "timeframes": [
+            "M1",
+            "M3",
+            "M5",
+            "M15",
+            "M30",
+            "M45"
+        ],
+        "bars_to_fetch": 360,
+        "max_spread_points": 25,
+        "max_spread_points_by_symbol": {
+            "XAUUSD": 25,
+            "US30": 120,
+            "NAS100": 80
+        },
+        "placement_retry_base_seconds": 15,
+        "placement_retry_max_seconds": 300,
+        "parameters": {
+            "gold_buffer": 1,
+            "us30_buffer": 30,
+            "nas_buffer": 15
+        }
+    },
     "symbols": {
         "XAUUSD": {
             "enabled": true,
@@ -731,6 +760,7 @@
         "backup_count": 5
     },
     "backtest": {
+        "historical_engine_mode": "V1_BASELINE",
         "selected_strategies": [
             "XAU_BOT_BREAKOUT",
             "XAU_BOT_COMPRESS"

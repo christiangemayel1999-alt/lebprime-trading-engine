@@ -415,24 +415,61 @@ class RiskManager:
 
     def validate_margin(self, account_info: Any, required_margin: float) -> tuple[bool, str]:
         """Validate free margin and projected margin level."""
-        if required_margin <= 0:
-            return False, "Invalid required margin"
+        result = self.margin_diagnostics(account_info, required_margin)
+        return bool(result["accepted"]), str(result["reason"])
+
+    def margin_diagnostics(self, account_info: Any, required_margin: float | None) -> dict[str, Any]:
+        """Return the exact account/margin decision used by the placement gate."""
         risk_cfg = self.config["risk"]
-        if not bool(risk_cfg.get("margin_protection_enabled", True)):
-            return True, "Margin protection disabled"
-
-        free_margin = float(account_info.margin_free)
+        free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
+        current_margin = float(getattr(account_info, "margin", 0.0) or 0.0)
+        equity = float(getattr(account_info, "equity", 0.0) or 0.0)
         free_margin_buffer = float(risk_cfg.get("min_free_margin_buffer", 0.0))
-        if free_margin < required_margin + free_margin_buffer:
-            return False, "Insufficient free margin"
-
-        projected_margin = float(account_info.margin) + required_margin
-        if projected_margin <= 0:
-            return True, "Margin OK"
-        projected_margin_level = float(account_info.equity) / projected_margin * 100.0
-        if projected_margin_level < float(risk_cfg["min_margin_level"]):
-            return False, f"Projected margin level too low: {projected_margin_level:.2f}%"
-        return True, "Margin OK"
+        minimum_level = float(risk_cfg.get("min_margin_level", 0.0))
+        margin_value = float(required_margin) if required_margin is not None else None
+        projected_margin = current_margin + margin_value if margin_value is not None else None
+        projected_level = equity / projected_margin * 100.0 if projected_margin and projected_margin > 0 else None
+        free_after = free_margin - margin_value if margin_value is not None else None
+        result = {
+            "order_calc_margin_result": margin_value,
+            "required_margin": margin_value,
+            "projected_margin": projected_margin,
+            "projected_margin_level": projected_level,
+            "free_margin_after": free_after,
+            "free_margin_before": free_margin,
+            "min_margin_level": minimum_level,
+            "min_free_margin_buffer": free_margin_buffer,
+            "accepted": False,
+            "rejection_reason": None,
+            "reason": "Margin OK",
+            "reason_code": "MARGIN_OK",
+        }
+        if margin_value is None or margin_value <= 0:
+            result.update(
+                rejection_reason="ORDER_CALC_MARGIN_FAILED",
+                reason="MT5 order_calc_margin did not return a positive margin",
+                reason_code="ORDER_CALC_MARGIN_FAILED",
+            )
+            return result
+        if not bool(risk_cfg.get("margin_protection_enabled", True)):
+            result.update(accepted=True, reason="Margin protection disabled", reason_code="MARGIN_PROTECTION_DISABLED")
+            return result
+        if free_margin < margin_value + free_margin_buffer:
+            result.update(
+                rejection_reason="MARGIN_FREE_INSUFFICIENT",
+                reason="Free margin is below required margin plus the configured buffer",
+                reason_code="MARGIN_FREE_INSUFFICIENT",
+            )
+            return result
+        if projected_level is not None and projected_level < minimum_level:
+            result.update(
+                rejection_reason="PROJECTED_MARGIN_LEVEL_TOO_LOW",
+                reason=f"Projected margin level too low: {projected_level:.2f}%",
+                reason_code="PROJECTED_MARGIN_LEVEL_TOO_LOW",
+            )
+            return result
+        result["accepted"] = True
+        return result
 
     def projected_margin_level(self, account_info: Any, required_margin: float) -> float:
         """Return the projected margin level after opening a hypothetical trade."""
@@ -447,122 +484,141 @@ class RiskManager:
         account_info: Any,
         symbol_spec: dict[str, Any],
         margin_for_volume: Callable[[float], float],
+        diagnostic_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Shrink a valid risk-sized volume until it satisfies margin rules."""
         risk_cfg = self.config["risk"]
-        min_volume = float(max(symbol_spec["volume_min"], risk_cfg["min_lot"]))
-        max_volume = float(min(symbol_spec["volume_max"], risk_cfg["max_lot"]))
-        step = float(symbol_spec["volume_step"])
+        broker_min = float(symbol_spec.get("volume_min", 0.0) or 0.0)
+        broker_max = float(symbol_spec.get("volume_max", 0.0) or 0.0)
+        step = float(symbol_spec.get("volume_step", 0.0) or 0.0)
+        configured_min = float(risk_cfg.get("min_lot", 0.0) or 0.0)
+        min_volume = float(max(broker_min, configured_min, risk_cfg.get("min_practical_volume", 0.0) or 0.0))
+        max_volume = float(min(broker_max, risk_cfg["max_lot"]))
         min_fit_ratio = max(0.0, min(1.0, float(risk_cfg.get("min_fitted_volume_ratio", 0.6))))
-        requested_volume = floor_volume_to_step(float(requested_volume), min_volume, max_volume, step)
+        original_requested_volume = float(requested_volume)
         fit_candidates: list[dict[str, Any]] = []
         free_margin_before = float(getattr(account_info, "margin_free", 0.0) or 0.0)
         margin_before = float(getattr(account_info, "margin", 0.0) or 0.0)
         margin_level_before = float(getattr(account_info, "margin_level", 0.0) or 0.0)
+        common = {
+            "broker_volume_min": broker_min,
+            "broker_volume_max": broker_max,
+            "broker_volume_step": step,
+            "configured_min_lot": configured_min,
+            "effective_minimum_volume": min_volume,
+            "min_margin_level": float(risk_cfg.get("min_margin_level", 0.0)),
+            "min_free_margin_buffer": float(risk_cfg.get("min_free_margin_buffer", 0.0)),
+            "min_fitted_volume_ratio": min_fit_ratio,
+            "free_margin_before": free_margin_before,
+            "margin_before": margin_before,
+            "margin_level_before": margin_level_before,
+        }
+
+        if broker_min <= 0 or broker_max <= 0 or step <= 0:
+            return {
+                **common, "valid": False, "volume": 0.0, "required_margin": None,
+                "requested_volume": original_requested_volume, "fitted_volume_ratio": 0.0,
+                "reason": "Broker symbol volume specification is invalid",
+                "reason_code": "INVALID_SYMBOL_SPEC", "fit_candidates": fit_candidates,
+            }
+        if min_volume > max_volume + 1e-12:
+            return {
+                **common, "valid": False, "volume": 0.0, "required_margin": None,
+                "requested_volume": original_requested_volume, "fitted_volume_ratio": 0.0,
+                "reason": "Effective minimum volume exceeds the permitted maximum volume",
+                "reason_code": "BROKER_MIN_VOLUME_TOO_LARGE", "fit_candidates": fit_candidates,
+            }
+        requested_volume = floor_volume_to_step(original_requested_volume, min_volume, max_volume, step)
 
         if requested_volume <= 0 or requested_volume + 1e-12 < min_volume:
             return {
+                **common,
                 "valid": False,
                 "volume": 0.0,
-                "required_margin": 0.0,
-                "requested_volume": float(requested_volume),
+                "required_margin": None,
+                "requested_volume": original_requested_volume,
                 "fitted_volume_ratio": 0.0,
-                "min_fitted_volume_ratio": min_fit_ratio,
-                "reason": "Requested volume is below the broker minimum",
-                "reason_code": "volume_below_min",
+                "reason": "Requested volume is below the effective minimum volume",
+                "reason_code": "VOLUME_BELOW_MIN",
                 "fit_candidates": fit_candidates,
-                "free_margin_before": free_margin_before,
-                "margin_before": margin_before,
-                "margin_level_before": margin_level_before,
-            }
-
-        requested_margin = float(margin_for_volume(requested_volume))
-        requested_margin_level = self.projected_margin_level(account_info, requested_margin)
-        margin_ok, margin_reason = self.validate_margin(account_info, requested_margin)
-        if margin_ok:
-            return {
-                "valid": True,
-                "volume": requested_volume,
-                "required_margin": requested_margin,
-                "requested_volume": requested_volume,
-                "requested_margin": requested_margin,
-                "requested_projected_margin_level": requested_margin_level,
-                "projected_margin_level": requested_margin_level,
-                "fitted_volume_ratio": 1.0,
-                "min_fitted_volume_ratio": min_fit_ratio,
-                "reason": "Margin OK",
-                "reason_code": "margin_ok",
-                "fit_candidates": fit_candidates,
-                "adjusted": False,
-                "free_margin_before": free_margin_before,
-                "margin_before": margin_before,
-                "margin_level_before": margin_level_before,
             }
 
         candidate = requested_volume
         seen: set[float] = set()
+        requested_margin: float | None = None
+        requested_projected_level: float | None = None
+        last_evaluation: dict[str, Any] | None = None
         while candidate >= min_volume - 1e-12:
             rounded = round_volume(candidate, min_volume, max_volume, step)
             if rounded not in seen and rounded > 0:
                 seen.add(rounded)
-                required_margin = float(margin_for_volume(rounded))
-                candidate_ok, _ = self.validate_margin(account_info, required_margin)
-                projected_margin_level = self.projected_margin_level(account_info, required_margin)
+                calc_error: str | None = None
+                try:
+                    calculated = margin_for_volume(rounded)
+                    required_margin = float(calculated) if calculated is not None else None
+                except Exception as exc:
+                    required_margin = None
+                    calc_error = f"{type(exc).__name__}: {exc}"
+                evaluation = self.margin_diagnostics(account_info, required_margin)
+                if calc_error:
+                    evaluation["order_calc_margin_error"] = calc_error
                 fit_ratio = rounded / requested_volume if requested_volume > 0 else 0.0
-                fit_candidates.append(
-                    {
-                        "candidate_volume": rounded,
-                        "required_margin": required_margin,
-                        "projected_margin_level": projected_margin_level,
-                        "fit_ratio": fit_ratio,
-                        "accepted": candidate_ok,
-                    }
-                )
-                if candidate_ok and fit_ratio + 1e-12 >= min_fit_ratio:
+                candidate_result = {"candidate_volume": rounded, "fit_ratio": fit_ratio, **evaluation}
+                fit_candidates.append(candidate_result)
+                last_evaluation = evaluation
+                if requested_margin is None and len(fit_candidates) == 1:
+                    requested_margin = required_margin
+                    requested_projected_level = evaluation.get("projected_margin_level")
+                if hasattr(self.logger, "structured"):
+                    self.logger.structured(
+                        "margin_fit_candidate",
+                        {**(diagnostic_context or {}), **candidate_result},
+                        level="INFO" if evaluation["accepted"] else "WARNING",
+                    )
+                if evaluation["accepted"] and fit_ratio + 1e-12 >= min_fit_ratio:
                     return {
+                        **common,
                         "valid": True,
                         "volume": rounded,
                         "required_margin": required_margin,
                         "requested_volume": requested_volume,
                         "requested_margin": requested_margin,
-                        "requested_projected_margin_level": requested_margin_level,
-                        "projected_margin_level": projected_margin_level,
+                        "requested_projected_margin_level": requested_projected_level,
+                        "projected_margin": evaluation.get("projected_margin"),
+                        "projected_margin_level": evaluation.get("projected_margin_level"),
+                        "free_margin_after": evaluation.get("free_margin_after"),
                         "fitted_volume_ratio": fit_ratio,
-                        "min_fitted_volume_ratio": min_fit_ratio,
-                        "reason": "Margin-adjusted volume found",
-                        "reason_code": "margin_fit",
+                        "reason": "Margin OK" if rounded == requested_volume else "Margin-adjusted volume found",
+                        "reason_code": "MARGIN_OK" if rounded == requested_volume else "MARGIN_FIT",
                         "fit_candidates": fit_candidates,
                         "adjusted": rounded < requested_volume,
-                        "free_margin_before": free_margin_before,
-                        "margin_before": margin_before,
-                        "margin_level_before": margin_level_before,
                     }
             candidate -= step if step > 0 else requested_volume
 
-        max_fit_ratio = max((float(item["fit_ratio"]) for item in fit_candidates), default=0.0)
-        reason_code = "fitted_volume_ratio_below_min" if fit_candidates and max_fit_ratio < min_fit_ratio else "margin_constraint"
+        acceptable_ratios = [float(item["fit_ratio"]) for item in fit_candidates if item.get("accepted")]
+        max_fit_ratio = max(acceptable_ratios, default=0.0)
+        reason_code = "FITTED_VOLUME_RATIO_BELOW_MIN" if acceptable_ratios and max_fit_ratio < min_fit_ratio else str((last_evaluation or {}).get("reason_code") or "ORDER_CALC_MARGIN_FAILED")
         final_reason = (
             f"Executable volume ratio {max_fit_ratio:.3f} is below minimum {min_fit_ratio:.3f}"
-            if reason_code == "fitted_volume_ratio_below_min"
-            else margin_reason
+            if reason_code == "FITTED_VOLUME_RATIO_BELOW_MIN"
+            else str((last_evaluation or {}).get("reason") or "MT5 order_calc_margin failed for every candidate")
         )
         return {
+            **common,
             "valid": False,
             "volume": 0.0,
             "required_margin": requested_margin,
             "requested_volume": requested_volume,
             "requested_margin": requested_margin,
-            "requested_projected_margin_level": requested_margin_level,
-            "projected_margin_level": requested_margin_level,
+            "requested_projected_margin_level": requested_projected_level,
+            "projected_margin": (last_evaluation or {}).get("projected_margin"),
+            "projected_margin_level": (last_evaluation or {}).get("projected_margin_level"),
+            "free_margin_after": (last_evaluation or {}).get("free_margin_after"),
             "fitted_volume_ratio": max_fit_ratio,
-            "min_fitted_volume_ratio": min_fit_ratio,
             "reason": final_reason,
             "reason_code": reason_code,
             "fit_candidates": fit_candidates,
             "adjusted": False,
-            "free_margin_before": free_margin_before,
-            "margin_before": margin_before,
-            "margin_level_before": margin_level_before,
         }
 
     def build_position_state(

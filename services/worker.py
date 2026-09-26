@@ -14,6 +14,7 @@ from services.backtest_runner import BacktestRunner
 from services.backtest_storage import BacktestStorage
 from services.config_manager import ConfigManager
 from services.database import DatabaseService
+from services.indicator_lab import IndicatorLabService
 from services.job_service import JobService
 from services.oos_service import OOSService
 from services.worker_control import write_worker_status
@@ -39,6 +40,7 @@ class WorkerService:
         runtime_cfg = self.config_manager.dashboard_view()
         self.database = DatabaseService(self.base_dir / runtime_cfg["storage"]["database_path"])
         self.oos_service = OOSService(self.base_dir, self.config_manager, self.database)
+        self.indicator_lab_service = IndicatorLabService(self.base_dir, self.database, runtime_cfg)
         self.job_service = JobService(
             self.base_dir,
             self.config_manager,
@@ -131,6 +133,18 @@ class WorkerService:
         )
         self._log("job_progress", {"job_id": job_id, "job_type": JobType.OOS_MATRIX.value, "oos_run_id": oos_run_id, "progress_current": current, "progress_total": total, "scenario_key": scenario_key})
 
+    def _on_indicator_progress(self, job_id: int, campaign_id: int, current: int, total: int) -> None:
+        self.current_job_id = int(job_id)
+        self._write_status("running")
+        self.database.heartbeat_job(
+            job_id,
+            worker_id=self.worker_id,
+            progress_current=current,
+            progress_total=total,
+            result={"indicator_campaign_id": campaign_id},
+        )
+        self._log("job_progress", {"job_id": job_id, "job_type": JobType.INDICATOR_CAMPAIGN.value, "indicator_campaign_id": campaign_id, "progress_current": current, "progress_total": total})
+
     def _execute_backtest_job(self, job: dict[str, Any]) -> dict[str, Any]:
         payload = job.get("payload_json") if isinstance(job.get("payload_json"), dict) else {}
         request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
@@ -194,6 +208,38 @@ class WorkerService:
         )
         return result
 
+    def _execute_indicator_campaign_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        payload = job.get("payload_json") if isinstance(job.get("payload_json"), dict) else {}
+        campaign_id = int(payload.get("campaign_id") or job.get("related_run_id") or 0)
+        if campaign_id <= 0:
+            raise ValueError(f"Job {job['id']} has no campaign_id")
+        self.database.update_job(int(job["id"]), {"related_run_type": "indicator_campaign", "related_run_id": campaign_id})
+        status = self.indicator_lab_service.execute_campaign(
+            campaign_id,
+            worker_id=self.worker_id,
+            progress_callback=lambda run_id, current, total: self._on_indicator_progress(int(job["id"]), int(run_id), int(current), int(total)),
+            should_interrupt=lambda: self._should_interrupt(int(job["id"])),
+        )
+        state = str(status.get("state") or JobState.COMPLETED.value).upper()
+        result = {
+            "indicator_campaign_id": campaign_id,
+            "run_state": state,
+            "progress": {
+                "current": int(status.get("progress_current", 0) or 0),
+                "total": int(status.get("progress_total", 0) or 0),
+            },
+            "best_test_id": status.get("best_test_id"),
+        }
+        final_state = JobState.PARTIAL.value if state == "PARTIAL" else (JobState.INTERRUPTED.value if state in {"PAUSED", "CANCELED"} else JobState.COMPLETED.value)
+        self.database.finalize_job(
+            int(job["id"]),
+            state=final_state,
+            result=result,
+            progress_current=result["progress"]["current"],
+            progress_total=result["progress"]["total"],
+        )
+        return result
+
     def execute_job(self, job: dict[str, Any]) -> dict[str, Any]:
         """Execute one claimed job and persist the final job state."""
         job_id = int(job["id"])
@@ -207,6 +253,8 @@ class WorkerService:
                 result = self._execute_backtest_job(job)
             elif job_type == JobType.OOS_MATRIX.value:
                 result = self._execute_oos_job(job)
+            elif job_type == JobType.INDICATOR_CAMPAIGN.value:
+                result = self._execute_indicator_campaign_job(job)
             else:
                 raise ValueError(f"Unsupported job type: {job_type}")
             self._log("job_completed", {"job_id": job_id, "job_type": job_type, "result": result})

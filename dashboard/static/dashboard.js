@@ -59,11 +59,37 @@
                 indeterminate: true,
             },
         },
-        modeControl: { mode: null, options: [], loading: false, error: null },
+        strategiesUi: { mounted: false, dirty: false, saving: false, draft: null, lastSaveRestartRequired: false },
+        runtimeActionsUi: { mounted: false, pending: null },
         oosStatus: { run: null, history: [], active_run_id: null, state: "IDLE" },
         oosHistory: [],
         oosUi: { loading: false, error: null, historyError: null, selectedRunId: null },
         oosDraft: {},
+        indicatorLab: {
+            datasets: [],
+            campaigns: [],
+            parameters: {},
+            selectedIndicator: "LEBPRIME",
+            selectedCampaignId: null,
+            selectedTestId: null,
+            results: [],
+            zones: [],
+            selectedZoneId: null,
+            selectedZone: null,
+            zoneEvents: [],
+            zoneFilters: { side: "ALL", status: "ALL", from: "", to: "", search: "", flipped: "ALL" },
+            events: [],
+            draft: {},
+            error: null,
+        },
+        indicatorLabDraft: {
+            dataset: {},
+            campaign: {},
+            parameters: {},
+            optimization: {},
+        },
+        indicatorLabUi: { dirty: false, pauseRefreshUntil: 0, submitting: false, message: "", error: "", lastCreatedCampaignId: null },
+        lebprimeLive: null,
         activeSection: "overview",
     };
     let preservedUiState = null;
@@ -1608,6 +1634,89 @@
         markBacktestInteraction();
     }
 
+    function ensureIndicatorLabDraft() {
+        state.indicatorLabDraft = state.indicatorLabDraft || {};
+        state.indicatorLabDraft.dataset = asObject(state.indicatorLabDraft.dataset);
+        state.indicatorLabDraft.campaign = asObject(state.indicatorLabDraft.campaign);
+        state.indicatorLabDraft.parameters = asObject(state.indicatorLabDraft.parameters);
+        state.indicatorLabDraft.optimization = asObject(state.indicatorLabDraft.optimization);
+        state.indicatorLabUi = {
+            dirty: false,
+            pauseRefreshUntil: 0,
+            submitting: false,
+            message: "",
+            error: "",
+            lastCreatedCampaignId: null,
+            ...asObject(state.indicatorLabUi),
+        };
+        return state.indicatorLabDraft;
+    }
+
+    function isIndicatorLabInputActive() {
+        const active = document.activeElement;
+        return !!(active && typeof active.closest === "function" && active.closest("#section-indicator-lab"));
+    }
+
+    const indicatorLabInteractionLocked = () => (
+        isIndicatorLabInputActive()
+        || Date.now() < Number(state.indicatorLabUi?.pauseRefreshUntil || 0)
+    );
+
+    function markIndicatorLabInteraction() {
+        ensureIndicatorLabDraft();
+        state.indicatorLabUi.pauseRefreshUntil = Date.now() + 30000;
+    }
+
+    function csvValues(value) {
+        return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+    }
+
+    function captureIndicatorLabDraft(options = {}) {
+        const draft = ensureIndicatorLabDraft();
+        const container = document.getElementById("section-indicator-lab");
+        if (!container || !container.querySelector("#il-ds-name, #il-campaign-name, .il-param-value, .il-opt-enabled")) return draft;
+        const currentIndicator = options.indicator || val("il-indicator") || draft.campaign.indicator || state.indicatorLab.selectedIndicator || "LEBPRIME";
+        draft.dataset = {
+            name: val("il-ds-name"),
+            symbol: val("il-ds-symbol"),
+            timeframe: val("il-ds-timeframe"),
+            start_date: val("il-ds-start"),
+            end_date: val("il-ds-end"),
+            notes: val("il-ds-notes"),
+        };
+        draft.campaign = {
+            name: val("il-campaign-name"),
+            dataset_id: val("il-dataset"),
+            indicator: options.campaignIndicator || val("il-indicator") || currentIndicator,
+            notes: val("il-notes"),
+            confirm_large: on("il-confirm-large"),
+        };
+        draft.parameters[currentIndicator] = {};
+        document.querySelectorAll("#section-indicator-lab .il-param-value").forEach((node) => {
+            const name = node.dataset.param;
+            if (!name) return;
+            draft.parameters[currentIndicator][name] = node.type === "checkbox" ? !!node.checked : node.value;
+        });
+        draft.optimization[currentIndicator] = {};
+        document.querySelectorAll("#section-indicator-lab .il-opt-enabled").forEach((node) => {
+            const name = node.dataset.param;
+            if (!name) return;
+            const row = node.closest("tr");
+            draft.optimization[currentIndicator][name] = {
+                enabled: !!node.checked,
+                start: row?.querySelector(".il-opt-start")?.value || "",
+                end: row?.querySelector(".il-opt-end")?.value || "",
+                step: row?.querySelector(".il-opt-step")?.value || "",
+                values: row?.querySelector(".il-opt-values")?.value || "",
+            };
+        });
+        if (options.markDirty) {
+            state.indicatorLabUi.dirty = true;
+            markIndicatorLabInteraction();
+        }
+        return draft;
+    }
+
     function captureUiState() {
         const values = {};
         document.querySelectorAll("input[id], textarea[id], select[id]").forEach((node) => {
@@ -1650,7 +1759,7 @@
     }
 
     const isReadonly = () => !!(state.status.readonly_mode || state.config.dashboard?.readonly_mode);
-    const currentExecutionMode = () => normalizeModeData(state.modeControl.mode || state.config.mode || state.status.execution_mode || state.config.bot?.execution_mode_summary || {});
+    const currentExecutionMode = () => normalizeModeData(state.config.mode || state.status.execution_mode || state.config.bot?.execution_mode_summary || {});
     const executionModeLabel = () => currentExecutionMode().label || currentExecutionMode().selected_mode || "Unknown";
     const renderExecutionModeSummary = (modeInput = currentExecutionMode()) => {
         const mode = normalizeModeData(modeInput);
@@ -1667,8 +1776,8 @@
         const plan = result?.apply_plan || {};
         const hotCount = Number(plan.hot_reloadable_count || 0);
         const restartCount = Number(plan.restart_required_count || 0);
-        if (restartCount > 0 && hotCount > 0) return `Hot-applied ${hotCount} change(s); ${restartCount} change(s) saved and pending restart.`;
-        if (restartCount > 0) return `${restartCount} change(s) saved and pending restart.`;
+        if (restartCount > 0 && hotCount > 0) return `Hot-applied ${hotCount} change(s). RESTART REQUIRED for ${restartCount} saved change(s).`;
+        if (restartCount > 0) return `RESTART REQUIRED for ${restartCount} saved change(s).`;
         if (hotCount > 0) return `Hot-applied ${hotCount} change(s).`;
         return "No effective config changes.";
     };
@@ -1676,9 +1785,9 @@
     const currentWorkerStatus = () => asObject(state.workerStatus || state.status.worker || {});
     const workerStateLabel = (worker = currentWorkerStatus()) => {
         const stateValue = textOr(worker.state || worker.status, "unavailable").toLowerCase();
-        if (stateValue === "running") return "Worker Running";
-        if (stateValue === "stale") return "Worker Stale";
-        return "Worker Not Running";
+        if (stateValue === "running") return "Worker RUNNING";
+        if (stateValue === "stale") return "Worker STALE";
+        return "Worker STOPPED";
     };
     const workerTone = (worker = currentWorkerStatus()) => {
         const stateValue = textOr(worker.state || worker.status, "unavailable").toLowerCase();
@@ -1690,33 +1799,36 @@
     async function saveConfigPatch(updates, reason) {
         if (isReadonly()) {
             setFeedback("Dashboard is in readonly mode.", true);
-            return;
+            return false;
         }
         try {
             const preview = await api("/api/config/preview", { method: "POST", body: JSON.stringify({ actor: "dashboard", updates, preview_only: true, reason }) });
             const summary = (preview.changes || []).slice(0, 12).map((entry) => `${entry.path}: ${JSON.stringify(entry.before)} -> ${JSON.stringify(entry.after)}`).join("\n");
-            if (summary && !window.confirm(`Apply these config changes?\n\n${summary}`)) return;
+            if (summary && !window.confirm(`Apply these config changes?\n\n${summary}`)) return false;
             const result = await api("/api/config", { method: "POST", body: JSON.stringify({ actor: "dashboard", updates, reason }) });
             setFeedback(`${applyPlanMessage(result)} Backup: ${result.backup_path}`);
             await refreshConfig();
             await refreshStatus();
-            await refreshLogs();
+            return result;
         } catch (error) {
             setFeedback(error.message, true);
+            return false;
         }
     }
 
     async function runControl(path, payload) {
         if (isReadonly()) {
             setFeedback("Dashboard is in readonly mode.", true);
-            return;
+            return false;
         }
         try {
             const result = await api(path, { method: "POST", body: JSON.stringify({ actor: "dashboard", ...payload }) });
             setFeedback(result.message || "Action completed");
             await refreshStatus();
+            return true;
         } catch (error) {
             setFeedback(error.message, true);
+            return false;
         }
     }
 
@@ -1770,70 +1882,110 @@
     function renderTopStatusBar() {
         const control = state.status.control || {};
         const runtimeControl = control.runtime || {};
-        const mode = runtimeControl.mode || state.config.bot?.trading_mode || "N/A";
+  const rawMode = state.config.bot?.trading_mode || runtimeControl.mode || "N/A";
+        const mode = rawMode === "DRY_RUN" ? "DRY" : rawMode;
         const botRunning = Boolean(control.process_alive || control.bot_running);
         const mt5Connected = botRunning ? Boolean(runtimeControl.mt5_connected) : null;
-        const mt5Label = mt5Connected === null ? "UNKNOWN" : (mt5Connected ? "CONNECTED" : "DOWN");
+        const mt5Label = mt5Connected === null ? "DISCONNECTED" : (mt5Connected ? "CONNECTED" : "DISCONNECTED");
         const mt5Tone = mt5Connected === null ? "secondary" : (mt5Connected ? "success" : "danger");
         const worker = currentWorkerStatus();
         document.getElementById("top-status-bar").innerHTML = `
             <div class="status-chip"><span class="badge text-bg-${control.process_alive || control.bot_running ? "success" : "danger"}">Bot ${control.process_alive || control.bot_running ? "RUNNING" : "STOPPED"}</span></div>
             <div class="status-chip"><span class="badge text-bg-${mode === "LIVE" ? "danger" : "info"}">${esc(mode)}</span></div>
-            <div class="status-chip"><span class="badge text-bg-secondary">${esc(executionModeLabel())}</span></div>
             <div class="status-chip"><span class="badge text-bg-${mt5Tone}">MT5 ${mt5Label}</span></div>
             <div class="status-chip"><span class="badge text-bg-${workerTone(worker)}">${esc(workerStateLabel(worker))}</span></div>
-            <div class="status-chip"><span class="badge text-bg-${control.kill_switch ? "danger" : "success"}">${control.kill_switch ? "EMERGENCY" : "NORMAL"}</span></div>
+            <div class="status-chip"><span class="badge text-bg-${control.kill_switch ? "danger" : state.config.bot?.force_reduced_risk_mode ? "warning" : "success"}">${control.kill_switch ? "KILL" : state.config.bot?.force_reduced_risk_mode ? "SAFE" : "NORMAL"}</span></div>
             ${control.pending_restart ? `<div class="status-chip"><span class="badge text-bg-warning">RESTART PENDING</span></div>` : ""}
-            <div class="status-chip"><span class="badge text-bg-${isReadonly() ? "warning" : "secondary"}">${isReadonly() ? "READONLY" : "READ-WRITE"}</span></div>
+            <div class="status-chip"><span class="badge text-bg-${isReadonly() ? "warning" : "secondary"}">${isReadonly() ? "READ-ONLY" : "READ-WRITE"}</span></div>
             <div class="status-chip">Heartbeat: ${esc(runtimeControl.heartbeat_at || "N/A")}</div>`;
     }
 
     function renderQuickActions() {
-        document.getElementById("quick-actions").innerHTML = `
-            <button class="btn btn-success" id="qa-start">Start</button>
-            <button class="btn btn-outline-light" id="qa-stop">Stop</button>
-            <button class="btn btn-outline-warning" id="qa-pause">Pause</button>
-            <button class="btn btn-outline-info" id="qa-resume">Resume</button>
-            <button class="btn btn-outline-primary" id="qa-dry">Switch To Dry</button>
-            <button class="btn btn-danger" id="qa-live">Switch To Live</button>
-            <button class="btn btn-outline-danger" id="qa-kill">Kill Switch</button>
-            <button class="btn btn-outline-success" id="qa-safe">Safe Mode</button>
-            <button class="btn btn-outline-info" id="qa-balanced">Balanced</button>
-            <button class="btn btn-outline-warning" id="qa-scalping">Scalping</button>`;
-        document.getElementById("qa-start").onclick = () => runControl("/api/control/start", { enabled: true });
-        document.getElementById("qa-stop").onclick = () => runControl("/api/control/stop", { enabled: true });
-        document.getElementById("qa-pause").onclick = () => runControl("/api/control/pause", { enabled: true });
-        document.getElementById("qa-resume").onclick = () => runControl("/api/control/resume", { enabled: true });
-        document.getElementById("qa-dry").onclick = () => switchMode("DRY_RUN");
-        document.getElementById("qa-live").onclick = () => switchMode("LIVE");
-        document.getElementById("qa-kill").onclick = async () => {
-            const enabled = !(state.status.control?.kill_switch);
-            if (enabled && !window.confirm("Enable the kill switch? This will block all new trades.")) return;
-            await runControl("/api/control/kill-switch", { enabled, reason: enabled ? "dashboard_kill_switch" : null });
-        };
-        document.getElementById("qa-safe").onclick = () => applyPreset("SAFE_MODE");
-        document.getElementById("qa-balanced").onclick = () => applyPreset("BALANCED_MODE");
-        document.getElementById("qa-scalping").onclick = () => applyPreset("SCALPING_MODE");
-        if (isReadonly()) {
-            document.querySelectorAll("#quick-actions button").forEach((button) => { button.disabled = true; });
+        const container = ensureContainer("quick-actions");
+        if (!container) return;
+        if (!state.runtimeActionsUi.mounted) {
+            container.innerHTML = `
+                <button class="btn btn-success" data-runtime-action="start">Start</button>
+                <button class="btn btn-outline-light" data-runtime-action="stop">Stop</button>
+                <button class="btn btn-outline-warning" data-runtime-action="pause">Pause</button>
+                <button class="btn btn-outline-info" data-runtime-action="resume">Resume</button>
+                <button class="btn btn-outline-primary" data-runtime-action="dry">Switch To Dry</button>
+                <button class="btn btn-danger" data-runtime-action="live">Switch To Live</button>
+                <button class="btn btn-outline-danger" data-runtime-action="kill">Kill Switch</button>
+                <button class="btn btn-outline-success" data-runtime-action="safe">Safe Mode</button>`;
+            container.addEventListener("click", handleRuntimeActionClick);
+            state.runtimeActionsUi.mounted = true;
         }
+        updateRuntimeActionButtons();
+    }
+
+    const runtimeActionLabels = {
+        start: ["Start", "Starting..."], stop: ["Stop", "Stopping..."],
+        pause: ["Pause", "Pausing..."], resume: ["Resume", "Resuming..."],
+        dry: ["Switch To Dry", "Switching..."], live: ["Switch To Live", "Switching..."],
+        kill: ["Kill Switch", "Applying..."], safe: ["Safe Mode", "Applying..."],
+    };
+
+    function updateRuntimeActionButtons() {
+        document.querySelectorAll("#quick-actions [data-runtime-action]").forEach((button) => {
+            const action = button.dataset.runtimeAction;
+            const pending = state.runtimeActionsUi.pending;
+            button.disabled = isReadonly() || !!pending;
+            button.textContent = pending === action ? runtimeActionLabels[action][1] : runtimeActionLabels[action][0];
+            button.setAttribute("aria-busy", pending === action ? "true" : "false");
+        });
+    }
+
+    async function executeRuntimeAction(action, operation) {
+        if (state.runtimeActionsUi.pending) return false;
+        state.runtimeActionsUi.pending = action;
+        updateRuntimeActionButtons();
+        try {
+            return await operation();
+        } finally {
+            state.runtimeActionsUi.pending = null;
+            updateRuntimeActionButtons();
+        }
+    }
+
+    async function handleRuntimeActionClick(event) {
+        const button = event.target.closest("[data-runtime-action]");
+        if (!button || state.runtimeActionsUi.pending) return;
+        const action = button.dataset.runtimeAction;
+        await executeRuntimeAction(action, async () => {
+            if (action === "start") return runControl("/api/control/start", { enabled: true });
+            if (action === "stop") return runControl("/api/control/stop", { enabled: true });
+            if (action === "pause") return runControl("/api/control/pause", { enabled: true });
+            if (action === "resume") return runControl("/api/control/resume", { enabled: true });
+            if (action === "dry") return switchMode("DRY_RUN");
+            if (action === "live") return switchMode("LIVE");
+            if (action === "safe") return applyPreset("SAFE_MODE");
+            if (action === "kill") {
+                const enabled = !(state.status.control?.kill_switch);
+                if (enabled && !window.confirm("Enable the kill switch? This will block all new trades.")) return false;
+                return runControl("/api/control/kill-switch", { enabled, reason: enabled ? "dashboard_kill_switch" : null });
+            }
+            return false;
+        });
     }
 
     async function applyPreset(presetName) {
         if (isReadonly()) {
             setFeedback("Dashboard is in readonly mode.", true);
-            return;
+            return false;
         }
         const presetLabels = { SAFE_MODE: "safe mode", BALANCED_MODE: "balanced mode", SCALPING_MODE: "scalping mode", AGGRESSIVE_MODE: "aggressive mode" };
         const human = presetLabels[presetName] || presetName.toLowerCase();
-        if (!window.confirm(`Apply the ${human} preset?`)) return;
+        if (!window.confirm(`Apply the ${human} preset?`)) return false;
         try {
             const result = await api("/api/config/preset", { method: "POST", body: JSON.stringify({ actor: "dashboard", preset_name: presetName }) });
             setFeedback(`Preset applied. ${applyPlanMessage(result)}`);
             await refreshConfig();
             await refreshStatus();
+            return true;
         } catch (error) {
             setFeedback(error.message, true);
+            return false;
         }
     }
 
@@ -1985,7 +2137,7 @@
             <div class="row g-3 mb-3">
                 <div class="col-12 col-xl-8"><div class="section-grid">
                     ${metric("Bot Status", metrics.bot_status || "N/A")}
-                    ${metric("Current Mode", runtimeControl.mode || state.config.bot?.trading_mode || "N/A", (runtimeControl.mode || state.config.bot?.trading_mode) === "LIVE")}
+${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode || "N/A", (state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE")}
                     ${metric("Open Positions", num(metrics.open_positions).toFixed(0))}
                     ${metric("Today PnL", num(metrics.today_pnl).toFixed(2))}
                     ${metric("Daily Loss Used", `${num(metrics.daily_loss_used_pct).toFixed(1)}%`)}
@@ -1996,7 +2148,7 @@
                     ${metric("Active Strategies", num(metrics.enabled_strategy_count).toFixed(0))}
                     ${metric("Enabled Families", num(metrics.enabled_family_count).toFixed(0))}
                 </div></div>
-                <div class="col-12 col-xl-4"><div class="card border-0 shadow-sm ${((runtimeControl.mode || state.config.bot?.trading_mode) === "LIVE") ? "live-warning" : ""}"><div class="card-body">
+<div class="col-12 col-xl-4"><div class="card border-0 shadow-sm ${((state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE") ? "live-warning" : ""}"><div class="card-body">
                     <h2 class="h5">Live Monitoring</h2>
                     <div>Last heartbeat: ${esc(runtimeControl.heartbeat_at || "N/A")}</div>
                     <div>Last execution: ${esc(runtimeControl.last_execution_result || "N/A")}</div>
@@ -2174,9 +2326,36 @@
 
     function renderStrategies() {
         const controls = state.config.strategy?.setup_controls || {};
+        const lebprimeConfig = state.config.lebprime_v3_4_0 || {};
+        const lebprimeStatus = state.lebprimeLive || {};
+        const lebprimeContexts = asArray(lebprimeStatus.contexts);
+        const selectedSymbols = new Set(asArray(lebprimeConfig.symbols));
+        const selectedTimeframes = new Set(asArray(lebprimeConfig.timeframes));
         const allSessions = [...new Set(Object.values(controls).flatMap((setup) => setup.allowed_sessions || []))].sort();
         const strategyBlocks = latestBlockLookup(state.status.runtime?.strategy_block_matrix || []);
         document.getElementById("section-strategies").innerHTML = `
+            <div class="card border-0 shadow-sm mb-3"><div class="card-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <div><h2 class="h5 mb-1">lebprime_v3_4_0</h2><div class="small text-secondary">${esc(lebprimeStatus.startup_block_reason || (lebprimeStatus.started ? "Runtime active" : "Disabled or awaiting startup"))}</div></div>
+                    <div>${badge(lebprimeConfig.enabled ? (lebprimeConfig.execution_mode === "LIVE" ? "LIVE DEMO" : "DRY") : "DISABLED", lebprimeConfig.enabled ? "warning" : "secondary")}</div>
+                </div>
+                <div class="row g-3 mb-3">
+                    <div class="col-md-2"><label class="form-label small text-secondary">Enabled</label><div><input type="checkbox" id="lebprime-live-enabled" ${lebprimeConfig.enabled ? "checked" : ""}></div></div>
+                    <div class="col-md-2"><label class="form-label small text-secondary">Live / Dry</label><select class="form-select" id="lebprime-live-mode"><option value="DRY" ${lebprimeConfig.execution_mode !== "LIVE" ? "selected" : ""}>Dry</option><option value="LIVE" ${lebprimeConfig.execution_mode === "LIVE" ? "selected" : ""}>Live (demo only)</option></select></div>
+                    <div class="col-md-4"><label class="form-label small text-secondary">Symbols</label><div class="d-flex flex-wrap gap-3">${["XAUUSD", "US30", "NAS100"].map((symbol) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-symbol="${symbol}" ${selectedSymbols.has(symbol) ? "checked" : ""}>${symbol}</label>`).join("")}</div></div>
+                    <div class="col-md-4"><label class="form-label small text-secondary">Timeframes</label><div class="d-flex flex-wrap gap-3">${["M1", "M3", "M5", "M15", "M30", "M45"].map((timeframe) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-timeframe="${timeframe}" ${selectedTimeframes.has(timeframe) ? "checked" : ""}>${timeframe}</label>`).join("")}</div></div>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6 col-md-3"><div class="small text-secondary">Active zone families</div><div class="h5 mb-0">${num(lebprimeStatus.active_zone_families).toFixed(0)}</div></div>
+<div class="col-6 col-md-3"><div class="small text-secondary">Internal Pending LIMITs</div><div class="h5 mb-0">${num(lebprimeStatus.pending_orders).toFixed(0)}</div></div>
+<div class="col-6 col-md-3"><div class="small text-secondary">Broker Filled Positions</div><div class="h5 mb-0">${num(lebprimeStatus.active_positions).toFixed(0)}</div></div>
+                    <div class="col-6 col-md-3"><div class="small text-secondary">Duplicate suppressed</div><div class="h5 mb-0">${num(lebprimeStatus.duplicate_suppressed_zones).toFixed(0)}</div></div>
+                </div>
+                <div class="table-responsive mb-3"><table class="table table-sm strategy-table"><thead><tr><th>Context</th><th>Health</th><th>Last Closed Candle</th><th>Last Scan</th><th>Candidates</th><th>Live Zones</th><th>Pending LIMITs</th><th>Active Trades</th><th>Last Error</th><th>Heartbeat</th></tr></thead><tbody>
+                    ${lebprimeContexts.map((row) => `<tr><td>${esc(row.logical_symbol)} ${esc(row.timeframe)}</td><td>${badge(row.status || "IDLE", row.status === "HEALTHY" ? "success" : row.status === "ERROR" ? "danger" : "secondary")}</td><td>${esc(row.last_closed_candle || "-")}</td><td>${esc(row.last_scan_time || "-")}</td><td>${num(row.candidate_count).toFixed(0)}</td><td>${num(row.live_zones).toFixed(0)}</td><td>${num(row.pending_limits).toFixed(0)}</td><td>${num(row.active_trades).toFixed(0)}</td><td>${esc(row.last_error || "-")}</td><td>${esc(row.heartbeat || "-")}</td></tr>`).join("") || `<tr><td colspan="10" class="text-secondary">Context status will appear after the runtime initializes.</td></tr>`}
+                </tbody></table></div>
+                <button class="btn btn-primary" id="save-lebprime-live">Save LebPrime v3.4.0</button>
+            </div></div>
             <div class="card border-0 shadow-sm"><div class="card-body">
                 <div class="row g-2 align-items-end mb-3">
                     <div class="col-md-4"><label class="form-label small text-secondary">Search</label><input class="form-control" id="strategy-filter" placeholder="Search strategy"></div>
@@ -2189,6 +2368,21 @@
                 <tbody>${Object.entries(controls).map(([key, setup]) => `<tr data-strategy="${key}" data-enabled="${setup.enabled ? "enabled" : "disabled"}" data-long="${setup.allow_long ? "1" : "0"}" data-short="${setup.allow_short ? "1" : "0"}" data-sessions="${esc((setup.allowed_sessions || []).join('|'))}"><td>${esc(key)}</td><td><input type="checkbox" data-setup-enabled="${key}" ${setup.enabled ? "checked" : ""}></td><td><input type="checkbox" data-setup-confirm="${key}" ${setup.confirmation_required !== false ? "checked" : ""}></td><td><input type="checkbox" data-setup-trend-align="${key}" ${setup.require_trend_alignment !== false ? "checked" : ""}></td><td>${small(`setup-min-trend-${key}`, setup.min_trend_score ?? "", "number", "0.1")}</td><td>${small(`setup-min-setup-${key}`, setup.min_setup_score ?? "", "number", "0.1")}</td><td>${small(`setup-min-trigger-${key}`, setup.min_trigger_score ?? "", "number", "0.1")}</td><td>${small(`setup-min-entry-${key}`, setup.min_entry_score ?? 75, "number", "0.1")}</td><td>${small(`setup-spread-${key}`, setup.max_spread_points ?? 25, "number", "0.1")}</td><td>${small(`setup-sl-${key}`, setup.sl_multiplier ?? 1, "number", "0.1")}</td><td>${small(`setup-tp-${key}`, setup.tp_multiplier ?? 1, "number", "0.1")}</td><td>${small(`setup-cooldown-${key}`, setup.cooldown_minutes ?? 20, "number", "1")}</td><td>${small(`setup-max-session-${key}`, setup.max_trades_per_session ?? 2, "number", "1")}</td><td>${small(`setup-sessions-${key}`, (setup.allowed_sessions || []).join(", "))}</td><td>${small(`setup-regimes-${key}`, (setup.allowed_regimes || []).join(", "))}</td><td class="small text-secondary">${esc(strategyBlocks[key] || "none")}</td><td><input type="checkbox" data-setup-long="${key}" ${setup.allow_long ? "checked" : ""}></td><td><input type="checkbox" data-setup-short="${key}" ${setup.allow_short ? "checked" : ""}></td></tr>`).join("")}</tbody></table></div>
                 <button class="btn btn-primary" id="save-strategies">Save Strategy Controls</button>
             </div></div>`;
+
+        document.getElementById("save-lebprime-live").onclick = async () => {
+            const symbols = Array.from(document.querySelectorAll("[data-lebprime-symbol]:checked")).map((node) => node.dataset.lebprimeSymbol);
+            const timeframes = Array.from(document.querySelectorAll("[data-lebprime-timeframe]:checked")).map((node) => node.dataset.lebprimeTimeframe);
+            await saveConfigPatch({
+                lebprime_v3_4_0: {
+                    ...lebprimeConfig,
+                    enabled: on("lebprime-live-enabled"),
+                    execution_mode: val("lebprime-live-mode") || "DRY",
+                    symbols,
+                    timeframes,
+                },
+            }, "lebprime_v3_4_0_update");
+            await refreshStatus();
+        };
 
         const applyFilter = () => {
             const query = val("strategy-filter").toLowerCase();
@@ -2231,6 +2425,242 @@
             });
             await saveConfigPatch(updates, "strategy_control_update");
         };
+    }
+
+    function lebprimeConfigDraft() {
+        const source = asObject(state.config.lebprime_v3_4_0);
+        return {
+            ...source,
+            enabled: !!source.enabled,
+            execution_mode: source.execution_mode === "LIVE" ? "LIVE" : "DRY",
+            symbols: asArray(source.symbols).slice(),
+            timeframes: asArray(source.timeframes).slice(),
+            bars_to_fetch: num(source.bars_to_fetch, 360),
+            max_spread_points: num(source.max_spread_points, 25),
+            max_spread_points_by_symbol: { ...asObject(source.max_spread_points_by_symbol) },
+            parameters: { ...asObject(source.parameters) },
+        };
+    }
+
+    function lebprimeComparableDraft(draft) {
+        return JSON.stringify({
+            enabled: !!draft.enabled,
+            execution_mode: draft.execution_mode === "LIVE" ? "LIVE" : "DRY",
+            symbols: asArray(draft.symbols),
+            timeframes: asArray(draft.timeframes),
+            bars_to_fetch: String(draft.bars_to_fetch ?? ""),
+            max_spread_points: String(draft.max_spread_points ?? ""),
+            xau_spread_points: String(draft.max_spread_points_by_symbol?.XAUUSD ?? ""),
+            us30_spread_points: String(draft.max_spread_points_by_symbol?.US30 ?? ""),
+            nas100_spread_points: String(draft.max_spread_points_by_symbol?.NAS100 ?? ""),
+            gold_buffer: String(draft.parameters?.gold_buffer ?? ""),
+            us30_buffer: String(draft.parameters?.us30_buffer ?? ""),
+            nas_buffer: String(draft.parameters?.nas_buffer ?? ""),
+        });
+    }
+
+    function readLebprimeStrategyDraft() {
+        const baseline = lebprimeConfigDraft();
+        return {
+            ...baseline,
+            enabled: on("lebprime-live-enabled"),
+            execution_mode: val("lebprime-live-mode") || "DRY",
+            symbols: Array.from(document.querySelectorAll("[data-lebprime-symbol]:checked")).map((node) => node.dataset.lebprimeSymbol),
+            timeframes: Array.from(document.querySelectorAll("[data-lebprime-timeframe]:checked")).map((node) => node.dataset.lebprimeTimeframe),
+            bars_to_fetch: val("lebprime-bars"),
+            max_spread_points: val("lebprime-spread"),
+            max_spread_points_by_symbol: {
+                ...baseline.max_spread_points_by_symbol,
+                XAUUSD: val("lebprime-spread-xau"),
+                US30: val("lebprime-spread-us30"),
+                NAS100: val("lebprime-spread-nas100"),
+            },
+            parameters: {
+                ...baseline.parameters,
+                gold_buffer: val("lebprime-gold-buffer"),
+                us30_buffer: val("lebprime-us30-buffer"),
+                nas_buffer: val("lebprime-nas-buffer"),
+            },
+        };
+    }
+
+    function updateLebprimeDraftState() {
+        if (!state.strategiesUi.mounted) return;
+        const draft = readLebprimeStrategyDraft();
+        state.strategiesUi.draft = draft;
+        state.strategiesUi.dirty = lebprimeComparableDraft(draft) !== lebprimeComparableDraft(lebprimeConfigDraft());
+        const savedText = state.strategiesUi.lastSaveRestartRequired ? "Saved - RESTART REQUIRED" : "Saved";
+        const statusNode = safeSetText("lebprime-draft-state", state.strategiesUi.saving ? "Saving..." : state.strategiesUi.dirty ? "Unsaved changes" : savedText);
+        if (statusNode) statusNode.className = state.strategiesUi.dirty ? "small text-warning" : "small text-secondary";
+        const saveButton = document.getElementById("save-lebprime-live");
+        if (saveButton) {
+            saveButton.textContent = state.strategiesUi.saving ? "Saving..." : "Save LebPrime v3.4.0";
+            saveButton.classList.toggle("btn-warning", state.strategiesUi.dirty && !state.strategiesUi.saving);
+            saveButton.classList.toggle("btn-primary", !state.strategiesUi.dirty || state.strategiesUi.saving);
+        }
+        updateLebprimeEditorAvailability();
+    }
+
+    function updateLebprimeEditorAvailability() {
+        const disabled = isReadonly() || state.strategiesUi.saving;
+        document.querySelectorAll("#lebprime-editable-config input, #lebprime-editable-config select, #save-lebprime-live").forEach((node) => { node.disabled = disabled; });
+    }
+
+    function validateLebprimeDraft(draft) {
+        if (!draft.symbols.length) return "Select at least one symbol.";
+        if (!draft.timeframes.length) return "Select at least one timeframe.";
+        const bars = Number(draft.bars_to_fetch);
+        if (!Number.isInteger(bars) || bars <= 0) return "Bars To Fetch must be a positive whole number.";
+        const numericFields = [
+            ["Max Spread Points", draft.max_spread_points],
+            ["XAUUSD Max Spread Points", draft.max_spread_points_by_symbol.XAUUSD],
+            ["US30 Max Spread Points", draft.max_spread_points_by_symbol.US30],
+            ["NAS100 Max Spread Points", draft.max_spread_points_by_symbol.NAS100],
+            ["Gold Buffer", draft.parameters.gold_buffer],
+            ["US30 Buffer", draft.parameters.us30_buffer],
+            ["NAS100 Buffer", draft.parameters.nas_buffer],
+        ];
+        const invalid = numericFields.find(([, value]) => value === "" || !Number.isFinite(Number(value)) || Number(value) < 0);
+        return invalid ? `${invalid[0]} must be zero or greater.` : "";
+    }
+
+    function mountLebprimeStrategyEditor() {
+        const container = ensureContainer("section-strategies");
+        if (!container || state.strategiesUi.mounted) return;
+        container.innerHTML = `
+            <div class="card border-0 shadow-sm"><div class="card-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <div><h2 class="h5 mb-1">lebprime_v3_4_0</h2><div class="small text-secondary" id="lebprime-startup-reason">Awaiting runtime status</div></div>
+                    <div id="lebprime-runtime-badge"></div>
+                </div>
+                <div id="lebprime-editable-config">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-2"><label class="form-label small text-secondary" for="lebprime-live-enabled">Enabled</label><div><input type="checkbox" id="lebprime-live-enabled"></div></div>
+                        <div class="col-md-2"><label class="form-label small text-secondary" for="lebprime-live-mode">Execution</label><select class="form-select" id="lebprime-live-mode"><option value="DRY">DRY</option><option value="LIVE">LIVE DEMO</option></select></div>
+                        <div class="col-md-4"><div class="form-label small text-secondary">Symbols</div><div class="d-flex flex-wrap gap-3">${["XAUUSD", "US30", "NAS100"].map((symbol) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-symbol="${symbol}">${symbol}</label>`).join("")}</div></div>
+                        <div class="col-md-4"><div class="form-label small text-secondary">Timeframes</div><div class="d-flex flex-wrap gap-3">${["M1", "M3", "M5", "M15", "M30", "M45"].map((timeframe) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-timeframe="${timeframe}">${timeframe}</label>`).join("")}</div></div>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-6 col-lg-2">${field("lebprime-bars", "Bars To Fetch", "", "number", "1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-spread", "Max Spread Points", "", "number", "0.1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-spread-xau", "XAUUSD Spread Max", "", "number", "0.1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-spread-us30", "US30 Spread Max", "", "number", "0.1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-spread-nas100", "NAS100 Spread Max", "", "number", "0.1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-gold-buffer", "Gold Buffer", "", "number", "0.1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-us30-buffer", "US30 Buffer", "", "number", "0.1")}</div>
+                        <div class="col-6 col-lg-2">${field("lebprime-nas-buffer", "NAS100 Buffer", "", "number", "0.1")}</div>
+                    </div>
+                    <div class="d-flex align-items-center gap-3 mb-4"><button class="btn btn-primary" id="save-lebprime-live">Save LebPrime v3.4.0</button><span class="small text-secondary" id="lebprime-draft-state">Saved</span></div>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6 col-lg"><div class="small text-secondary">Families</div><div class="h5 mb-0" id="lebprime-family-count">0</div></div>
+<div class="col-6 col-lg"><div class="small text-secondary">Internal Pending LIMITs</div><div class="h5 mb-0" id="lebprime-pending-count">0</div></div>
+<div class="col-6 col-lg"><div class="small text-secondary">Broker Filled Positions (Open Positions)</div><div class="h5 mb-0" id="lebprime-active-count">0</div></div>
+<div class="col-6 col-lg"><div class="small text-secondary">Broker Pending Orders (Broker Orders)</div><div class="h5 mb-0" id="lebprime-broker-count">0</div></div>
+<div class="col-6 col-lg"><div class="small text-secondary">Historical Active States</div><div class="h5 mb-0" id="lebprime-historical-active-count">0</div></div>
+<div class="col-6 col-lg"><div class="small text-secondary">Realtime Activated Trades</div><div class="h5 mb-0" id="lebprime-realtime-active-count">0</div></div>
+                    <div class="col-6 col-lg"><div class="small text-secondary">Duplicate Suppressed</div><div class="h5 mb-0" id="lebprime-duplicate-count">0</div></div>
+                </div>
+<div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Context</th><th>Health</th><th>Last Closed Candle</th><th>Last Scan</th><th>Candidates</th><th>Live Zones</th><th>Pending LIMITs</th><th>Active Trades</th><th>Last Error</th><th>Heartbeat</th></tr></thead><tbody id="lebprime-context-status-body"></tbody></table></div>
+<h3 class="h6 mt-4">Spread Validation</h3>
+<div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Logical Symbol</th><th>Broker Symbol</th><th>Bid</th><th>Ask</th><th>Point</th><th>Current Spread Points</th><th>Configured Max</th><th>Status</th><th>Rejection Reason</th></tr></thead><tbody id="lebprime-spread-status-body"></tbody></table></div>
+<h3 class="h6 mt-4">LebPrime Broker Entries</h3>
+<div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Context</th><th>Zone ID</th><th>Entry</th><th>Order Type</th><th>Price</th><th>Placed/Fitted Volume</th><th>Requested Volume</th><th>Minimum Volume</th><th>Required Margin</th><th>Free Margin</th><th>Projected Margin Level</th><th>Required Margin Level</th><th>SL</th><th>TP</th><th>MT5 Ticket</th><th>Status</th><th>Attempts</th><th>Retryable</th><th>Next Retry</th><th>Exact Failure</th></tr></thead><tbody id="lebprime-broker-entry-body"></tbody></table></div>
+            </div></div>`;
+        state.strategiesUi.mounted = true;
+        container.querySelectorAll("#lebprime-editable-config input, #lebprime-editable-config select").forEach((node) => {
+            node.addEventListener("input", updateLebprimeDraftState);
+            node.addEventListener("change", updateLebprimeDraftState);
+        });
+        document.getElementById("save-lebprime-live").onclick = saveLebprimeStrategyDraft;
+    }
+
+    function syncLebprimeStrategyEditor() {
+        if (state.strategiesUi.dirty) return;
+        const draft = lebprimeConfigDraft();
+        state.strategiesUi.draft = draft;
+        document.getElementById("lebprime-live-enabled").checked = draft.enabled;
+        document.getElementById("lebprime-live-mode").value = draft.execution_mode;
+        document.querySelectorAll("[data-lebprime-symbol]").forEach((node) => { node.checked = draft.symbols.includes(node.dataset.lebprimeSymbol); });
+        document.querySelectorAll("[data-lebprime-timeframe]").forEach((node) => { node.checked = draft.timeframes.includes(node.dataset.lebprimeTimeframe); });
+        document.getElementById("lebprime-bars").value = draft.bars_to_fetch;
+        document.getElementById("lebprime-spread").value = draft.max_spread_points;
+        document.getElementById("lebprime-spread-xau").value = draft.max_spread_points_by_symbol.XAUUSD ?? draft.max_spread_points;
+        document.getElementById("lebprime-spread-us30").value = draft.max_spread_points_by_symbol.US30 ?? draft.max_spread_points;
+        document.getElementById("lebprime-spread-nas100").value = draft.max_spread_points_by_symbol.NAS100 ?? draft.max_spread_points;
+        document.getElementById("lebprime-gold-buffer").value = num(draft.parameters.gold_buffer, 1);
+        document.getElementById("lebprime-us30-buffer").value = num(draft.parameters.us30_buffer, 30);
+        document.getElementById("lebprime-nas-buffer").value = num(draft.parameters.nas_buffer, 15);
+        updateLebprimeDraftState();
+    }
+
+    async function saveLebprimeStrategyDraft() {
+        if (state.strategiesUi.saving) return;
+        const localDraft = readLebprimeStrategyDraft();
+        const validationError = validateLebprimeDraft(localDraft);
+        if (validationError) {
+            setFeedback(validationError, true);
+            return;
+        }
+        const baseline = lebprimeConfigDraft();
+        const draft = {
+            ...baseline,
+            enabled: localDraft.enabled,
+            execution_mode: localDraft.execution_mode,
+            symbols: localDraft.symbols,
+            timeframes: localDraft.timeframes,
+            bars_to_fetch: Number(localDraft.bars_to_fetch),
+            max_spread_points: Number(localDraft.max_spread_points),
+            max_spread_points_by_symbol: {
+                XAUUSD: Number(localDraft.max_spread_points_by_symbol.XAUUSD),
+                US30: Number(localDraft.max_spread_points_by_symbol.US30),
+                NAS100: Number(localDraft.max_spread_points_by_symbol.NAS100),
+            },
+            parameters: {
+                ...baseline.parameters,
+                gold_buffer: Number(localDraft.parameters.gold_buffer),
+                us30_buffer: Number(localDraft.parameters.us30_buffer),
+                nas_buffer: Number(localDraft.parameters.nas_buffer),
+            },
+        };
+        state.strategiesUi.saving = true;
+        updateLebprimeDraftState();
+        const saveResult = await saveConfigPatch({ lebprime_v3_4_0: draft }, "lebprime_v3_4_0_update");
+        state.strategiesUi.saving = false;
+        if (saveResult) {
+            state.strategiesUi.dirty = false;
+            state.strategiesUi.lastSaveRestartRequired = !!saveResult.apply_plan?.pending_restart;
+            syncLebprimeStrategyEditor();
+        } else {
+            state.strategiesUi.draft = localDraft;
+            updateLebprimeDraftState();
+        }
+    }
+
+    function updateLebprimeStrategyStatus() {
+        const status = asObject(state.lebprimeLive);
+        const config = asObject(state.config.lebprime_v3_4_0);
+        safeSetText("lebprime-startup-reason", status.startup_block_reason || (status.started ? "Runtime active" : "Disabled or awaiting startup"));
+        safeSetHtml("lebprime-runtime-badge", badge(config.enabled ? (config.execution_mode === "LIVE" ? "LIVE DEMO" : "DRY") : "DISABLED", config.enabled ? "warning" : "secondary"));
+        safeSetText("lebprime-family-count", num(status.active_zone_families).toFixed(0));
+        safeSetText("lebprime-pending-count", num(status.pending_orders).toFixed(0));
+        safeSetText("lebprime-active-count", num(status.active_positions).toFixed(0));
+safeSetText("lebprime-broker-count", num(status.broker_order_count).toFixed(0));
+safeSetText("lebprime-historical-active-count", num(status.historical_active_states).toFixed(0));
+safeSetText("lebprime-realtime-active-count", num(status.realtime_activated_trades).toFixed(0));
+        safeSetText("lebprime-duplicate-count", num(status.duplicate_suppressed_zones).toFixed(0));
+        const contexts = asArray(status.contexts);
+ safeSetHtml("lebprime-context-status-body", contexts.map((row) => `<tr><td>${esc(row.logical_symbol)} ${esc(row.timeframe)}</td><td>${badge(row.status || "IDLE", row.status === "HEALTHY" ? "success" : row.status === "ERROR" ? "danger" : "secondary")}</td><td>${esc(row.last_closed_candle || "-")}</td><td>${esc(row.last_scan_time || "-")}</td><td>${num(row.candidate_count).toFixed(0)}</td><td>${num(row.live_zones).toFixed(0)}</td><td>${num(row.pending_limits).toFixed(0)}</td><td>${num(row.active_trades).toFixed(0)}</td><td>${esc(row.last_error || "-")}</td><td>${esc(row.heartbeat || "-")}</td></tr>`).join("") || `<tr><td colspan="10" class="text-secondary">Context status will appear after the runtime initializes.</td></tr>`);
+ const spreadStatus = asArray(status.spread_status);
+ safeSetHtml("lebprime-spread-status-body", spreadStatus.map((row) => `<tr><td>${esc(row.logical_symbol)}</td><td>${esc(row.broker_symbol)}</td><td>${esc(row.bid ?? "-")}</td><td>${esc(row.ask ?? "-")}</td><td>${esc(row.point ?? "-")}</td><td>${num(row.spread_points).toFixed(2)}</td><td>${num(row.max_spread_points).toFixed(2)}</td><td>${badge(row.status || "UNKNOWN", row.status === "PASS" ? "success" : "warning")}</td><td>${esc(row.rejection_reason || "-")}</td></tr>`).join("") || `<tr><td colspan="9" class="text-secondary">Spread status will appear after the next runtime scan.</td></tr>`);
+const brokerEntries = asArray(status.broker_entries);
+ safeSetHtml("lebprime-broker-entry-body", brokerEntries.map((row) => `<tr><td>${esc(row.context_key)}</td><td>${esc(row.zone_id)}</td><td>Entry ${num(row.entry_number).toFixed(0)}</td><td>${esc(row.order_type)}</td><td>${esc(row.normalized_price ?? row.entry_price)}</td><td>${esc(row.volume ?? "-")}</td><td>${esc(row.requested_volume ?? "-")}</td><td>${esc(row.minimum_volume ?? "-")}</td><td>${esc(row.required_margin ?? "-")}</td><td>${esc(row.free_margin ?? "-")}</td><td>${row.projected_margin_level == null ? "-" : `${num(row.projected_margin_level).toFixed(2)}%`}</td><td>${row.required_margin_level == null ? "-" : `${num(row.required_margin_level).toFixed(2)}%`}</td><td>${esc(row.sl ?? "-")}</td><td>${esc(row.tp ?? "-")}</td><td>${esc(row.mt5_order_ticket || "-")}</td><td>${badge(row.broker_status || "UNKNOWN", row.broker_status === "FILLED" ? "success" : row.broker_status === "PERMANENT_FAILURE" ? "danger" : row.broker_status === "RETRY_SCHEDULED" ? "warning" : "info")}</td><td>${num(row.attempt_count).toFixed(0)}</td><td>${row.retryable ? "Yes" : "No"}</td><td>${esc(row.next_retry_at || "-")}</td><td>${esc(row.last_failure || row.failure_reason || "-")}</td></tr>`).join("") || `<tr><td colspan="20" class="text-secondary">No broker entry records.</td></tr>`);
+}
+
+    function renderStrategies() {
+        mountLebprimeStrategyEditor();
+        syncLebprimeStrategyEditor();
+        updateLebprimeStrategyStatus();
     }
 
     function renderRisk() {
@@ -2591,7 +3021,6 @@
                         ${field("bt-spread", "Spread Points", draft.spread_points ?? backtestCfg.spread_model?.points ?? 20, "number", "0.1")}
                         ${field("bt-slippage", "Slippage Points", draft.slippage_points ?? backtestCfg.slippage_model?.points ?? 2, "number", "0.1")}
                         ${select("bt-execution-model", "Execution Model", ["next_bar_open", "signal_price_touch", "current_bar_close"], draft.execution_model ?? backtestCfg.execution_model ?? "next_bar_open")}
-                        <div class="small text-secondary mb-2">Engine Mode Snapshot: ${esc(executionModeLabel())}</div>
                         <div class="small mb-2">${badge(workerStateLabel(worker), workerTone(worker))} <span class="text-secondary">${worker.current_job_id ? `Job #${esc(worker.current_job_id)}` : "Idle"} | last seen ${esc(worker.last_seen_at || "N/A")}</span></div>
                         ${textOr(worker.state || worker.status, "unavailable").toLowerCase() !== "running" ? `<div class="alert alert-warning py-2">Backtest jobs can queue, but execution waits until the worker is running.</div>` : ""}
                         <div class="small text-secondary mb-2">Strategies</div>
@@ -2683,7 +3112,6 @@
                     spread_model: { type: "fixed_points", points: num(val("bt-spread"), 20) },
                     slippage_model: { type: "fixed_points", points: num(val("bt-slippage"), 2) },
                     execution_model: val("bt-execution-model"),
-                    engine_mode: currentExecutionMode().selected_mode || "V2_FULL",
                     notes: backtestCfg.notes || null,
                 };
                 const result = await api("/api/jobs/backtest", { method: "POST", body: JSON.stringify(payload) });
@@ -3053,7 +3481,7 @@
             const runRequest = asObject(displayRun?.request_json);
             const draft = state.oosDraft || {};
             const strategies = ["XAU_BOT_BREAKOUT", "XAU_BOT_COMPRESS", "XAU_LEBPRIM"];
-            const defaultStrategies = asArray(runRequest.enabled_strategies).length ? asArray(runRequest.enabled_strategies) : (currentExecutionMode().enabled_strategy_names.length ? currentExecutionMode().enabled_strategy_names : strategies);
+            const defaultStrategies = asArray(runRequest.enabled_strategies).length ? asArray(runRequest.enabled_strategies) : strategies;
             const selected = new Set(asArray(draft.enabled_strategies).length ? draft.enabled_strategies : defaultStrategies);
             const currentScenarioModeLabel = textOr(
                 displayRun?.current_scenario?.resolved_execution_mode?.selected_mode
@@ -3096,12 +3524,7 @@
                                 <div class="col-12">${field("oos-baseline-db", "Baseline DB Path", draft.baseline_database_path ?? displayRun?.baseline_database_path ?? "", "text")}</div>
                                 <div class="col-12">${field("oos-allowed-sessions", "Allowed Sessions CSV", draft.allowed_sessions ?? asArray(runRequest.session_filter?.allowed_sessions).join(", "), "text")}</div>
                             </div>
-                            <div class="dashboard-summary-card mt-3">
-                                <div class="small text-uppercase text-secondary fw-semibold mb-2">Execution Snapshot</div>
-                                ${renderExecutionModeSummary(currentExecutionMode())}
-                            </div>
-                            <div class="small text-secondary mt-3">Matrix: baseline and V2 comparison scenarios with final report rebuild support.</div>
-                            <div class="small text-secondary">Current dashboard mode: ${esc(executionModeLabel())}</div>
+                            <div class="small text-secondary mt-3">Historical comparison scenarios include final report rebuild support.</div>
                             <div class="mt-3">
                                 <div class="small text-uppercase text-secondary fw-semibold mb-2">Strategies</div>
                                 ${strategies.map((name) => `<div class="form-check"><input class="form-check-input" type="checkbox" id="oos-strategy-${name}" ${selected.has(name) ? "checked" : ""}><label class="form-check-label" for="oos-strategy-${name}">${esc(name)}</label></div>`).join("")}
@@ -3264,7 +3687,6 @@
                         spread_points: num(val("oos-spread"), 20),
                         slippage_points: num(val("oos-slippage"), 2),
                         execution_model: val("oos-execution-model"),
-                        engine_mode: currentExecutionMode().selected_mode || "V2_FULL",
                         baseline_run_id: val("oos-baseline-run-id") ? Number(val("oos-baseline-run-id")) : null,
                         baseline_bundle_path: val("oos-baseline-bundle") || null,
                         baseline_database_path: val("oos-baseline-db") || null,
@@ -3394,17 +3816,16 @@
         if (payload.runtime_state) {
             state.status = { ...state.status, control: payload.runtime_state };
         }
-        if (!state.modeControl.mode && state.config.mode) {
-            state.modeControl.mode = normalizeModeData(state.config.mode);
-        }
         renderAll();
     }
     async function refreshStatus() {
-        state.status = await api("/api/status");
+        const [statusPayload, lebprimePayload] = await Promise.all([
+            api("/api/status"),
+            api("/api/strategies/lebprime-v3-4-0/status"),
+        ]);
+        state.status = statusPayload;
+        state.lebprimeLive = lebprimePayload;
         state.workerStatus = state.status.worker || state.workerStatus;
-        if (!state.modeControl.mode && state.status.execution_mode) {
-            state.modeControl.mode = normalizeModeData(state.status.execution_mode);
-        }
         if (!state.oosUi.selectedRunId && state.status.oos) {
             const embeddedOOS = normalizeOOSPayload(state.status.oos);
             state.oosStatus = embeddedOOS;
@@ -3532,12 +3953,616 @@
         renderAll();
     }
 
+    async function fetchIndicatorLab() {
+        ensureIndicatorLabDraft();
+        try {
+            const [datasets, campaigns, lebprime, vss3] = await Promise.all([
+                api("/api/indicator-lab/datasets"),
+                api("/api/indicator-lab/campaigns?limit=20"),
+                api("/api/indicator-lab/parameters/LEBPRIME"),
+                api("/api/indicator-lab/parameters/VSS3"),
+            ]);
+            state.indicatorLab.datasets = datasets.datasets || [];
+            state.indicatorLab.campaigns = campaigns.campaigns || [];
+            state.indicatorLab.parameters = { LEBPRIME: lebprime.parameters || [], VSS3: vss3.parameters || [] };
+            const selected = num(state.indicatorLab.selectedCampaignId, 0) || num(state.indicatorLab.campaigns[0]?.id, 0);
+            state.indicatorLab.selectedCampaignId = selected || null;
+            if (selected) {
+                const results = await api(`/api/indicator-lab/campaigns/${selected}/results?limit=200`);
+                state.indicatorLab.results = results.results || [];
+                await selectIndicatorLabResultForCampaign(selected);
+            } else {
+                state.indicatorLab.results = [];
+                state.indicatorLab.selectedTestId = null;
+                state.indicatorLab.zones = [];
+            }
+            state.indicatorLab.error = null;
+            state.indicatorLabUi.error = "";
+        } catch (error) {
+            state.indicatorLab.error = error.message;
+            state.indicatorLabUi.error = error.message;
+        }
+        renderAll();
+    }
+
+    async function selectIndicatorLabResultForCampaign(campaignId, options = {}) {
+        const lab = state.indicatorLab;
+        const results = asArray(lab.results);
+        const campaign = asArray(lab.campaigns).find((row) => num(row.id) === num(campaignId)) || null;
+        if (!results.length) {
+            lab.selectedTestId = null;
+            lab.zones = [];
+            return;
+        }
+        const existing = results.find((row) => num(row.id) === num(lab.selectedTestId));
+        const terminal = ["COMPLETED", "FAILED", "PARTIAL"].includes(textOr(campaign?.state).toUpperCase());
+        let target = null;
+        if (!options.force && existing && !terminal && results.length !== 1) {
+            target = existing;
+        } else {
+            const bestId = num(campaign?.best_test_id, 0);
+            target = results.find((row) => bestId && num(row.id) === bestId)
+                || results.find((row) => textOr(row.state).toUpperCase() === "COMPLETED")
+                || (results.length === 1 ? results[0] : existing)
+                || results[0];
+        }
+        if (!target) return;
+        if (num(lab.selectedTestId) === num(target.id) && asArray(lab.zones).length && !options.force) return;
+        lab.selectedTestId = num(target.id);
+        try {
+            const zones = await api(`/api/indicator-lab/tests/${lab.selectedTestId}/zones`);
+            lab.zones = zones.zones || [];
+            const selectedZone = lab.zones.find((zone) => num(zone.id) === num(lab.selectedZoneId)) || lab.zones[0] || null;
+            if (selectedZone) {
+                await loadIndicatorZone(selectedZone.id, { silent: true });
+            } else {
+                lab.selectedZoneId = null;
+                lab.selectedZone = null;
+                lab.zoneEvents = [];
+            }
+        } catch (error) {
+            lab.zones = [];
+            state.indicatorLabUi.error = `Failed to load zones for test #${lab.selectedTestId}: ${error.message}`;
+        }
+    }
+
+    function indicatorLabProgress(row) {
+        const current = num(row?.progress_current, 0);
+        const total = num(row?.progress_total || row?.generated_configurations, 0);
+        const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+        return { current, total, pct };
+    }
+
+    function indicatorLabCampaignId(payload) {
+        return num(payload?.campaign?.id || payload?.result?.campaign?.id || payload?.campaign_id, 0) || null;
+    }
+
+    const zoneDisplaySide = (value) => {
+        const side = textOr(value).toUpperCase();
+        if (side === "DEMAND" || side === "BUY") return "BUY";
+        if (side === "SUPPLY" || side === "SELL") return "SELL";
+        return side || "N/A";
+    };
+
+    const zoneDisplayStatus = (zone) => {
+        const state = textOr(zone?.terminal_state).toUpperCase();
+        if (state === "TP_HIT") return "TP";
+        if (state === "SL_HIT") return "SL";
+        if (state === "BE_EXIT") return "BE";
+        if (["CANCELED", "INVALIDATED", "EXPIRED"].includes(state)) return state;
+        if (zone?.activated_time) return "ACTIVE";
+        return "PENDING";
+    };
+
+    function indicatorZoneDownload(path) {
+        window.location.href = path;
+    }
+
+    function filteredIndicatorZones() {
+        const filters = state.indicatorLab.zoneFilters || {};
+        return asArray(state.indicatorLab.zones).filter((zone) => {
+            const side = zoneDisplaySide(zone.side);
+            const status = zoneDisplayStatus(zone);
+            const sourceTime = textOr(zone.source_time);
+            const engineId = textOr(zone.engine_zone_id).toLowerCase();
+            if (filters.side && filters.side !== "ALL" && side !== filters.side) return false;
+            if (filters.status && filters.status !== "ALL" && status !== filters.status) return false;
+            if (filters.flipped === "YES" && !zone.is_flipped) return false;
+            if (filters.flipped === "NO" && zone.is_flipped) return false;
+            if (filters.from && sourceTime && sourceTime.slice(0, 10) < filters.from) return false;
+            if (filters.to && sourceTime && sourceTime.slice(0, 10) > filters.to) return false;
+            if (filters.search) {
+                const query = String(filters.search).trim().toLowerCase();
+                if (query && !engineId.includes(query) && String(zone.id || "").toLowerCase() !== query) return false;
+            }
+            return true;
+        });
+    }
+
+    async function loadIndicatorZone(zoneId, options = {}) {
+        const lab = state.indicatorLab;
+        const id = num(zoneId, 0);
+        if (!id) return;
+        lab.selectedZoneId = id;
+        try {
+            const [zonePayload, eventsPayload] = await Promise.all([
+                api(`/api/indicator-lab/zones/${id}`),
+                api(`/api/indicator-lab/zones/${id}/events`),
+            ]);
+            lab.selectedZone = zonePayload.zone || null;
+            lab.zoneEvents = eventsPayload.events || [];
+            lab.selectedTestId = num(lab.selectedZone?.test_id, lab.selectedTestId);
+            state.indicatorLabUi.error = "";
+        } catch (error) {
+            state.indicatorLabUi.error = error.message;
+        }
+        if (!options.silent) renderAll({ force: true });
+    }
+
+    async function selectAdjacentIndicatorZone(direction) {
+        const zones = filteredIndicatorZones();
+        if (!zones.length) return;
+        const currentIndex = Math.max(0, zones.findIndex((zone) => num(zone.id) === num(state.indicatorLab.selectedZoneId)));
+        const nextIndex = Math.max(0, Math.min(zones.length - 1, currentIndex + direction));
+        await loadIndicatorZone(zones[nextIndex].id);
+    }
+
+    function detailItem(label, value) {
+        return `<div class="col-md-3 col-sm-6"><div class="small text-secondary">${esc(label)}</div><div class="fw-semibold">${esc(value ?? "N/A")}</div></div>`;
+    }
+
+    function renderZoneDetails() {
+        const zone = state.indicatorLab.selectedZone;
+        if (!zone) return renderEmptyState("No Zone Selected", "Select a zone row to inspect creation, lifecycle, trade, parameters, and events.");
+        const metadata = asObject(zone.metadata_json);
+        const snapshot = asObject(zone.parameter_snapshot_json);
+        const params = asObject(snapshot.parameters);
+        const events = asArray(state.indicatorLab.zoneEvents);
+        const paramRows = Object.entries(params).map(([key, value]) => `<tr><td>${esc(key)}</td><td>${esc(value)}</td></tr>`).join("");
+        return `
+            <div class="row g-3">
+                <div class="col-12"><h4 class="h6 text-uppercase text-secondary fw-semibold mb-0">Zone Details</h4></div>
+                <div class="col-12"><div class="row g-2">
+                    ${detailItem("Zone ID", zone.engine_zone_id || zone.id)}
+                    ${detailItem("Indicator", zone.indicator)}
+                    ${detailItem("Campaign", zone.campaign_id)}
+                    ${detailItem("Test", zone.test_id)}
+                    ${detailItem("Dataset", zone.dataset_id)}
+                    ${detailItem("Side", zoneDisplaySide(zone.side))}
+                    ${detailItem("Flipped", zone.is_flipped ? "YES" : "NO")}
+                    ${detailItem("Parent", zone.parent_zone_id || "")}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Source</h5><div class="row g-2">
+                    ${detailItem("Timestamp", zone.source_time)}
+                    ${detailItem("Bar", zone.source_bar_index)}
+                    ${detailItem("Open", zone.source_open)}
+                    ${detailItem("High", zone.source_high)}
+                    ${detailItem("Low", zone.source_low)}
+                    ${detailItem("Close", zone.source_close)}
+                    ${detailItem("Body", zone.source_body)}
+                    ${detailItem("Range", zone.source_range)}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Detection</h5><div class="row g-2">
+                    ${detailItem("ATR", zone.atr_at_source)}
+                    ${detailItem("Average Body", zone.average_body_at_source)}
+                    ${detailItem("Momentum Body", zone.momentum_body || metadata.body_mult_actual)}
+                    ${detailItem("Momentum Ratio", zone.momentum_body_ratio)}
+                    ${detailItem("Momentum Count", zone.momentum_count || metadata.same_direction_count)}
+                    ${detailItem("Momentum Span", zone.momentum_span || metadata.momentum_span_used)}
+                    ${detailItem("Base Bars", zone.base_bar_count)}
+                    ${detailItem("Refinement", zone.refinement_method || metadata.zone_refinement_method)}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Zone</h5><div class="row g-2">
+                    ${detailItem("Original Top", metadata.original_zone_top || metadata.raw_zone_top)}
+                    ${detailItem("Original Bottom", metadata.original_zone_bottom || metadata.raw_zone_bottom)}
+                    ${detailItem("Top", zone.zone_top)}
+                    ${detailItem("Bottom", zone.zone_bottom)}
+                    ${detailItem("Mid", zone.zone_mid)}
+                    ${detailItem("Width", zone.zone_width_price || zone.zone_width)}
+                    ${detailItem("ATR Width", zone.zone_width_atr)}
+                    ${detailItem("Overlap", metadata.overlap_detected ?? "")}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Lifecycle</h5><div class="row g-2">
+                    ${detailItem("Candidate", `${zone.candidate_time || "N/A"} | ${zone.candidate_bar_index ?? "N/A"}`)}
+                    ${detailItem("Created", `${zone.created_time || "N/A"} | ${zone.created_bar_index ?? "N/A"}`)}
+                    ${detailItem("Confirmed", `${zone.confirmed_time || "N/A"} | ${zone.confirmed_bar_index ?? "N/A"}`)}
+                    ${detailItem("Armed", `${zone.armed_time || "N/A"} | ${zone.armed_bar_index ?? "N/A"}`)}
+                    ${detailItem("Limit", `${zone.limit_created_time || "N/A"} | ${zone.limit_created_bar_index ?? "N/A"}`)}
+                    ${detailItem("First Retest", `${zone.first_retest_time || "N/A"} | ${zone.first_retest_bar_index ?? "N/A"}`)}
+                    ${detailItem("Entry 1 Activated", `${zone.entry1_activated_time || zone.activated_time || "N/A"} | ${zone.entry1_activated_bar_index ?? zone.activated_bar_index ?? "N/A"}`)}
+                    ${detailItem("Entry 2 Activated", `${zone.entry2_activated_time || "N/A"} | ${zone.entry2_activated_bar_index ?? "N/A"}`)}
+                    ${detailItem("Terminal", `${zone.terminal_time || "N/A"} | ${zone.terminal_bar_index ?? "N/A"}`)}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Trade</h5><div class="row g-2">
+                    ${detailItem("Entry", zone.entry_price)}
+                    ${detailItem("Entry 1", zone.entry1)}
+                    ${detailItem("Entry 2", zone.entry2)}
+                    ${detailItem("SL", zone.sl_price)}
+                    ${detailItem("Structural Swing", zone.structural_swing_price)}
+                    ${detailItem("TP1", zone.tp1_price)}
+                    ${detailItem("TP2", zone.tp2_price || zone.tp_price)}
+                    ${detailItem("RR", zone.rr)}
+                    ${detailItem("Buffer", zone.buffer_used || metadata.buffer_used)}
+                    ${detailItem("Departure", zone.departure_distance)}
+                    ${detailItem("MFE", zone.mfe_r)}
+                    ${detailItem("MAE", zone.mae_r)}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Result</h5><div class="row g-2">
+                    ${detailItem("State", zone.terminal_state || zoneDisplayStatus(zone))}
+                    ${detailItem("Exit", zone.exit_price || zone.result_price)}
+                    ${detailItem("Result R", zone.result_r)}
+                    ${detailItem("Result Points", zone.result_points)}
+                    ${detailItem("Holding Bars", zone.holding_bars)}
+                    ${detailItem("Holding Minutes", zone.holding_minutes)}
+                    ${detailItem("Reason", zone.terminal_reason || zone.activation_reason || zone.creation_reason)}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Parity Data</h5><div class="row g-2">
+                    ${detailItem("Source Time", zone.source_time)}
+                    ${detailItem("Side", zoneDisplaySide(zone.side))}
+                    ${detailItem("Top", zone.zone_top)}
+                    ${detailItem("Bottom", zone.zone_bottom)}
+                    ${detailItem("Created Time", zone.created_time)}
+                    ${detailItem("Limit Time", zone.limit_created_time)}
+                    ${detailItem("Activation Time", zone.activated_time)}
+                    ${detailItem("SL", zone.sl_price)}
+                    ${detailItem("TP", zone.tp_price)}
+                    ${detailItem("Terminal", zone.terminal_state)}
+                    ${detailItem("Result", zone.result_r)}
+                </div></div>
+                <div class="col-12"><h5 class="h6 mb-2">Parameters</h5>
+                    <div class="small text-secondary mb-2">Hash: ${esc(zone.parameter_hash || "")}</div>
+                    <details><summary class="small">Parameter Snapshot</summary><div class="table-responsive mt-2"><table class="table table-sm strategy-table"><tbody>${paramRows || `<tr><td class="text-secondary">No parameters.</td></tr>`}</tbody></table></div></details>
+                </div>
+                <div class="col-12"><h5 class="h6 mb-2">Events</h5>
+                    <div class="table-responsive"><table class="table table-sm strategy-table">
+                        <thead><tr><th>Time</th><th>Bar</th><th>Event</th><th>Price</th><th>Reason</th></tr></thead>
+                        <tbody>${events.map((event) => `<tr><td>${esc(event.timestamp)}</td><td>${esc(event.bar_index)}</td><td>${esc(event.event_type)}</td><td>${esc(event.price ?? "")}</td><td>${esc(event.reason || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="text-secondary">No events for this zone.</td></tr>`}</tbody>
+                    </table></div>
+                </div>
+            </div>`;
+    }
+
+    function indicatorParamInputs(indicator) {
+        const draft = ensureIndicatorLabDraft();
+        const paramDraft = asObject(draft.parameters[indicator]);
+        const optDraft = asObject(draft.optimization[indicator]);
+        return asArray(state.indicatorLab.parameters[indicator]).map((param) => {
+            const value = paramDraft[param.name] ?? param.default;
+            const opt = asObject(optDraft[param.name]);
+            const type = param.type === "bool" ? "checkbox" : (param.type === "int" || param.type === "float" ? "number" : (param.type === "enum" ? "select" : "text"));
+            const valueControl = type === "checkbox"
+                ? `<input class="form-check-input il-param-value" data-param="${esc(param.name)}" data-kind="${esc(param.type)}" type="checkbox" ${value ? "checked" : ""}>`
+                : type === "select"
+                    ? `<select class="form-select form-select-sm il-param-value" data-param="${esc(param.name)}" data-kind="${esc(param.type)}">${asArray(param.values).map((option) => `<option value="${esc(option)}" ${String(option) === String(value) ? "selected" : ""}>${esc(option)}</option>`).join("")}</select>`
+                    : `<input class="form-control form-control-sm il-param-value" data-param="${esc(param.name)}" data-kind="${esc(param.type)}" type="${type}" value="${esc(value)}" ${param.step ? `step="${esc(param.step)}"` : ""}>`;
+            return `<tr>
+                <td><div class="fw-semibold">${esc(param.label || param.name)}</div><div class="small text-secondary">${esc(param.pine_name || "")}</div></td>
+                <td>${valueControl}</td>
+                <td><input class="form-check-input il-opt-enabled" data-param="${esc(param.name)}" type="checkbox" ${opt.enabled ? "checked" : ""}></td>
+                <td><input class="form-control form-control-sm il-opt-start" data-param="${esc(param.name)}" placeholder="start" value="${esc(opt.start ?? "")}"></td>
+                <td><input class="form-control form-control-sm il-opt-end" data-param="${esc(param.name)}" placeholder="end" value="${esc(opt.end ?? "")}"></td>
+                <td><input class="form-control form-control-sm il-opt-step" data-param="${esc(param.name)}" placeholder="step" value="${esc(opt.step ?? "")}"></td>
+                <td><input class="form-control form-control-sm il-opt-values" data-param="${esc(param.name)}" placeholder="CSV values" value="${esc(opt.values ?? "")}"></td>
+            </tr>`;
+        }).join("");
+    }
+
+    function collectIndicatorCampaignPayload() {
+        captureIndicatorLabDraft();
+        const draft = ensureIndicatorLabDraft();
+        const indicator = draft.campaign.indicator || state.indicatorLab.selectedIndicator || "LEBPRIME";
+        const paramDraft = asObject(draft.parameters[indicator]);
+        const optDraft = asObject(draft.optimization[indicator]);
+        const schema = asArray(state.indicatorLab.parameters[indicator]);
+        const fixed = {};
+        const grid = {};
+        schema.forEach((param) => {
+            const name = param.name;
+            const kind = param.type;
+            const raw = paramDraft[name] ?? param.default;
+            if (kind === "bool") fixed[name] = !!raw;
+            else if (kind === "int") fixed[name] = Number.parseInt(raw, 10);
+            else if (kind === "float") fixed[name] = Number.parseFloat(raw);
+            else fixed[name] = raw;
+            const opt = asObject(optDraft[name]);
+            if (!opt.enabled) return;
+            const item = { enabled: true };
+            const values = csvValues(opt.values);
+            if (values.length) item.values = values;
+            if (opt.start !== undefined && opt.start !== "") item.start = opt.start;
+            if (opt.end !== undefined && opt.end !== "") item.end = opt.end;
+            if (opt.step !== undefined && opt.step !== "") item.step = opt.step;
+            grid[name] = item;
+        });
+        return {
+            actor: "dashboard",
+            name: draft.campaign.name || "Indicator Campaign",
+            dataset_id: num(draft.campaign.dataset_id, 0),
+            indicator,
+            fixed_parameters: fixed,
+            optimization_grid: grid,
+            notes: draft.campaign.notes || "",
+            confirm_large: !!draft.campaign.confirm_large,
+        };
+    }
+
+    function renderIndicatorLab() {
+        const container = ensureContainer("section-indicator-lab");
+        const lab = state.indicatorLab;
+        const draft = ensureIndicatorLabDraft();
+        const datasets = asArray(lab.datasets);
+        const campaigns = asArray(lab.campaigns);
+        const results = asArray(lab.results);
+        const ui = state.indicatorLabUi || {};
+        const selectedIndicator = draft.campaign.indicator || lab.selectedIndicator || "LEBPRIME";
+        lab.selectedIndicator = selectedIndicator;
+        const latest = campaigns.find((row) => num(row.id) === num(lab.selectedCampaignId)) || campaigns[0] || null;
+        const selectedDatasetId = draft.campaign.dataset_id ?? String(datasets[0]?.id || "");
+        const latestProgress = indicatorLabProgress(latest);
+        container.innerHTML = `
+            <div class="row g-3">
+                <div class="col-12 d-flex justify-content-between align-items-center">
+                    <div>
+                        <h2 class="h4 mb-1">Indicator Lab</h2>
+                        <div class="small text-secondary">Frozen-data experiments for LebPrime and VSS3. No live order path is used.</div>
+                        ${latest ? `<div class="small mt-1">${badge(latest.state || "IDLE", stateTone(latest.state))} <span class="text-secondary">Campaign #${esc(latest.id)} | ${esc(latestProgress.current)} / ${esc(latestProgress.total)} tests (${esc(latestProgress.pct)}%)</span></div>` : ""}
+                    </div>
+                    <button class="btn btn-outline-primary" id="il-refresh">Refresh</button>
+                </div>
+                ${lab.error ? `<div class="col-12"><div class="alert alert-danger py-2">${esc(lab.error)}</div></div>` : ""}
+                ${ui.error ? `<div class="col-12"><div class="alert alert-danger py-2">${esc(ui.error)}</div></div>` : ""}
+                ${ui.message ? `<div class="col-12"><div class="alert alert-success py-2">${esc(ui.message)}</div></div>` : ""}
+                <div class="col-lg-5">
+                    <div class="panel h-100">
+                        <h3 class="h6 text-uppercase text-secondary fw-semibold">Datasets</h3>
+                        <div class="row g-2 mb-3">
+                            <div class="col-12">${field("il-ds-name", "Name", draft.dataset.name ?? "XAUUSD_M1_2026_08_01_2026_09_14")}</div>
+                            <div class="col-6">${field("il-ds-symbol", "Symbol", draft.dataset.symbol ?? "XAUUSD")}</div>
+                            <div class="col-6">${select("il-ds-timeframe", "Timeframe", ["M1", "M3", "M5", "M15", "M30", "H1"], draft.dataset.timeframe ?? "M1")}</div>
+                            <div class="col-6">${field("il-ds-start", "Start", draft.dataset.start_date ?? "", "date")}</div>
+                            <div class="col-6">${field("il-ds-end", "End", draft.dataset.end_date ?? "", "date")}</div>
+                            <div class="col-12">${field("il-ds-notes", "Notes", draft.dataset.notes ?? "")}</div>
+                            <div class="col-12"><button class="btn btn-primary" id="il-create-dataset">Create MT5 Dataset</button></div>
+                        </div>
+                        <div class="table-responsive"><table class="table table-sm strategy-table">
+                            <thead><tr><th>Name</th><th>Symbol</th><th>TF</th><th>Bars</th><th>Status</th><th>Hash</th></tr></thead>
+                            <tbody>${datasets.map((row) => `<tr><td>${esc(row.name)}</td><td>${esc(row.symbol)}</td><td>${esc(row.timeframe)}</td><td>${num(row.bar_count)}</td><td><span class="badge text-bg-${stateTone(row.status)}">${esc(row.status)}</span></td><td class="small text-secondary">${esc(String(row.content_hash || "").slice(0, 10))}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No frozen datasets yet.</td></tr>`}</tbody>
+                        </table></div>
+                    </div>
+                </div>
+                <div class="col-lg-7">
+                    <div class="panel h-100">
+                        <h3 class="h6 text-uppercase text-secondary fw-semibold">New Campaign</h3>
+                        <div class="row g-2">
+                            <div class="col-md-5">${field("il-campaign-name", "Campaign Name", draft.campaign.name ?? "Indicator Campaign")}</div>
+                            <div class="col-md-4">${select("il-dataset", "Dataset", datasets.map((row) => String(row.id)), String(selectedDatasetId))}</div>
+                            <div class="col-md-3">${select("il-indicator", "Indicator", ["LEBPRIME", "VSS3"], selectedIndicator)}</div>
+                            <div class="col-12">${field("il-notes", "Notes", draft.campaign.notes ?? "")}</div>
+                        </div>
+                        <div class="table-responsive mt-3"><table class="table table-sm strategy-table">
+                            <thead><tr><th>Parameter</th><th>Value</th><th>Opt</th><th>Start</th><th>End</th><th>Step</th><th>Values</th></tr></thead>
+                            <tbody>${indicatorParamInputs(selectedIndicator)}</tbody>
+                        </table></div>
+                        <div class="d-flex flex-wrap gap-2 align-items-center">
+                            <button class="btn btn-outline-info" id="il-preview">Preview</button>
+                            <button class="btn btn-primary" id="il-start" ${ui.submitting ? "disabled" : ""}>${ui.submitting ? "Creating campaign..." : "Start Campaign"}</button>
+                            <div class="form-check"><input class="form-check-input" id="il-confirm-large" type="checkbox" ${draft.campaign.confirm_large ? "checked" : ""}><label class="form-check-label" for="il-confirm-large">Confirm large matrix</label></div>
+                            <span class="small text-secondary" id="il-preview-result"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="panel">
+                        <h3 class="h6 text-uppercase text-secondary fw-semibold">Running Campaigns</h3>
+                        <div class="table-responsive"><table class="table table-sm strategy-table">
+                            <thead><tr><th>ID</th><th>Name</th><th>Indicator</th><th>Dataset</th><th>State</th><th>Progress</th><th>Best</th><th></th></tr></thead>
+                            <tbody>${campaigns.map((row) => { const progress = indicatorLabProgress(row); return `<tr class="${num(row.id) === num(lab.selectedCampaignId) ? "table-active" : ""}"><td>${row.id}</td><td>${esc(row.name)}</td><td>${esc(row.indicator)}</td><td>${row.dataset_id}</td><td>${badge(row.state || "IDLE", stateTone(row.state))}</td><td>${esc(progress.current)} / ${esc(progress.total)} <span class="text-secondary">(${esc(progress.pct)}%)</span></td><td>${esc(row.best_test_id || "")}</td><td><button class="btn btn-sm btn-outline-light" data-il-campaign="${row.id}">Load</button></td></tr>`; }).join("") || `<tr><td colspan="8" class="text-secondary">No campaigns yet.</td></tr>`}</tbody>
+                        </table></div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="panel">
+                        <h3 class="h6 text-uppercase text-secondary fw-semibold">Results</h3>
+                        <div class="table-responsive"><table class="table table-sm strategy-table">
+                            <thead><tr><th>Rank</th><th>Test</th><th>State</th><th>Zones</th><th>Flipped</th><th>Limits</th><th>Activated</th><th>TP</th><th>SL</th><th>BE</th><th>Win %</th><th>Net R</th><th>PF</th><th></th></tr></thead>
+                            <tbody>${results.map((row, index) => { const m = asObject(row.metrics_json); return `<tr class="${num(row.id) === num(lab.selectedTestId) ? "table-active" : ""}"><td>${index + 1}</td><td>${row.id}</td><td>${badge(row.state || "PENDING", stateTone(row.state))}</td><td>${num(m.zones_created)}</td><td>${num(m.flipped_zones)}</td><td>${num(m.limit_created)}</td><td>${num(m.activated)}</td><td>${num(m.tp_hit)}</td><td>${num(m.sl_hit)}</td><td>${num(m.be_exit)}</td><td>${num(m.win_rate).toFixed(2)}</td><td>${num(m.net_r).toFixed(2)}</td><td>${num(m.profit_factor).toFixed(2)}</td><td><button class="btn btn-sm btn-outline-info" data-il-test="${row.id}">Zones</button></td></tr>`; }).join("") || `<tr><td colspan="14" class="text-secondary">Results appear as worker tests complete.</td></tr>`}</tbody>
+                        </table></div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="panel">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                            <h3 class="h6 text-uppercase text-secondary fw-semibold mb-0">Zone Explorer</h3>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button class="btn btn-sm btn-outline-light" id="il-zone-prev">Previous Zone</button>
+                                <button class="btn btn-sm btn-outline-light" id="il-zone-next">Next Zone</button>
+                                <button class="btn btn-sm btn-outline-info" id="il-open-replay" ${lab.selectedTestId ? "" : "disabled"}>Open Replay</button>
+                                <button class="btn btn-sm btn-outline-success" id="il-export-zones" ${lab.selectedTestId ? "" : "disabled"}>Export Zones CSV</button>
+                                <button class="btn btn-sm btn-outline-success" id="il-export-candidates" ${lab.selectedTestId ? "" : "disabled"}>Export Candidates</button>
+                                <button class="btn btn-sm btn-outline-success" id="il-export-events" ${lab.selectedTestId ? "" : "disabled"}>Export Events CSV</button>
+                                <button class="btn btn-sm btn-outline-success" id="il-export-results" ${lab.selectedCampaignId ? "" : "disabled"}>Export Results CSV</button>
+                            </div>
+                        </div>
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-2">${select("il-zone-side", "Side", ["ALL", "BUY", "SELL"], lab.zoneFilters?.side || "ALL")}</div>
+                            <div class="col-md-2">${select("il-zone-status", "Status", ["ALL", "PENDING", "ACTIVE", "TP", "SL", "BE", "CANCELED", "INVALIDATED"], lab.zoneFilters?.status || "ALL")}</div>
+                            <div class="col-md-2">${field("il-zone-from", "Date From", lab.zoneFilters?.from || "", "date")}</div>
+                            <div class="col-md-2">${field("il-zone-to", "Date To", lab.zoneFilters?.to || "", "date")}</div>
+                            <div class="col-md-2">${field("il-zone-search", "Zone ID Search", lab.zoneFilters?.search || "")}</div>
+                            <div class="col-md-2">${select("il-zone-flipped", "Flipped", ["ALL", "YES", "NO"], lab.zoneFilters?.flipped || "ALL")}</div>
+                        </div>
+                        <div class="table-responsive"><table class="table table-sm strategy-table">
+                            <thead><tr><th>Zone ID</th><th>Side</th><th>Source Time</th><th>Created Time</th><th>Top</th><th>Bottom</th><th>Width</th><th>ATR Width</th><th>Limit</th><th>Activated</th><th>Entry</th><th>SL</th><th>TP</th><th>Terminal</th><th>Result R</th></tr></thead>
+                            <tbody>${filteredIndicatorZones().map((z) => `<tr class="${num(z.id) === num(lab.selectedZoneId) ? "table-active" : ""}" data-il-zone="${esc(z.id)}"><td>${esc(z.engine_zone_id || z.id)}</td><td>${esc(zoneDisplaySide(z.side))}</td><td>${esc(z.source_time || "")}</td><td>${esc(z.created_time || "")}</td><td>${num(z.zone_top).toFixed(2)}</td><td>${num(z.zone_bottom).toFixed(2)}</td><td>${num(z.zone_width_price ?? z.zone_width).toFixed(2)}</td><td>${z.zone_width_atr === null || z.zone_width_atr === undefined ? "" : num(z.zone_width_atr).toFixed(3)}</td><td>${esc(z.limit_created_time || "")}</td><td>${esc(z.activated_time || "")}</td><td>${esc(z.entry_price ?? "")}</td><td>${esc(z.sl_price ?? "")}</td><td>${esc(z.tp_price ?? "")}</td><td>${esc(z.terminal_state || zoneDisplayStatus(z))}</td><td>${z.result_r === null || z.result_r === undefined ? "" : num(z.result_r).toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="15" class="text-secondary">Select a result to inspect zones.</td></tr>`}</tbody>
+                        </table></div>
+                        <div class="mt-3">${renderZoneDetails()}</div>
+                    </div>
+                </div>
+            </div>`;
+        document.getElementById("il-refresh").onclick = () => fetchIndicatorLab();
+        document.querySelectorAll("#section-indicator-lab input, #section-indicator-lab select").forEach((node) => {
+            node.addEventListener("focus", () => markIndicatorLabInteraction());
+            node.addEventListener("click", () => markIndicatorLabInteraction());
+            node.addEventListener("keydown", () => markIndicatorLabInteraction());
+            if (node.id === "il-indicator") return;
+            node.addEventListener("input", () => captureIndicatorLabDraft({ markDirty: true }));
+            node.addEventListener("change", () => captureIndicatorLabDraft({ markDirty: true }));
+            node.addEventListener("blur", () => {
+                window.setTimeout(() => {
+                    if (!isIndicatorLabInputActive()) {
+                        state.indicatorLabUi.pauseRefreshUntil = Date.now() + 3000;
+                    }
+                }, 0);
+            });
+        });
+        document.getElementById("il-indicator").onchange = (event) => {
+            const previousIndicator = lab.selectedIndicator || ensureIndicatorLabDraft().campaign.indicator || "LEBPRIME";
+            captureIndicatorLabDraft({ markDirty: true, indicator: previousIndicator, campaignIndicator: event.target.value });
+            lab.selectedIndicator = event.target.value;
+            ensureIndicatorLabDraft().campaign.indicator = event.target.value;
+            renderAll({ force: true });
+        };
+        document.getElementById("il-create-dataset").onclick = async () => {
+            state.indicatorLabUi.error = "";
+            try {
+                const currentDraft = captureIndicatorLabDraft();
+                await api("/api/indicator-lab/datasets/mt5", { method: "POST", body: JSON.stringify({ actor: "dashboard", name: currentDraft.dataset.name, symbol: currentDraft.dataset.symbol, timeframe: currentDraft.dataset.timeframe, start_date: currentDraft.dataset.start_date, end_date: currentDraft.dataset.end_date, notes: currentDraft.dataset.notes }) });
+                state.indicatorLabUi.dirty = false;
+                state.indicatorLabUi.pauseRefreshUntil = 0;
+                await fetchIndicatorLab();
+            } catch (error) {
+                state.indicatorLabUi.error = error.message;
+                renderAll({ force: true });
+            }
+        };
+        document.getElementById("il-preview").onclick = async () => {
+            state.indicatorLabUi.error = "";
+            try {
+                const payload = collectIndicatorCampaignPayload();
+                const preview = await api("/api/indicator-lab/campaigns/preview", { method: "POST", body: JSON.stringify(payload) });
+                safeSetText("il-preview-result", `Generated configurations: ${preview.preview.generated_configurations}`);
+            } catch (error) {
+                state.indicatorLabUi.error = error.message;
+                renderAll({ force: true });
+            }
+        };
+        document.getElementById("il-start").onclick = async () => {
+            if (state.indicatorLabUi.submitting) return;
+            const button = document.getElementById("il-start");
+            state.indicatorLabUi.submitting = true;
+            state.indicatorLabUi.message = "Creating campaign...";
+            state.indicatorLabUi.error = "";
+            if (button) {
+                button.disabled = true;
+                button.textContent = "Creating campaign...";
+            }
+            try {
+                const created = await api("/api/indicator-lab/campaigns", { method: "POST", body: JSON.stringify(collectIndicatorCampaignPayload()) });
+                const campaignId = indicatorLabCampaignId(created);
+                if (campaignId) {
+                    state.indicatorLab.selectedCampaignId = campaignId;
+                    state.indicatorLab.selectedTestId = null;
+                    state.indicatorLabUi.lastCreatedCampaignId = campaignId;
+                    state.indicatorLabUi.message = `Campaign #${campaignId} created`;
+                } else {
+                    state.indicatorLabUi.message = "Campaign created";
+                }
+                state.indicatorLabUi.dirty = false;
+                state.indicatorLabUi.pauseRefreshUntil = 0;
+                await fetchIndicatorLab();
+            } catch (error) {
+                state.indicatorLabUi.error = error.message;
+                state.indicatorLabUi.message = "";
+                renderAll({ force: true });
+            } finally {
+                state.indicatorLabUi.submitting = false;
+                const latestButton = document.getElementById("il-start");
+                if (latestButton) {
+                    latestButton.disabled = false;
+                    latestButton.textContent = "Start Campaign";
+                }
+            }
+        };
+        ["il-zone-side", "il-zone-status", "il-zone-from", "il-zone-to", "il-zone-search", "il-zone-flipped"].forEach((id) => {
+            const node = document.getElementById(id);
+            if (!node) return;
+            node.oninput = () => {
+                lab.zoneFilters = {
+                    side: val("il-zone-side") || "ALL",
+                    status: val("il-zone-status") || "ALL",
+                    from: val("il-zone-from"),
+                    to: val("il-zone-to"),
+                    search: val("il-zone-search"),
+                    flipped: val("il-zone-flipped") || "ALL",
+                };
+                renderAll({ force: true });
+            };
+            node.onchange = node.oninput;
+        });
+        const prevZone = document.getElementById("il-zone-prev");
+        if (prevZone) prevZone.onclick = () => selectAdjacentIndicatorZone(-1);
+        const nextZone = document.getElementById("il-zone-next");
+        if (nextZone) nextZone.onclick = () => selectAdjacentIndicatorZone(1);
+        const openReplay = document.getElementById("il-open-replay");
+        if (openReplay) openReplay.onclick = () => {
+            if (lab.selectedTestId) window.open(`/api/indicator-lab/tests/${lab.selectedTestId}/replay`, "_blank");
+        };
+        const exportZones = document.getElementById("il-export-zones");
+        if (exportZones) exportZones.onclick = () => {
+            if (lab.selectedTestId) indicatorZoneDownload(`/api/indicator-lab/tests/${lab.selectedTestId}/zones/export.csv`);
+        };
+        const exportCandidates = document.getElementById("il-export-candidates");
+        if (exportCandidates) exportCandidates.onclick = () => {
+            if (lab.selectedTestId) indicatorZoneDownload(`/api/indicator-lab/tests/${lab.selectedTestId}/candidates/export.csv`);
+        };
+        const exportEvents = document.getElementById("il-export-events");
+        if (exportEvents) exportEvents.onclick = () => {
+            if (lab.selectedTestId) indicatorZoneDownload(`/api/indicator-lab/tests/${lab.selectedTestId}/events/export.csv`);
+        };
+        const exportResults = document.getElementById("il-export-results");
+        if (exportResults) exportResults.onclick = () => {
+            if (lab.selectedCampaignId) indicatorZoneDownload(`/api/indicator-lab/campaigns/${lab.selectedCampaignId}/results/export.csv`);
+        };
+        document.querySelectorAll("[data-il-zone]").forEach((row) => {
+            row.onclick = () => loadIndicatorZone(num(row.dataset.ilZone));
+        });
+        document.querySelectorAll("[data-il-campaign]").forEach((button) => {
+            button.onclick = async () => {
+                lab.selectedCampaignId = num(button.dataset.ilCampaign);
+                lab.selectedTestId = null;
+                lab.zones = [];
+                lab.selectedZoneId = null;
+                lab.selectedZone = null;
+                lab.zoneEvents = [];
+                await fetchIndicatorLab();
+            };
+        });
+        document.querySelectorAll("[data-il-test]").forEach((button) => {
+            button.onclick = async () => {
+                lab.selectedTestId = num(button.dataset.ilTest);
+                const zones = await api(`/api/indicator-lab/tests/${lab.selectedTestId}/zones`);
+                lab.zones = zones.zones || [];
+                lab.selectedZoneId = null;
+                lab.selectedZone = null;
+                lab.zoneEvents = [];
+                if (lab.zones[0]) await loadIndicatorZone(lab.zones[0].id, { silent: true });
+                renderAll();
+            };
+        });
+    }
+
     function activateSection(section) {
         const sectionName = textOr(section, "overview");
+        if (state.activeSection === "strategies" && sectionName !== "strategies" && state.strategiesUi.dirty) {
+            if (!window.confirm("You have unsaved LebPrime changes. Leave Strategies and discard them?")) return false;
+            state.strategiesUi.dirty = false;
+            state.strategiesUi.draft = null;
+            syncLebprimeStrategyEditor();
+        }
         const target = ensureContainer(`section-${sectionName}`);
         if (!target) {
             setFeedback(`Section ${sectionName} is missing from the dashboard template.`, true);
-            return;
+            return false;
         }
         state.activeSection = sectionName;
         document.querySelectorAll("#dashboard-tabs .nav-link").forEach((item) => item.classList.toggle("active", item.dataset.section === sectionName));
@@ -3547,6 +4572,7 @@
         if (sectionName === "backtest-replay" && state.backtestReplay.selectedRunId && (!state.backtestReplay.summary || num(state.backtestReplay.summary.run?.id) !== num(state.backtestReplay.selectedRunId))) {
             replayLoadRun(state.backtestReplay.selectedRunId, { silent: true }).catch((error) => replaySetMessage(error.message, true));
         }
+        return true;
     }
 
     function bindTabs() {
@@ -3570,7 +4596,9 @@
     }
 
     function renderAll(options = {}) {
+        captureIndicatorLabDraft();
         const preserveBacktestEditing = !options.force && backtestInteractionLocked();
+        const preserveIndicatorLabEditing = !options.force && indicatorLabInteractionLocked();
         if (preserveBacktestEditing) {
             renderTopStatusBar();
             renderQuickActions();
@@ -3580,9 +4608,7 @@
         renderTopStatusBar();
         renderQuickActions();
         safeRenderSection("section-overview", "Overview", renderOverview);
-        safeRenderSection("section-bot-control", "Bot Control", renderBotControl);
         safeRenderSection("section-strategies", "Strategies", renderStrategies);
-        safeRenderSection("section-families", "Families", renderFamilies);
         safeRenderSection("section-risk", "Risk Management", renderRisk);
         safeRenderSection("section-sessions", "Sessions", renderSessions);
         safeRenderSection("section-symbols", "Symbols", renderSymbols);
@@ -3594,6 +4620,9 @@
             safeRenderSection("section-backtest", "Backtest", renderBacktest);
         }
         safeRenderSection("section-backtest-replay", "Backtest Replay", renderBacktestReplay);
+        if (!preserveIndicatorLabEditing) {
+            safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab);
+        }
         safeRenderSection("section-oos", "OOS", renderOOS);
         safeRenderSection("section-config", "Config", renderConfig);
         safeRenderSection("section-logs", "Logs", renderLogs);
@@ -3601,7 +4630,7 @@
         restoreUiState();
         activateSection(state.activeSection);
         if (isReadonly()) {
-            document.querySelectorAll("#section-bot-control input, #section-bot-control select, #section-bot-control button, #section-strategies input, #section-strategies select, #section-strategies button, #section-families input, #section-families button, #section-risk input, #section-risk button, #section-sessions input, #section-sessions button, #section-symbols input, #section-symbols button, #section-manual-trading input, #section-manual-trading select, #section-manual-trading button, #section-alerts input, #section-alerts button, #section-trades input, #section-trades button, #section-performance input, #section-performance button, #section-backtest input, #section-backtest select, #section-backtest button, #section-oos input, #section-oos select, #section-oos button, #section-config input, #section-config button, #section-config textarea").forEach((node) => {
+            document.querySelectorAll("#section-strategies input, #section-strategies select, #section-strategies button, #section-risk input, #section-risk button, #section-sessions input, #section-sessions button, #section-symbols input, #section-symbols button, #section-manual-trading input, #section-manual-trading select, #section-manual-trading button, #section-alerts input, #section-alerts button, #section-trades input, #section-trades button, #section-performance input, #section-performance button, #section-backtest input, #section-backtest select, #section-backtest button, #section-indicator-lab input, #section-indicator-lab select, #section-indicator-lab button, #section-oos input, #section-oos select, #section-oos button, #section-config input, #section-config button, #section-config textarea").forEach((node) => {
                 if (node.id !== "dashboard-readonly-mode" && node.id !== "apply-runtime-control") {
                     node.disabled = true;
                 }
@@ -3612,6 +4641,11 @@
 
     async function boot() {
         bindTabs();
+        window.addEventListener("beforeunload", (event) => {
+            if (!state.strategiesUi.dirty) return;
+            event.preventDefault();
+            event.returnValue = "";
+        });
         document.addEventListener("keydown", replayApplyKeyboardShortcuts);
         window.addEventListener("resize", () => {
             if (replayIsVisible()) {
@@ -3621,12 +4655,12 @@
         const loaders = [
             refreshStatus,
             refreshConfig,
-            refreshExecutionMode,
             refreshPositions,
             refreshLogs,
             fetchBacktests,
             fetchJobs,
             fetchWorkerStatus,
+            fetchIndicatorLab,
             fetchOOS,
         ];
         for (const loader of loaders) {
@@ -3644,6 +4678,7 @@
         setInterval(fetchBacktests, 30000);
         setInterval(fetchJobs, 5000);
         setInterval(fetchWorkerStatus, 5000);
+        setInterval(fetchIndicatorLab, 10000);
         setInterval(fetchOOS, 5000);
     }
 

@@ -213,6 +213,56 @@ class TelegramNotifier:
             + extra_lines,
         )
 
+    def send_lebprime_zone_created(self, zone_data: dict[str, Any]) -> bool:
+        """Send the native two-entry LebPrime zone-created notification."""
+        lines = [
+            f"Symbol: {zone_data.get('symbol', '')}",
+            f"Timeframe: {zone_data.get('timeframe', '')}",
+            f"Order: {zone_data.get('order_type', '')}",
+            f"Entry1: {float(zone_data.get('entry1', 0.0)):.5f}",
+        ]
+        if zone_data.get("entry2") is not None:
+            lines.append(f"Entry2: {float(zone_data['entry2']):.5f}")
+        lines.extend(
+            [
+                f"SL: {float(zone_data.get('sl', 0.0)):.5f}",
+                f"TP1: {float(zone_data.get('tp1', 0.0)):.5f}",
+                f"TP2: {float(zone_data.get('tp2', 0.0)):.5f}",
+                f"Zone ID: {zone_data.get('zone_id', '')}",
+                "Status: CREATED",
+            ]
+        )
+        return self._send("LEBPRIME CREATED", lines)
+
+    def send_lebprime_pending_accepted(self, order_data: dict[str, Any]) -> bool:
+        """Notify that MT5 accepted one LebPrime pending entry."""
+        return self._send(
+            "LEBPRIME PENDING ACCEPTED",
+            [
+                f"Symbol: {order_data.get('symbol', '')}",
+                f"Timeframe: {order_data.get('timeframe', '')}",
+                f"Zone ID: {order_data.get('zone_id', '')}",
+                f"Entry: {order_data.get('entry_number', '')}",
+                f"Price: {float(order_data.get('price', 0.0)):.5f}",
+                f"SL: {float(order_data.get('sl', 0.0)):.5f}",
+                f"TP: {float(order_data.get('tp', 0.0)):.5f}",
+                f"Ticket: {order_data.get('ticket', '')}",
+            ],
+        )
+
+    def send_lebprime_pending_failed(self, order_data: dict[str, Any]) -> bool:
+        """Notify once when one LebPrime pending entry permanently fails."""
+        return self._send(
+            "LEBPRIME PENDING FAILED",
+            [
+                f"Symbol: {order_data.get('symbol', '')}",
+                f"Timeframe: {order_data.get('timeframe', '')}",
+                f"Zone ID: {order_data.get('zone_id', '')}",
+                f"Entry: {order_data.get('entry_number', '')}",
+                f"Reason: {order_data.get('reason', '')}",
+            ],
+        )
+
     def send_daily_summary(self, summary_data: dict[str, Any]) -> bool:
         """Send a compact daily summary."""
         return self._send(

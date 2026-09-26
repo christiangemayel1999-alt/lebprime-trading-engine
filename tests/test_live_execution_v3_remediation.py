@@ -507,7 +507,7 @@ def test_pending_fill_matching_marks_ambiguous_candidates(tmp_path: Path) -> Non
     assert len(ambiguous_events) == 1
 
 
-def test_config_source_of_truth_prefers_runtime_and_detects_shadow_drift(tmp_path: Path) -> None:
+def test_config_source_of_truth_prefers_root_config_and_detects_shadow_drift(tmp_path: Path) -> None:
     source_config = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8"))
     save_json_atomic(tmp_path / "config.json", source_config)
     manager = ConfigManager(tmp_path)
@@ -529,8 +529,8 @@ def test_config_source_of_truth_prefers_runtime_and_detects_shadow_drift(tmp_pat
         },
         process_runtime={"mode": "LIVE", "database_path": "storage/live.db"},
     )
-    assert snapshot["effective"]["mode"] == "LIVE"
-    assert snapshot["sources"]["mode"] == "process_runtime"
+    assert snapshot["effective"]["mode"] == source_config["bot"]["trading_mode"]
+    assert snapshot["sources"]["mode"] == "root_config"
     assert snapshot["effective"]["database_path"] == "storage/live.db"
     assert snapshot["sources"]["database_path"] == "process_runtime"
     assert snapshot["effective"]["execution_enabled"] is False

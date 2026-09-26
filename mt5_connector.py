@@ -59,6 +59,7 @@ except ModuleNotFoundError as exc:
         SYMBOL_TRADE_EXECUTION_REQUEST = 1
         SYMBOL_TRADE_EXECUTION_MARKET = 2
         SYMBOL_TRADE_MODE_DISABLED = 0
+        ACCOUNT_TRADE_MODE_DEMO = 0
 
         def __getattr__(self, name: str) -> Callable[..., Any]:
             def _missing_mt5(*_args: Any, **_kwargs: Any) -> Any:
@@ -73,6 +74,7 @@ except ModuleNotFoundError as exc:
     mt5 = _UnavailableMT5()
 
 from logger import BotLogger
+from trading_bot.core.timeframes import normalize_timeframe_label, resolve_timeframe
 from utils import floor_volume_to_step, infer_pip_size, normalize_price, timeframe_duration, to_utc, utc_now, validate_ohlc_dataframe
 
 
@@ -102,23 +104,14 @@ class MT5Connector:
     """Handle MT5 initialization, diagnostics, data retrieval, and trade operations."""
 
     TIMEFRAME_MAP = {
-        "1min": mt5.TIMEFRAME_M1,
-        "3min": mt5.TIMEFRAME_M3,
-        "5min": mt5.TIMEFRAME_M5,
-        "15min": mt5.TIMEFRAME_M15,
-        "30min": mt5.TIMEFRAME_M30,
-        "60min": mt5.TIMEFRAME_H1,
-        "M1": mt5.TIMEFRAME_M1,
-        "M3": mt5.TIMEFRAME_M3,
-        "M5": mt5.TIMEFRAME_M5,
-        "M15": mt5.TIMEFRAME_M15,
-        "M30": mt5.TIMEFRAME_M30,
-        "H1": mt5.TIMEFRAME_H1,
+        label: resolve_timeframe(label, mt5).mt5_value
+        for label in ("M1", "M3", "M5", "M15", "M30", "H1")
     }
 
     def __init__(self, config: dict[str, Any], logger: BotLogger) -> None:
         self.config = config
         self.logger = logger
+        self.mt5 = mt5
         self.mt5_config = config["mt5"]
         self.symbol = str(self.mt5_config["symbol"])
         self.timeout_ms = int(float(self.mt5_config["timeout"]) * 1000)
@@ -133,6 +126,7 @@ class MT5Connector:
         self.last_reconnect_at: datetime | None = None
         self.market_data_degraded = False
         self.market_data_source = "mt5"
+        self._proven_filling_modes: dict[str, int] = {}
 
     def _serialize_log_value(self, value: Any) -> Any:
         """Convert MT5 payloads into structured log-friendly values."""
@@ -190,7 +184,7 @@ class MT5Connector:
 
     def _synthetic_rates_from_tick(self, timeframe_label: str, bars: int, min_rows: int) -> pd.DataFrame:
         """Build a safe placeholder candle series from the latest tick when MT5 bars are unavailable."""
-        timeframe = self.TIMEFRAME_MAP[timeframe_label]
+        timeframe_label = normalize_timeframe_label(timeframe_label)
         candle_duration = timeframe_duration(timeframe_label)
         required_rows = max(int(min_rows), int(bars) + 10)
         tick, _ = self.get_tick_with_retry()
@@ -274,6 +268,11 @@ class MT5Connector:
     def _validate_order_request(self, request: dict[str, Any]) -> None:
         """Block unsafe orders before they reach MT5."""
         request_dict = dict(request or {})
+        if int(request_dict.get("action", -1)) in {
+            int(getattr(mt5, "TRADE_ACTION_REMOVE", 8)),
+            int(getattr(mt5, "TRADE_ACTION_SLTP", 6)),
+        }:
+            return
         symbol_spec = self.symbol_spec or self.get_symbol_spec()
         point = float(symbol_spec.get("point") or 0.01)
         broker_stops_points = float(symbol_spec.get("stops_level") or 0.0)
@@ -285,14 +284,15 @@ class MT5Connector:
         price = float(request_dict.get("price") or 0.0)
         sl = float(request_dict.get("sl") or 0.0)
         tp = float(request_dict.get("tp") or 0.0)
+        managed_body_stop = str(request_dict.get("comment") or "").startswith("LP340-")
         if price <= 0.0:
             raise ValueError("Order blocked: entry price is missing or invalid")
-        if sl <= 0.0:
+        if sl <= 0.0 and not managed_body_stop:
             raise ValueError("Order blocked: SL is missing or zero")
         if tp <= 0.0:
             raise ValueError("Order blocked: TP is missing or zero")
         dist = abs(price - sl)
-        if dist < min_sl_price:
+        if sl > 0.0 and dist < min_sl_price:
             raise ValueError(f"Order blocked: SL too close ({dist:.5f} < {min_sl_price:.5f})")
 
     def _stage_result(
@@ -828,7 +828,7 @@ class MT5Connector:
         """Return supported filling modes in fallback order for the current symbol."""
         info = symbol_info if symbol_info is not None else self.symbol_info
         if info is None:
-            return [mt5.ORDER_FILLING_RETURN]
+            return [int(mt5.ORDER_FILLING_IOC), int(mt5.ORDER_FILLING_FOK), int(mt5.ORDER_FILLING_RETURN)]
 
         order_fok = int(getattr(mt5, "ORDER_FILLING_FOK", 0))
         order_ioc = int(getattr(mt5, "ORDER_FILLING_IOC", 1))
@@ -842,22 +842,39 @@ class MT5Connector:
         instant_execution = int(getattr(mt5, "SYMBOL_TRADE_EXECUTION_INSTANT", 0))
 
         candidates: list[int] = []
-        if raw_mode in {order_fok, order_ioc, order_return}:
-            candidates.append(raw_mode)
-        if raw_mode & symbol_ioc:
-            candidates.append(order_ioc)
-        if raw_mode & symbol_fok:
-            candidates.append(order_fok)
-        if execution_mode in {instant_execution, request_execution}:
-            candidates.extend([order_return, order_ioc, order_fok])
-        elif execution_mode != market_execution:
+        cached = self._proven_filling_modes.get(self.symbol)
+        if cached is not None:
+            candidates.append(int(cached))
+
+        # filling_mode is a SYMBOL_FILLING_* capability bitmask, not an
+        # ORDER_FILLING_* request enum. Raw 2 means IOC capability; copying it
+        # to type_filling would incorrectly request RETURN (also numeric 2).
+        supports_ioc = bool(raw_mode & symbol_ioc)
+        supports_fok = bool(raw_mode & symbol_fok)
+        if execution_mode == market_execution:
+            if supports_ioc:
+                candidates.append(order_ioc)
+            if supports_fok:
+                candidates.append(order_fok)
+            candidates.extend([order_ioc, order_fok])
+        elif execution_mode in {instant_execution, request_execution}:
+            candidates.append(order_return)
+            if supports_ioc:
+                candidates.append(order_ioc)
+            if supports_fok:
+                candidates.append(order_fok)
+        else:
+            if supports_ioc:
+                candidates.append(order_ioc)
+            if supports_fok:
+                candidates.append(order_fok)
             candidates.append(order_return)
 
         unique_modes: list[int] = []
         for mode in candidates:
             if mode not in unique_modes:
                 unique_modes.append(mode)
-        return unique_modes or [order_ioc, order_fok, order_return]
+        return unique_modes or [order_ioc, order_fok]
 
     def get_filling_mode(self) -> int:
         """Return the preferred filling mode for the symbol."""
@@ -872,7 +889,11 @@ class MT5Connector:
 
     def fetch_rates(self, timeframe_label: str, bars: int, min_rows: int = 100) -> pd.DataFrame:
         """Fetch rates and return a validated dataframe of closed candles."""
-        timeframe = self.TIMEFRAME_MAP[timeframe_label]
+        timeframe_label = normalize_timeframe_label(timeframe_label)
+        resolution = resolve_timeframe(timeframe_label, mt5)
+        if resolution.synthetic:
+            raise ValueError(f"{timeframe_label} requires synthetic aggregation from {resolution.synthetic_source}")
+        timeframe = resolution.mt5_value
         self.market_data_degraded = False
         self.market_data_source = "mt5"
         try:
@@ -918,7 +939,11 @@ class MT5Connector:
                 f"end_utc ({end_utc.isoformat()}) must be after start_utc ({start_utc.isoformat()})"
             )
 
-        timeframe = self.TIMEFRAME_MAP[timeframe_label]
+        timeframe_label = normalize_timeframe_label(timeframe_label)
+        resolution = resolve_timeframe(timeframe_label, mt5)
+        if resolution.synthetic:
+            raise ValueError(f"{timeframe_label} requires synthetic aggregation from {resolution.synthetic_source}")
+        timeframe = resolution.mt5_value
         self.market_data_degraded = False
         self.market_data_source = "mt5"
         error_code: Any = None
@@ -1121,7 +1146,7 @@ class MT5Connector:
         """Validate spread against the configured execution ceiling."""
         reference_tick = tick if tick is not None else self.get_tick()
         point = float(self.get_symbol_spec()["point"])
-        spread_points = (float(reference_tick.ask) - float(reference_tick.bid)) / point if point > 0 else 0.0
+        spread_points = round((float(reference_tick.ask) - float(reference_tick.bid)) / point, 8) if point > 0 else 0.0
         ok = spread_points <= float(max_spread_points)
         return self._stage_result(
             "spread_check",
@@ -1139,7 +1164,7 @@ class MT5Connector:
         """Return current spread in broker points."""
         tick = self.get_tick()
         point = float(self.get_symbol_spec()["point"])
-        return (float(tick.ask) - float(tick.bid)) / point
+        return round((float(tick.ask) - float(tick.bid)) / point, 8)
 
     def get_bot_positions(self) -> list[Any]:
         """Return current bot-managed positions for the configured symbol."""
@@ -1159,13 +1184,89 @@ class MT5Connector:
         orders = self._call_mt5("orders_get", mt5.orders_get, symbol=self.symbol) or []
         return [o for o in orders if int(getattr(o, "magic", 0)) == int(self.config["mt5"]["magic_number"])]
 
+    def get_bot_order_history(self, lookback_days: int = 30) -> list[Any]:
+        """Return recent bot-managed order history for restart reconciliation."""
+        start_time = utc_now() - pd.Timedelta(days=max(1, int(lookback_days))).to_pytimedelta()
+        orders = self._call_mt5("history_orders_get", mt5.history_orders_get, start_time, utc_now()) or []
+        return [o for o in orders if int(getattr(o, "magic", 0)) == int(self.config["mt5"]["magic_number"])]
+
+    def get_bot_deal_history(self, lookback_days: int = 30) -> list[Any]:
+        """Return recent bot-managed deal history for fill reconciliation."""
+        start_time = utc_now() - pd.Timedelta(days=max(1, int(lookback_days))).to_pytimedelta()
+        deals = self._call_mt5("history_deals_get", mt5.history_deals_get, start_time, utc_now()) or []
+        return [d for d in deals if int(getattr(d, "magic", 0)) == int(self.config["mt5"]["magic_number"])]
+
+    def find_bot_position(self, order_id: int | str | None = None, comment: str | None = None) -> Any | None:
+        """Find a bot position by originating order identity or unique comment."""
+        order_text = str(order_id or "")
+        for position in self.get_bot_positions():
+            identifiers = {
+                str(getattr(position, "ticket", "") or ""),
+                str(getattr(position, "identifier", "") or ""),
+            }
+            if order_text and order_text in identifiers:
+                return position
+            if comment and str(getattr(position, "comment", "") or "") == str(comment):
+                return position
+        return None
+
     def calculate_margin(self, order_type: int, volume: float, price: float) -> float:
-        """Calculate required margin for a hypothetical order."""
-        margin = self._call_mt5("order_calc_margin", mt5.order_calc_margin, order_type, self.symbol, volume, price)
-        if margin is None:
+        """Calculate margin using the market side corresponding to a pending order.
+
+        Tickmill's MT5 terminal accepts pending-order enum values here but returns
+        zero margin for them. MetaTrader's margin calculator expects the BUY/SELL
+        side of the hypothetical position, while the eventual request remains a
+        BUY_LIMIT or SELL_LIMIT.
+        """
+        margin_order_type = self.margin_order_type(order_type)
+        margin = self._call_mt5(
+            "order_calc_margin",
+            mt5.order_calc_margin,
+            margin_order_type,
+            self.symbol,
+            volume,
+            price,
+        )
+        if margin is None or float(margin) <= 0:
             error_code, error_message = mt5.last_error()
-            raise RuntimeError(f"order_calc_margin failed: {error_code} {error_message}")
+            raise RuntimeError(
+                f"order_calc_margin failed for requested_type={int(order_type)} "
+                f"margin_type={margin_order_type}: {error_code} {error_message}; result={margin!r}"
+            )
+        self.logger.structured(
+            "mt5_margin_calculated",
+            {
+                "symbol": self.symbol,
+                "requested_order_type": int(order_type),
+                "margin_order_type": margin_order_type,
+                "volume": float(volume),
+                "price": float(price),
+                "required_margin": float(margin),
+            },
+        )
         return float(margin)
+
+    @staticmethod
+    def margin_order_type(order_type: int) -> int:
+        """Map pending BUY/SELL variants to the position side used by MT5 margin calculation."""
+        buy_types = {
+            int(mt5.ORDER_TYPE_BUY),
+            int(mt5.ORDER_TYPE_BUY_LIMIT),
+            int(mt5.ORDER_TYPE_BUY_STOP),
+            int(getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", mt5.ORDER_TYPE_BUY_STOP)),
+        }
+        sell_types = {
+            int(mt5.ORDER_TYPE_SELL),
+            int(mt5.ORDER_TYPE_SELL_LIMIT),
+            int(mt5.ORDER_TYPE_SELL_STOP),
+            int(getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", mt5.ORDER_TYPE_SELL_STOP)),
+        }
+        normalized = int(order_type)
+        if normalized in buy_types:
+            return int(mt5.ORDER_TYPE_BUY)
+        if normalized in sell_types:
+            return int(mt5.ORDER_TYPE_SELL)
+        raise ValueError(f"Unsupported MT5 order type for margin calculation: {order_type}")
 
     def safe_order_send(self, request: dict[str, Any], retry: bool = True) -> Any:
         """Submit a trade request using a single MT5 request dict with safe transient retries."""
@@ -1611,9 +1712,120 @@ class MT5Connector:
             type_filling=self.choose_filling_mode(type_filling),
         )
 
+    def pending_order_type(self, direction: str) -> int:
+        """Return the MT5 LIMIT order type for a logical direction."""
+        return int(mt5.ORDER_TYPE_BUY_LIMIT if str(direction).upper() == "LONG" else mt5.ORDER_TYPE_SELL_LIMIT)
+
+    def build_pending_limit_request(
+        self,
+        direction: str,
+        volume: float,
+        entry_price: float,
+        sl: float,
+        tp: float,
+        comment: str,
+        type_filling: int | None = None,
+    ) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
+        """Create a normalized GTC LIMIT request without changing strategy levels."""
+        symbol_spec = self.get_symbol_spec()
+        normalized_volume = self.normalize_volume(float(volume), symbol_spec)
+        if normalized_volume <= 0 or normalized_volume + 1e-12 < float(symbol_spec["volume_min"]):
+            return None, "invalid_volume", {}
+        digits = int(symbol_spec["digits"])
+        tick_size = float(symbol_spec.get("trade_tick_size") or symbol_spec.get("point") or 10 ** -digits)
+        def _tick_price(value: float) -> float:
+            return normalize_price(round(float(value) / tick_size) * tick_size, digits)
+        entry = _tick_price(float(entry_price))
+        stop = _tick_price(float(sl))
+        target = _tick_price(float(tp))
+        if str(direction).upper() == "LONG" and not (stop < entry < target):
+            return None, "invalid_protective_levels", {}
+        if str(direction).upper() == "SHORT" and not (target < entry < stop):
+            return None, "invalid_protective_levels", {}
+        minimum_distance = float(symbol_spec.get("stops_level", 0) or 0) * float(symbol_spec.get("point", 10 ** -digits))
+        if minimum_distance > 0 and (abs(entry - stop) + 1e-12 < minimum_distance or abs(target - entry) + 1e-12 < minimum_distance):
+            return None, "invalid_stops_minimum_distance", {
+                "entry": entry, "sl": stop, "tp": target, "minimum_distance": minimum_distance,
+            }
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": self.symbol,
+            "volume": float(normalized_volume),
+            "type": self.pending_order_type(direction),
+            "price": float(entry),
+            "sl": float(stop),
+            "tp": float(target),
+            "deviation": int(self.mt5_config["deviation"]),
+            "magic": int(self.mt5_config["magic_number"]),
+            "comment": str(comment)[:31],
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": int(self.choose_filling_mode(type_filling)),
+        }
+        return request, "", {
+            "entry": entry,
+            "sl": stop,
+            "broker_sl": request["sl"],
+            "tp": target,
+            "volume": normalized_volume,
+            "managed_body_stop": False,
+        }
+
+    def cancel_pending_order(self, order_id: int | str) -> tuple[bool, Any]:
+        """Cancel a pending order, used to roll back an incomplete two-entry pair."""
+        request = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(order_id)}
+        result = self.safe_order_send(request, retry=False)
+        accepted = int(getattr(result, "retcode", -1)) in {
+            int(getattr(mt5, "TRADE_RETCODE_DONE", 10009)),
+            int(getattr(mt5, "TRADE_RETCODE_PLACED", 10008)),
+        }
+        return accepted, result
+
     def precheck_order(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Run the canonical MT5 order_check stage for a prepared request."""
-        return self.order_check_stage(request)
+        """Negotiate filling mode through order_check before any order_send."""
+        candidates = self.get_supported_filling_modes()
+        requested = int(request.get("type_filling", candidates[0]))
+        unique: list[int] = []
+        for mode in (requested, *candidates):
+            if mode not in unique:
+                unique.append(mode)
+
+        attempted: list[dict[str, Any]] = []
+        final: dict[str, Any] = {}
+        for mode in unique:
+            candidate = dict(request)
+            candidate["type_filling"] = int(mode)
+            stage = self.order_check_stage(candidate)
+            final = stage
+            retcode = stage.get("payload", {}).get("retcode")
+            attempted.append({"filling_mode": int(mode), "retcode": retcode, "reason_code": stage.get("reason_code")})
+            self.logger.structured(
+                "mt5_filling_mode_attempt",
+                {"symbol": self.symbol, "attempted_filling_mode": int(mode), "order_check_retcode": retcode},
+                level="INFO" if stage.get("ok") else "WARNING",
+            )
+            if stage.get("ok"):
+                request.clear()
+                request.update(candidate)
+                self._proven_filling_modes[self.symbol] = int(mode)
+                stage["attempted_filling_modes"] = attempted
+                stage["chosen_filling_mode"] = int(mode)
+                self.logger.structured(
+                    "mt5_filling_mode_selected",
+                    {"symbol": self.symbol, "chosen_filling_mode": int(mode), "order_check_retcode": retcode},
+                )
+                return stage
+            invalid_fill = (
+                stage.get("reason_code") == "invalid_fill_mode"
+                or retcode == int(getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030))
+            )
+            if not invalid_fill:
+                stage["attempted_filling_modes"] = attempted
+                stage["chosen_filling_mode"] = None
+                return stage
+
+        final["attempted_filling_modes"] = attempted
+        final["chosen_filling_mode"] = None
+        return final
 
     def send_order(self, request: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
         """Run the canonical MT5 order_send stage for a prepared request."""
@@ -1972,6 +2184,8 @@ class MT5Connector:
                 float(self.get_symbol_spec()["stops_level"]) * point,
                 pip_size * float(self.config.get("exit", {}).get("sl_min_pips", 18)),
                 point * 50,
+                abs(float(tick_snapshot.get("ask", 0.0)) - float(tick_snapshot.get("bid", 0.0))) * 10.0,
+                tick_ask * 0.01,
             )
             sample_request, _, _ = self.build_order_request(
                 direction="LONG",
@@ -1984,10 +2198,15 @@ class MT5Connector:
             )
             if sample_request is not None:
                 report["sample_normalized_request"] = self._serialize_log_value(sample_request)
-                order_check_stage = self.order_check_stage(sample_request)
+                order_check_stage = self.precheck_order(sample_request)
                 report["sample_order_check_ok"] = bool(order_check_stage["ok"])
                 report["sample_order_check"] = self._serialize_log_value(order_check_stage["payload"].get("result"))
                 report["sample_order_check_last_error"] = order_check_stage["payload"].get("last_error")
+                report["execution_readiness"] = {
+                    "ok": bool(order_check_stage["ok"]),
+                    "chosen_filling_mode": order_check_stage.get("chosen_filling_mode"),
+                    "attempts": order_check_stage.get("attempted_filling_modes", []),
+                }
         report["execution_path"] = self.execution_path_summary()
         return report
 

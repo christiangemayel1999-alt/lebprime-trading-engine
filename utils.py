@@ -108,12 +108,15 @@ def resolve_python_executable(base_dir: str | Path, configured_path: str | Path 
     if explicit_path:
         candidates.append((Path(explicit_path), "explicit configured python path"))
 
+    # The running interpreter has already proven it can execute Python code.
+    # Prefer it over Windows launcher shims such as py.exe, whose configured
+    # target may have been removed while the shim itself still exists.
+    candidates.append((current_executable, "current interpreter"))
+
     for found in ("py", "python"):
         resolved = shutil.which(found)
         if resolved:
             candidates.append((Path(resolved), f"{found} on PATH"))
-
-    candidates.append((current_executable, "current interpreter"))
 
     seen: set[str] = set()
     for candidate, reason in candidates:
@@ -1271,24 +1274,10 @@ def serialize_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_timeframe_minutes(label: str) -> int:
-    """Convert timeframe labels like 15min to integer minutes."""
-    normalized = label.lower().strip()
-    if normalized.endswith("min"):
-        pass
-    elif normalized.endswith("m") and normalized[:-1].isdigit():
-        normalized = f"{normalized[:-1]}min"
-    mapping = {
-        "1min": 1,
-        "3min": 3,
-        "5min": 5,
-        "15min": 15,
-        "30min": 30,
-        "60min": 60,
-        "1h": 60,
-    }
-    if normalized not in mapping:
-        raise ValueError(f"Unsupported timeframe label: {label}")
-    return mapping[normalized]
+    """Convert a supported timeframe spelling to integer minutes."""
+    from trading_bot.core.timeframes import timeframe_minutes
+
+    return timeframe_minutes(label)
 
 
 def timeframe_duration(label: str) -> timedelta:

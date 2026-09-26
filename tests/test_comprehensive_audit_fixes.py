@@ -260,22 +260,20 @@ class TestMarketDataDegradedFlag:
 class TestModeResolutionCentralization:
     """Test FIX #10: Mode resolution is now centralized in ConfigManager."""
 
-    def test_resolve_runtime_mode_precedence(self):
-        """Verify mode resolution precedence: control_state > config > default."""
+    def test_resolve_runtime_mode_uses_config_as_authority(self):
+        """Verify persisted config wins over a stale control-state mirror."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
+            source = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8"))
+            source["bot"]["trading_mode"] = "DRY_RUN"
+            (base_dir / "config.json").write_text(json.dumps(source), encoding="utf-8")
             manager = ConfigManager(base_dir)
-            
-            # Test precedence with control_state
+
             control_state = {
                 "runtime": {"mode": "LIVE"}
             }
             mode, source = manager.resolve_runtime_mode(control_state)
-            assert source == "control_state"
-            
-            # Test fallback to default
-            mode, source = manager.resolve_runtime_mode(None)
-            assert source in ("config_file", "default")
+            assert (mode, source) == ("DRY_RUN", "config_file")
 
 
 class TestLiveVsBacktestParity:
