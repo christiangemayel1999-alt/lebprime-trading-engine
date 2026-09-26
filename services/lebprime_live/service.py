@@ -101,6 +101,7 @@ class LebPrimeLiveService:
         risk_manager: Any | None = None,
         risk_state: dict[str, Any] | None = None,
         notifier: Any | None = None,
+        trade_journal: Any | None = None,
     ) -> None:
         self.config = config
         self.logger = logger
@@ -108,6 +109,7 @@ class LebPrimeLiveService:
         self.risk_manager = risk_manager
         self.risk_state = risk_state if risk_state is not None else {}
         self.notifier = notifier
+        self.trade_journal = trade_journal
         self.repository = LebPrimeLiveRepository(db_path)
         self.connectors: dict[str, Any] = {}
         self.contexts: dict[str, LiveContext] = {}
@@ -756,10 +758,31 @@ class LebPrimeLiveService:
             "mt5_order_ticket": existing.get("mt5_order_ticket"),
             "mt5_deal_ticket": existing.get("mt5_deal_ticket"),
             "mt5_position_ticket": existing.get("mt5_position_ticket"),
+            "fill_price": existing.get("fill_price"),
             "broker_status": status,
             "broker_created_at": existing.get("broker_created_at"),
             "broker_filled_at": existing.get("broker_filled_at"),
             "broker_closed_at": existing.get("broker_closed_at"),
+            "close_price": existing.get("close_price"),
+            "realized_pnl": existing.get("realized_pnl"),
+            "partial_realized_pnl": existing.get("partial_realized_pnl"),
+            "broker_profit": existing.get("broker_profit"),
+            "broker_commission": existing.get("broker_commission"),
+            "broker_swap": existing.get("broker_swap"),
+            "broker_fee": existing.get("broker_fee"),
+            "final_exit_reason": existing.get("final_exit_reason"),
+            "broker_retcode": existing.get("broker_retcode"),
+            "broker_submitted_at": existing.get("broker_submitted_at"),
+            "canceled_at": existing.get("canceled_at"),
+            "expired_at": existing.get("expired_at"),
+            "filled_volume": existing.get("filled_volume"),
+            "closed_volume": existing.get("closed_volume"),
+            "remaining_volume": existing.get("remaining_volume"),
+            "partial_close_count": int(existing.get("partial_close_count", 0) or 0),
+            "outcome_complete": int(existing.get("outcome_complete", 0) or 0),
+            "position_model": existing.get("position_model"),
+            "close_deal_tickets_json": existing.get("close_deal_tickets_json"),
+            "lifecycle_details_json": existing.get("lifecycle_details_json"),
             "failure_reason": failure_reason,
             "historical": int(bool(historical)),
             "execution_eligible": int(bool(eligible)),
@@ -1048,9 +1071,12 @@ class LebPrimeLiveService:
             last_failure=str(reason),
             retryable=int(can_retry),
             next_retry_at=next_retry,
+            broker_retcode=str(retcode) if retcode is not None else existing.get("broker_retcode"),
             **(updates or {}),
         )
         self.repository.upsert_broker_entry(row)
+        if row.get("final_exit_reason") == "REJECTED" and existing.get("final_exit_reason") != "REJECTED":
+            self._journal_broker_transition(row, "ORDER_REJECTED", now.isoformat())
         details = self._entry_details(
             context,
             zone,
@@ -1466,7 +1492,14 @@ class LebPrimeLiveService:
                 self._record_placement_failure(
                     context, zone, entry_number, entry, reason, retcode=retcode, comment=comment,
                     attempted=False,
-                    updates={"normalized_price": normalized_entry, "volume": volume, "sl": normalized_sl, "tp": normalized_tp},
+                    updates={
+                        "normalized_price": normalized_entry,
+                        "volume": volume,
+                        "sl": normalized_sl,
+                        "tp": normalized_tp,
+                        "final_exit_reason": "REJECTED",
+                        "broker_submitted_at": attempted_at.isoformat(),
+                    },
                 )
                 continue
             order_id = self._order_id(result)
@@ -1477,8 +1510,11 @@ class LebPrimeLiveService:
                 )
                 continue
             payload[f"{label.lower()}_order_id"] = order_id
-            reserved.update({"broker_status": "PENDING", "mt5_order_ticket": order_id, "broker_created_at": _utc_now().isoformat(), "failure_reason": None, "last_failure": None, "retryable": 0, "next_retry_at": None, "updated_at": _utc_now().isoformat()})
+            accepted_at = _utc_now().isoformat()
+            result_retcode = raw_result.get("retcode") if isinstance(raw_result, dict) else getattr(raw_result, "retcode", None)
+            reserved.update({"broker_status": "PENDING", "mt5_order_ticket": order_id, "broker_created_at": accepted_at, "broker_submitted_at": accepted_at, "broker_retcode": str(result_retcode) if result_retcode is not None else None, "failure_reason": None, "last_failure": None, "retryable": 0, "next_retry_at": None, "updated_at": accepted_at})
             self.repository.upsert_broker_entry(reserved)
+            self._journal_broker_transition(reserved, "ORDER_ACCEPTED", accepted_at)
             self._log(
                 "lebprime_pending_order_placed",
                 {"context": context.key, "zone_id": zone.engine_zone_id, "entry_number": entry_number, "idempotency_key": reserved["idempotency_key"], "ticket": order_id, "symbol": context.mt5_symbol, "price": normalized_entry, "sl": normalized_sl, "tp": normalized_tp, "volume": volume, "retcode": raw_result.get("retcode") if isinstance(raw_result, dict) else getattr(raw_result, "retcode", None)},
@@ -1524,15 +1560,21 @@ class LebPrimeLiveService:
                 ok, result = connector.cancel_pending_order(order_id)
                 row = self.repository.broker_entry(zone.engine_zone_id, entry_number)
                 if row:
+                    terminal_at = _utc_now().isoformat()
                     row.update(
                         {
-                            "broker_status": "CANCELLED" if ok else "CANCEL_FAILED",
-                            "broker_closed_at": _utc_now().isoformat() if ok else None,
+                            "broker_status": "CANCELED" if ok else "CANCEL_FAILED",
+                            "broker_closed_at": terminal_at if ok else None,
+                            "canceled_at": terminal_at if ok else None,
+                            "final_exit_reason": "CANCELED" if ok else row.get("final_exit_reason"),
+                            "broker_retcode": str(self._item_value(result, "retcode", "") or row.get("broker_retcode") or ""),
                             "failure_reason": reason if ok else f"ROLLBACK_FAILED:{reason}",
-                            "updated_at": _utc_now().isoformat(),
+                            "updated_at": terminal_at,
                         }
                     )
                     self.repository.upsert_broker_entry(row)
+                    if ok:
+                        self._journal_broker_transition(row, "ORDER_CANCELED", terminal_at)
                 self._log(
                     "lebprime_pending_order_cancelled" if ok else "lebprime_pending_order_skipped",
                     {"context": context.key, "zone_id": zone.engine_zone_id, "entry_number": entry_number, "ticket": order_id, "reason": f"PAIR_ROLLBACK:{reason}", "result": str(result)},
@@ -1547,7 +1589,7 @@ class LebPrimeLiveService:
                         eligible=False, failure_reason=str(reason),
                     )
                 )
-            elif existing_entry.get("broker_status") not in {"PLACING", "PENDING", "ORDER_HISTORY", "FILLED", "CLOSED", "CANCELLED"}:
+            elif existing_entry.get("broker_status") not in {"PLACING", "PENDING", "ORDER_HISTORY", "FILLED", "CLOSED", "CANCELLED", "CANCELED"}:
                 existing_entry.update(
                     {
                         "broker_status": entry_status,
@@ -1665,130 +1707,553 @@ class LebPrimeLiveService:
                 metadata={"theoretical": not bool(payload["execution_primary"]), "historical": bool(historical), "broker_actions": broker_actions},
             )
 
+    @staticmethod
+    def _json_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _number(item: Any, name: str) -> float:
+        try:
+            return float(LebPrimeLiveService._item_value(item, name, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _position_model(self, connector: Any) -> str:
+        try:
+            account = connector.get_account_info()
+            mode = int(self._item_value(account, "margin_mode", -1))
+        except Exception:
+            return "UNKNOWN"
+        mt5_api = getattr(connector, "mt5", None)
+        if mode == int(getattr(mt5_api, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2)):
+            return "HEDGING"
+        netting_modes = {
+            int(getattr(mt5_api, "ACCOUNT_MARGIN_MODE_RETAIL_NETTING", 0)),
+            int(getattr(mt5_api, "ACCOUNT_MARGIN_MODE_EXCHANGE", 1)),
+        }
+        return "NETTING" if mode in netting_modes else "UNKNOWN"
+
+    def _deal_is_entry(self, connector: Any, deal: Any) -> bool:
+        raw_value = self._item_value(deal, "entry", None)
+        if raw_value is None:
+            return False
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return False
+        mt5_api = getattr(connector, "mt5", None)
+        return value in {
+            int(getattr(mt5_api, "DEAL_ENTRY_IN", 0)),
+            int(getattr(mt5_api, "DEAL_ENTRY_INOUT", 2)),
+        }
+
+    def _deal_is_close(self, connector: Any, deal: Any) -> bool:
+        raw_value = self._item_value(deal, "entry", None)
+        if raw_value is None:
+            return False
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return False
+        mt5_api = getattr(connector, "mt5", None)
+        return value in {
+            int(getattr(mt5_api, "DEAL_ENTRY_OUT", 1)),
+            int(getattr(mt5_api, "DEAL_ENTRY_OUT_BY", 3)),
+            int(getattr(mt5_api, "DEAL_ENTRY_INOUT", 2)),
+        }
+
+    def _classify_exit_reason(self, connector: Any, deal: Any | None) -> str:
+        if deal is None:
+            return "UNKNOWN"
+        mt5_api = getattr(connector, "mt5", None)
+        comment = str(self._item_value(deal, "comment", "") or "").upper()
+        if "SL_HIT" in comment:
+            return "SL"
+        if "TP1" in comment or "TP2" in comment:
+            return "TP"
+        raw_reason = self._item_value(deal, "reason", None)
+        if raw_reason is None:
+            return "UNKNOWN"
+        try:
+            reason = int(raw_reason)
+        except (TypeError, ValueError):
+            return "UNKNOWN"
+        if reason == int(getattr(mt5_api, "DEAL_REASON_SL", 4)):
+            return "SL"
+        if reason == int(getattr(mt5_api, "DEAL_REASON_TP", 5)):
+            return "TP"
+        if reason in {
+            int(getattr(mt5_api, "DEAL_REASON_CLIENT", 0)),
+            int(getattr(mt5_api, "DEAL_REASON_MOBILE", 1)),
+            int(getattr(mt5_api, "DEAL_REASON_WEB", 2)),
+        }:
+            return "MANUAL_CLOSE"
+        broker_reasons = {
+            int(getattr(mt5_api, "DEAL_REASON_EXPERT", 3)),
+            int(getattr(mt5_api, "DEAL_REASON_SO", 6)),
+            int(getattr(mt5_api, "DEAL_REASON_ROLLOVER", 7)),
+            int(getattr(mt5_api, "DEAL_REASON_VMARGIN", 8)),
+            int(getattr(mt5_api, "DEAL_REASON_SPLIT", 9)),
+        }
+        return "BROKER_CLOSE" if reason in broker_reasons else "UNKNOWN"
+
+    def _deal_snapshot(self, deal: Any) -> dict[str, Any]:
+        return {
+            "ticket": str(self._item_value(deal, "ticket", "") or ""),
+            "order": str(self._item_value(deal, "order", "") or ""),
+            "position_id": str(self._item_value(deal, "position_id", "") or ""),
+            "entry": self._item_value(deal, "entry"),
+            "reason": self._item_value(deal, "reason"),
+            "time": self._broker_time(deal, _utc_now()),
+            "price": self._item_value(deal, "price"),
+            "volume": self._item_value(deal, "volume"),
+            "profit": self._item_value(deal, "profit"),
+            "commission": self._item_value(deal, "commission"),
+            "swap": self._item_value(deal, "swap"),
+            "fee": self._item_value(deal, "fee"),
+            "comment": self._item_value(deal, "comment"),
+        }
+
+    def _journal_broker_transition(
+        self,
+        entry: dict[str, Any],
+        event_type: str,
+        timestamp: str,
+        *,
+        event_suffix: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.trade_journal is None:
+            return
+        event_key = f"lebprime:{entry.get('idempotency_key')}:{event_type}:{event_suffix or 'once'}"
+        try:
+            self.trade_journal.record_trade_event(
+                {
+                    "timestamp": timestamp,
+                    "trade_id": entry.get("idempotency_key"),
+                    "mt5_ticket": entry.get("mt5_position_ticket") or entry.get("mt5_order_ticket"),
+                    "position_id": entry.get("mt5_position_ticket"),
+                    "order_id": entry.get("mt5_order_ticket"),
+                    "event_type": event_type,
+                    "event_key": event_key,
+                    "event_bucket": "lebprime_broker_lifecycle",
+                    "status": entry.get("broker_status"),
+                    "symbol": entry.get("broker_symbol") or entry.get("logical_symbol"),
+                    "side": entry.get("side"),
+                    "setup": STRATEGY_NAME,
+                    "setup_family": STRATEGY_NAME,
+                    "entry_price": entry.get("fill_price") or entry.get("normalized_price") or entry.get("entry_price"),
+                    "exit_price": entry.get("close_price"),
+                    "stop_loss": entry.get("sl"),
+                    "take_profit": entry.get("tp"),
+                    "volume": entry.get("volume"),
+                    "pnl": entry.get("realized_pnl"),
+                    "commissions": entry.get("broker_commission"),
+                    "swap": entry.get("broker_swap"),
+                    "fees": entry.get("broker_fee"),
+                    "close_reason": entry.get("final_exit_reason"),
+                    "execution_reason": entry.get("failure_reason"),
+                    "closed_at": entry.get("broker_closed_at"),
+                    "metadata": {
+                        "zone_id": entry.get("zone_id"),
+                        "entry_number": entry.get("entry_number"),
+                        "broker_status": entry.get("broker_status"),
+                        **(metadata or {}),
+                    },
+                }
+            )
+        except Exception as exc:
+            self._log(
+                "lebprime_lifecycle_journal_failed",
+                {"event_key": event_key, "error": str(exc)},
+                level="WARNING",
+            )
+
     def _reconcile_broker_execution(self, now: datetime) -> None:
-        """Reconcile pending orders, deals, and positions; MT5 fill proof is authoritative."""
+        """Reconcile LebPrime lifecycle fields exclusively from current MT5 state/history."""
         for logical_symbol in self._selected_symbols():
-            entries = self.repository.broker_entries_for_symbol(logical_symbol, ("PLACING", "RETRY_SCHEDULED", "PENDING", "ORDER_HISTORY", "FILLED"))
+            entries = self.repository.broker_entries_for_reconciliation(logical_symbol)
             if not entries:
                 continue
             connector = self._connector(logical_symbol)
             open_orders = connector.get_pending_orders() if hasattr(connector, "get_pending_orders") else []
             positions = connector.get_bot_positions() if hasattr(connector, "get_bot_positions") else []
             orders_history = connector.get_bot_order_history() if hasattr(connector, "get_bot_order_history") else []
-            deals = connector.get_bot_deal_history() if hasattr(connector, "get_bot_deal_history") else []
+            bot_deals = connector.get_bot_deal_history() if hasattr(connector, "get_bot_deal_history") else []
+            position_model = self._position_model(connector)
+            mt5_api = getattr(connector, "mt5", None)
+            terminal_order_states = {
+                int(getattr(mt5_api, "ORDER_STATE_CANCELED", -991)): ("CANCELED", "CANCELED"),
+                int(getattr(mt5_api, "ORDER_STATE_EXPIRED", -992)): ("EXPIRED", "EXPIRED"),
+                int(getattr(mt5_api, "ORDER_STATE_REJECTED", -993)): ("REJECTED", "REJECTED"),
+            }
+
             for entry in entries:
+                previous_status = str(entry.get("broker_status") or "")
                 ticket = str(entry.get("mt5_order_ticket") or "")
                 comment = str(entry.get("comment") or "")
-                matches = lambda item: (
-                    bool(comment and str(self._item_value(item, "comment", "") or "") == comment)
-                    or bool(ticket and ticket in {
+
+                def matches_order(item: Any) -> bool:
+                    item_ids = {
                         str(self._item_value(item, "ticket", "") or ""),
                         str(self._item_value(item, "order", "") or ""),
-                    })
-                )
-                pending = next((item for item in open_orders if matches(item)), None)
-                deal = next((item for item in deals if matches(item)), None)
-                history_order = next((item for item in orders_history if matches(item)), None)
+                    }
+                    return bool(comment and str(self._item_value(item, "comment", "") or "") == comment) or bool(ticket and ticket in item_ids)
+
+                pending = next((item for item in open_orders if matches_order(item)), None)
+                matching_deals = [item for item in bot_deals if matches_order(item)]
+                fill_deals = [item for item in matching_deals if self._deal_is_entry(connector, item)]
+                fill_deal = min(fill_deals, key=lambda item: self._broker_time(item, now), default=None)
+                history_order = next((item for item in orders_history if matches_order(item)), None)
+
                 if pending is not None:
+                    accepted_at = entry.get("broker_created_at") or self._broker_time(pending, now)
                     entry.update(
                         {
                             "broker_status": "PENDING",
                             "mt5_order_ticket": str(self._item_value(pending, "ticket", ticket) or ticket),
+                            "broker_created_at": accepted_at,
                             "failure_reason": None,
                             "last_failure": None,
                             "retryable": 0,
                             "next_retry_at": None,
+                            "execution_eligible": 1,
                             "updated_at": now.isoformat(),
                         }
                     )
                     self.repository.upsert_broker_entry(entry)
+                    if previous_status not in {"PENDING", "FILLED", "CLOSED"}:
+                        self._journal_broker_transition(entry, "ORDER_ACCEPTED", accepted_at)
                     continue
-                if deal is not None:
-                    position_ticket = str(self._item_value(deal, "position_id", "") or "")
+
+                position_ticket = str(
+                    (self._item_value(fill_deal, "position_id", "") if fill_deal is not None else "")
+                    or entry.get("mt5_position_ticket")
+                    or ""
+                )
+                position = next(
+                    (
+                        item for item in positions
+                        if position_ticket and str(self._item_value(item, "ticket", "") or "") == position_ticket
+                    ),
+                    None,
+                )
+                if position is None and comment:
                     position = next(
-                        (
-                            item for item in positions
-                            if str(self._item_value(item, "ticket", "") or "") == position_ticket
-                            or (comment and str(self._item_value(item, "comment", "") or "") == comment)
-                        ),
+                        (item for item in positions if str(self._item_value(item, "comment", "") or "") == comment),
                         None,
                     )
-                    previous = entry.get("broker_status")
+                    if position is not None:
+                        position_ticket = str(self._item_value(position, "ticket", "") or position_ticket)
+
+                position_deals: list[Any] = []
+                if position_ticket and hasattr(connector, "get_position_deals"):
+                    try:
+                        position_deals = list(
+                            connector.get_position_deals(
+                                position_ticket,
+                                entry.get("broker_created_at") or entry.get("broker_filled_at"),
+                            )
+                            or []
+                        )
+                    except Exception as exc:
+                        self._log(
+                            "lebprime_position_history_unavailable",
+                            {"position_ticket": position_ticket, "error": str(exc)},
+                            level="WARNING",
+                        )
+                if not position_deals and position_ticket:
+                    position_deals = [
+                        item for item in bot_deals
+                        if str(self._item_value(item, "position_id", "") or "") == position_ticket
+                    ]
+                if fill_deal is None and position_deals:
+                    entry_deals = [item for item in position_deals if self._deal_is_entry(connector, item)]
+                    fill_deal = min(entry_deals, key=lambda item: self._broker_time(item, now), default=None)
+
+                if fill_deal is not None or position_ticket:
+                    fill_price = (
+                        self._item_value(fill_deal, "price", None)
+                        if fill_deal is not None
+                        else entry.get("fill_price")
+                    )
+                    filled_volume = (
+                        self._number(fill_deal, "volume")
+                        if fill_deal is not None
+                        else float(entry.get("filled_volume") or entry.get("volume") or 0.0)
+                    )
+                    filled_at = entry.get("broker_filled_at") or (
+                        self._broker_time(fill_deal, now) if fill_deal is not None else None
+                    )
+                    if fill_deal is not None:
+                        entry["mt5_deal_ticket"] = str(self._item_value(fill_deal, "ticket", "") or entry.get("mt5_deal_ticket") or "")
+                        entry["mt5_order_ticket"] = ticket or str(self._item_value(fill_deal, "order", "") or "")
                     entry.update(
                         {
-                            "broker_status": "FILLED",
-                            "mt5_order_ticket": ticket or str(self._item_value(deal, "order", "") or ""),
-                            "mt5_deal_ticket": str(self._item_value(deal, "ticket", "") or ""),
-                            "mt5_position_ticket": position_ticket or str(self._item_value(position, "ticket", "") or ""),
-                            "broker_filled_at": entry.get("broker_filled_at") or self._broker_time(deal, now),
-                            "volume": self._item_value(deal, "volume", entry.get("volume")),
-                            "updated_at": now.isoformat(),
+                            "mt5_position_ticket": position_ticket,
+                            "fill_price": fill_price,
+                            "broker_filled_at": filled_at,
+                            "filled_volume": filled_volume or entry.get("filled_volume"),
+                            "volume": filled_volume or entry.get("volume"),
+                            "position_model": position_model,
                             "failure_reason": None,
                             "last_failure": None,
                             "retryable": 0,
                             "next_retry_at": None,
+                            "execution_eligible": 1,
+                            "updated_at": now.isoformat(),
                         }
                     )
-                    self.repository.upsert_broker_entry(entry)
-                    self.repository.set_zone_execution_status(str(entry["zone_id"]), "ACTIVE", now.isoformat())
-                    if previous != "FILLED":
+
+                    closing_deals = sorted(
+                        [item for item in position_deals if self._deal_is_close(connector, item)],
+                        key=lambda item: self._broker_time(item, now),
+                    )
+                    close_tickets = [
+                        str(self._item_value(item, "ticket", "") or "")
+                        for item in closing_deals
+                        if self._item_value(item, "ticket", None) is not None
+                    ]
+                    prior_close_tickets = {
+                        str(item) for item in self._json_list(entry.get("close_deal_tickets_json"))
+                    }
+                    new_closing_deals = [
+                        item for item in closing_deals
+                        if str(self._item_value(item, "ticket", "") or "") not in prior_close_tickets
+                    ]
+                    closed_volume = sum(self._number(item, "volume") for item in closing_deals)
+                    remaining_volume = (
+                        self._number(position, "volume")
+                        if position is not None
+                        else max(0.0, filled_volume - closed_volume)
+                    )
+                    entry.update(
+                        {
+                            "closed_volume": closed_volume,
+                            "remaining_volume": remaining_volume,
+                            "partial_close_count": len(closing_deals) if position is not None else max(0, len(closing_deals) - 1),
+                            "close_deal_tickets": close_tickets,
+                            "lifecycle_details": {
+                                "position_model": position_model,
+                                "attribution": "PER_ENTRY" if position_model == "HEDGING" else "INCOMPLETE_SHARED_OR_UNKNOWN",
+                                "deals": [self._deal_snapshot(item) for item in position_deals],
+                            },
+                        }
+                    )
+
+                    if previous_status not in {"FILLED", "CLOSED"}:
+                        entry["broker_status"] = "FILLED"
+                        self.repository.upsert_broker_entry(entry)
+                        self.repository.set_zone_execution_status(str(entry["zone_id"]), "ACTIVE", now.isoformat())
+                        transition_time = filled_at or now.isoformat()
+                        self._journal_broker_transition(entry, "ORDER_FILLED", transition_time)
+                        self._journal_broker_transition(entry, "POSITION_OPENED", transition_time)
                         context = self.contexts.get(str(entry["context_key"]))
                         if context is not None:
                             context.realtime_activations += 1
-                            event_type = f"ENTRY{entry['entry_number']}_ACTIVATED"
                             self._record_event(
-                                context, str(entry["zone_id"]), event_type, entry["broker_filled_at"],
-                                price=float(self._item_value(deal, "price", entry.get("normalized_price")) or entry.get("normalized_price") or 0.0),
-                                broker_order_id=entry["mt5_order_ticket"],
-                                metadata={"broker_confirmed": True, "deal_ticket": entry["mt5_deal_ticket"], "position_ticket": entry["mt5_position_ticket"], "volume": entry["volume"]},
+                                context,
+                                str(entry["zone_id"]),
+                                f"ENTRY{entry['entry_number']}_ACTIVATED",
+                                transition_time,
+                                price=float(fill_price or entry.get("normalized_price") or 0.0),
+                                broker_order_id=entry.get("mt5_order_ticket"),
+                                metadata={
+                                    "broker_confirmed": True,
+                                    "deal_ticket": entry.get("mt5_deal_ticket"),
+                                    "position_ticket": position_ticket,
+                                    "volume": filled_volume,
+                                },
                             )
                         self._log(
                             "lebprime_pending_order_filled",
                             {
-                                "zone_id": entry["zone_id"], "entry_number": entry["entry_number"],
-                                "order_ticket": entry["mt5_order_ticket"], "deal_ticket": entry["mt5_deal_ticket"],
-                                "position_ticket": entry["mt5_position_ticket"], "requested_price": entry["entry_price"],
-                                "fill_price": self._item_value(deal, "price", entry.get("normalized_price")),
+                                "zone_id": entry["zone_id"],
+                                "entry_number": entry["entry_number"],
+                                "order_ticket": entry.get("mt5_order_ticket"),
+                                "deal_ticket": entry.get("mt5_deal_ticket"),
+                                "position_ticket": position_ticket,
+                                "requested_price": entry.get("entry_price"),
+                                "fill_price": fill_price,
                             },
                         )
-                    exit_deal = next(
-                        (
-                            item for item in deals
-                            if position_ticket
-                            and str(self._item_value(item, "position_id", "") or "") == position_ticket
-                            and int(self._item_value(item, "entry", 0) or 0) in {1, 2, 3}
-                        ),
-                        None,
-                    )
-                    if position is None and exit_deal is not None:
-                        entry.update({"broker_status": "CLOSED", "broker_closed_at": self._broker_time(exit_deal, now), "updated_at": now.isoformat()})
+
+                    if position is not None:
+                        entry["broker_status"] = "FILLED"
+                        entry["outcome_complete"] = 0
+                        if position_model == "HEDGING" and closing_deals:
+                            entry["partial_realized_pnl"] = sum(
+                                self._number(item, "profit")
+                                + self._number(item, "commission")
+                                + self._number(item, "swap")
+                                + self._number(item, "fee")
+                                for item in closing_deals
+                            )
                         self.repository.upsert_broker_entry(entry)
-                        self._log("lebprime_broker_position_closed", {"zone_id": entry["zone_id"], "entry_number": entry["entry_number"], "position_ticket": position_ticket, "deal_ticket": str(self._item_value(exit_deal, "ticket", "") or "")})
-                    continue
-                if history_order is not None and entry.get("broker_status") in {"PLACING", "RETRY_SCHEDULED", "PENDING", "ORDER_HISTORY"}:
-                    state = self._item_value(history_order, "state")
-                    cancelled_states = {
-                        getattr(getattr(connector, "mt5", None), "ORDER_STATE_CANCELED", -9991),
-                        getattr(getattr(connector, "mt5", None), "ORDER_STATE_EXPIRED", -9992),
-                        getattr(getattr(connector, "mt5", None), "ORDER_STATE_REJECTED", -9993),
-                    }
-                    entry["broker_status"] = "CANCELLED" if state in cancelled_states else "ORDER_HISTORY"
-                    entry["broker_closed_at"] = now.isoformat() if entry["broker_status"] == "CANCELLED" else entry.get("broker_closed_at")
-                    entry["retryable"] = 0
-                    entry["next_retry_at"] = None
-                    entry["updated_at"] = now.isoformat()
+                        if position_model == "HEDGING":
+                            for close_deal in new_closing_deals:
+                                deal_ticket = str(self._item_value(close_deal, "ticket", "") or "")
+                                self._journal_broker_transition(
+                                    entry,
+                                    "POSITION_PARTIAL_CLOSE",
+                                    self._broker_time(close_deal, now),
+                                    event_suffix=deal_ticket,
+                                    metadata={"deal": self._deal_snapshot(close_deal)},
+                                )
+                        continue
+
+                    if closing_deals:
+                        final_deal = closing_deals[-1]
+                        tolerance = max(1e-8, filled_volume * 1e-6)
+                        complete = bool(
+                            position_model == "HEDGING"
+                            and filled_volume > 0
+                            and closed_volume + tolerance >= filled_volume
+                        )
+                        close_time = self._broker_time(final_deal, now)
+                        entry.update(
+                            {
+                                "broker_status": "CLOSED",
+                                "broker_closed_at": close_time,
+                                "remaining_volume": 0.0,
+                                "outcome_complete": int(complete),
+                                "final_exit_reason": self._classify_exit_reason(connector, final_deal) if complete else "UNKNOWN",
+                            }
+                        )
+                        if complete:
+                            total_volume = sum(self._number(item, "volume") for item in closing_deals)
+                            entry["close_price"] = (
+                                sum(self._number(item, "price") * self._number(item, "volume") for item in closing_deals) / total_volume
+                                if total_volume > 0
+                                else None
+                            )
+                            entry["broker_profit"] = sum(self._number(item, "profit") for item in position_deals)
+                            entry["broker_commission"] = sum(self._number(item, "commission") for item in position_deals)
+                            entry["broker_swap"] = sum(self._number(item, "swap") for item in position_deals)
+                            entry["broker_fee"] = sum(self._number(item, "fee") for item in position_deals)
+                            entry["realized_pnl"] = (
+                                entry["broker_profit"]
+                                + entry["broker_commission"]
+                                + entry["broker_swap"]
+                                + entry["broker_fee"]
+                            )
+                        else:
+                            entry.update(
+                                {
+                                    "close_price": None,
+                                    "realized_pnl": None,
+                                    "broker_profit": None,
+                                    "broker_commission": None,
+                                    "broker_swap": None,
+                                    "broker_fee": None,
+                                }
+                            )
+                        self.repository.upsert_broker_entry(entry)
+                        if position_model == "HEDGING":
+                            partial_deals = new_closing_deals[:-1] if previous_status != "CLOSED" else new_closing_deals
+                            for close_deal in partial_deals:
+                                deal_ticket = str(self._item_value(close_deal, "ticket", "") or "")
+                                self._journal_broker_transition(
+                                    entry,
+                                    "POSITION_PARTIAL_CLOSE",
+                                    self._broker_time(close_deal, now),
+                                    event_suffix=deal_ticket,
+                                    metadata={"deal": self._deal_snapshot(close_deal)},
+                                )
+                        if previous_status != "CLOSED":
+                            self._journal_broker_transition(
+                                entry,
+                                "POSITION_CLOSED",
+                                close_time,
+                                metadata={"outcome_complete": complete, "position_model": position_model},
+                            )
+                            self._log(
+                                "lebprime_broker_position_closed",
+                                {
+                                    "zone_id": entry["zone_id"],
+                                    "entry_number": entry["entry_number"],
+                                    "position_ticket": position_ticket,
+                                    "close_deal_tickets": close_tickets,
+                                    "close_price": entry.get("close_price"),
+                                    "realized_pnl": entry.get("realized_pnl"),
+                                    "final_exit_reason": entry.get("final_exit_reason"),
+                                    "outcome_complete": complete,
+                                    "position_model": position_model,
+                                },
+                            )
+                        continue
+
+                    entry["broker_status"] = "FILLED"
                     self.repository.upsert_broker_entry(entry)
+                    continue
+
+                if history_order is not None and previous_status in {"PLACING", "RETRY_SCHEDULED", "PENDING", "ORDER_HISTORY"}:
+                    try:
+                        order_state = int(self._item_value(history_order, "state", -1))
+                    except (TypeError, ValueError):
+                        order_state = -1
+                    terminal = terminal_order_states.get(order_state)
+                    if terminal is None:
+                        entry.update({"broker_status": "ORDER_HISTORY", "updated_at": now.isoformat()})
+                        self.repository.upsert_broker_entry(entry)
+                        continue
+                    status, exit_reason = terminal
+                    terminal_at = self._broker_time(history_order, now)
+                    failure_reason = None
+                    if status == "REJECTED":
+                        failure_reason = str(
+                            self._item_value(history_order, "comment", "")
+                            or self._item_value(history_order, "external_id", "")
+                            or "BROKER_REJECTED"
+                        )
+                    entry.update(
+                        {
+                            "broker_status": status,
+                            "broker_closed_at": terminal_at,
+                            "canceled_at": terminal_at if status == "CANCELED" else entry.get("canceled_at"),
+                            "expired_at": terminal_at if status == "EXPIRED" else entry.get("expired_at"),
+                            "final_exit_reason": exit_reason,
+                            "failure_reason": failure_reason,
+                            "retryable": 0,
+                            "next_retry_at": None,
+                            "execution_eligible": 0,
+                            "outcome_complete": 0,
+                            "lifecycle_details": {
+                                "order_state": order_state,
+                                "order_comment": self._item_value(history_order, "comment"),
+                                "order_reason": self._item_value(history_order, "reason"),
+                            },
+                            "updated_at": now.isoformat(),
+                        }
+                    )
+                    self.repository.upsert_broker_entry(entry)
+                    if previous_status != status:
+                        event_type = {
+                            "CANCELED": "ORDER_CANCELED",
+                            "EXPIRED": "ORDER_EXPIRED",
+                            "REJECTED": "ORDER_REJECTED",
+                        }[status]
+                        self._journal_broker_transition(entry, event_type, terminal_at)
+
 
     @staticmethod
     def _broker_time(item: Any, fallback: datetime) -> str:
-        raw = LebPrimeLiveService._item_value(item, "time_msc") or LebPrimeLiveService._item_value(item, "time")
-        if raw is None:
-            return fallback.isoformat()
-        try:
-            unit = "ms" if float(raw) > 10_000_000_000 else "s"
-            return pd.to_datetime(raw, unit=unit, utc=True).isoformat()
-        except Exception:
-            return fallback.isoformat()
+        for field in ("time_done_msc", "time_update_msc", "time_msc", "time_done", "time_update", "time", "time_expiration"):
+            raw = LebPrimeLiveService._item_value(item, field)
+            if raw in (None, "", 0):
+                continue
+            try:
+                unit = "ms" if field.endswith("_msc") or float(raw) > 10_000_000_000 else "s"
+                return pd.to_datetime(raw, unit=unit, utc=True).isoformat()
+            except Exception:
+                continue
+        return fallback.isoformat()
 
     def _manage_broker_lifecycle(self, context: LiveContext, zone: ZoneRecord, event_type: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply engine lifecycle decisions to the primary family's broker orders."""
@@ -1824,16 +2289,18 @@ class LebPrimeLiveService:
                 if entry.get("broker_status") in {"PLACING", "PENDING"} and entry.get("mt5_order_ticket"):
                     actions.append(self._cancel_broker_entry(context, zone, entry, event_type))
                 elif bool(entry.get("retryable")) and not entry.get("mt5_order_ticket"):
+                    terminal_at = _utc_now().isoformat()
                     entry.update(
                         {
-                            "broker_status": event_type,
-                            "failure_reason": event_type,
-                            "last_failure": event_type,
+                            "broker_status": "NOT_PLACED",
+                            "final_exit_reason": "UNKNOWN",
+                            "failure_reason": f"{event_type}_BEFORE_BROKER_ACCEPTANCE",
+                            "last_failure": f"{event_type}_BEFORE_BROKER_ACCEPTANCE",
                             "retryable": 0,
                             "next_retry_at": None,
                             "execution_eligible": 0,
-                            "broker_closed_at": _utc_now().isoformat(),
-                            "updated_at": _utc_now().isoformat(),
+                            "broker_closed_at": terminal_at,
+                            "updated_at": terminal_at,
                         }
                     )
                     self.repository.upsert_broker_entry(entry)
@@ -1857,8 +2324,10 @@ class LebPrimeLiveService:
             if confirmed and hasattr(connector, "get_pending_orders"):
                 confirmed = not any(str(self._item_value(item, "ticket", "") or "") == ticket for item in connector.get_pending_orders())
             if confirmed:
-                entry.update({"broker_status": "CANCELLED", "broker_closed_at": _utc_now().isoformat(), "failure_reason": None, "updated_at": _utc_now().isoformat()})
+                terminal_at = _utc_now().isoformat()
+                entry.update({"broker_status": "CANCELED", "broker_closed_at": terminal_at, "canceled_at": terminal_at, "final_exit_reason": "CANCELED", "broker_retcode": str(self._item_value(result, "retcode", "") or entry.get("broker_retcode") or ""), "failure_reason": None, "updated_at": terminal_at})
                 self.repository.upsert_broker_entry(entry)
+                self._journal_broker_transition(entry, "ORDER_CANCELED", terminal_at)
                 self._log("lebprime_pending_order_cancelled", {"context": context.key, "zone_id": zone.engine_zone_id, "entry_number": entry["entry_number"], "ticket": ticket, "reason": reason})
             else:
                 entry.update({"failure_reason": f"CANCEL_NOT_CONFIRMED:{reason}", "updated_at": _utc_now().isoformat()})

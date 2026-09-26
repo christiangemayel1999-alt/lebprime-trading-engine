@@ -208,6 +208,7 @@ class TradingBot:
             risk_manager=self.risk_manager,
             risk_state=self.state,
             notifier=self.notifier,
+            trade_journal=self.trade_journal,
         )
         self.journal_repository = JournalRepository(self.logger, self.trade_journal)
         self.live_lifecycle = LivePositionLifecycleManager(

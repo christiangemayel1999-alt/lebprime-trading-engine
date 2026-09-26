@@ -137,10 +137,31 @@ class LebPrimeLiveRepository:
                 mt5_order_ticket TEXT,
                 mt5_deal_ticket TEXT,
                 mt5_position_ticket TEXT,
+                fill_price REAL,
                 broker_status TEXT NOT NULL,
                 broker_created_at TEXT,
                 broker_filled_at TEXT,
                 broker_closed_at TEXT,
+                close_price REAL,
+                realized_pnl REAL,
+                partial_realized_pnl REAL,
+                broker_profit REAL,
+                broker_commission REAL,
+                broker_swap REAL,
+                broker_fee REAL,
+                final_exit_reason TEXT,
+                broker_retcode TEXT,
+                broker_submitted_at TEXT,
+                canceled_at TEXT,
+                expired_at TEXT,
+                filled_volume REAL,
+                closed_volume REAL,
+                remaining_volume REAL,
+                partial_close_count INTEGER NOT NULL DEFAULT 0,
+                outcome_complete INTEGER NOT NULL DEFAULT 0,
+                position_model TEXT,
+                close_deal_tickets_json TEXT,
+                lifecycle_details_json TEXT,
                 failure_reason TEXT,
                 historical INTEGER NOT NULL DEFAULT 0,
                 execution_eligible INTEGER NOT NULL DEFAULT 0,
@@ -212,6 +233,27 @@ class LebPrimeLiveRepository:
                 "projected_margin_level": "REAL",
                 "required_margin_level": "REAL",
                 "margin_diagnostics_json": "TEXT",
+                "fill_price": "REAL",
+                "close_price": "REAL",
+                "realized_pnl": "REAL",
+                "partial_realized_pnl": "REAL",
+                "broker_profit": "REAL",
+                "broker_commission": "REAL",
+                "broker_swap": "REAL",
+                "broker_fee": "REAL",
+                "final_exit_reason": "TEXT",
+                "broker_retcode": "TEXT",
+                "broker_submitted_at": "TEXT",
+                "canceled_at": "TEXT",
+                "expired_at": "TEXT",
+                "filled_volume": "REAL",
+                "closed_volume": "REAL",
+                "remaining_volume": "REAL",
+                "partial_close_count": "INTEGER NOT NULL DEFAULT 0",
+                "outcome_complete": "INTEGER NOT NULL DEFAULT 0",
+                "position_model": "TEXT",
+                "close_deal_tickets_json": "TEXT",
+                "lifecycle_details_json": "TEXT",
             }.items():
                 if column not in broker_columns:
                     connection.execute(f"ALTER TABLE lebprime_broker_entries ADD COLUMN {column} {definition}")
@@ -420,14 +462,25 @@ class LebPrimeLiveRepository:
         diagnostics = serial.get("margin_diagnostics")
         if diagnostics is not None:
             serial["margin_diagnostics_json"] = json.dumps(diagnostics, sort_keys=True, default=str)
+        for source_key, storage_key in (
+            ("close_deal_tickets", "close_deal_tickets_json"),
+            ("lifecycle_details", "lifecycle_details_json"),
+        ):
+            if source_key in serial:
+                serial[storage_key] = json.dumps(serial.get(source_key), sort_keys=True, default=str)
         fields = (
             "idempotency_key", "zone_id", "context_key", "entry_number", "logical_symbol",
             "broker_symbol", "side", "order_type", "entry_price", "normalized_price",
             "volume", "raw_calculated_volume", "requested_volume", "minimum_volume",
             "required_margin", "free_margin", "projected_margin_level", "required_margin_level",
             "margin_diagnostics_json", "sl", "tp", "mt5_order_ticket", "mt5_deal_ticket",
-            "mt5_position_ticket", "broker_status", "broker_created_at", "broker_filled_at",
-            "broker_closed_at", "failure_reason", "historical", "execution_eligible", "comment",
+            "mt5_position_ticket", "fill_price", "broker_status", "broker_created_at", "broker_filled_at",
+            "broker_closed_at", "close_price", "realized_pnl", "partial_realized_pnl",
+            "broker_profit", "broker_commission", "broker_swap", "broker_fee",
+            "final_exit_reason", "broker_retcode", "broker_submitted_at", "canceled_at", "expired_at",
+            "filled_volume", "closed_volume", "remaining_volume", "partial_close_count",
+            "outcome_complete", "position_model", "close_deal_tickets_json", "lifecycle_details_json",
+            "failure_reason", "historical", "execution_eligible", "comment",
             "attempt_count", "last_attempt_at", "last_failure", "retryable", "next_retry_at",
             "updated_at",
         )
@@ -467,16 +520,39 @@ class LebPrimeLiveRepository:
             rows = connection.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
+    def broker_entries_for_reconciliation(self, logical_symbol: str) -> list[dict[str, Any]]:
+        """Return live rows whose broker lifecycle may still need reconciliation."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM lebprime_broker_entries
+                WHERE logical_symbol = ?
+                  AND historical = 0
+                  AND (
+                      broker_status IN ('PLACING','RETRY_SCHEDULED','PENDING','ORDER_HISTORY','FILLED')
+                      OR (
+                          broker_status = 'CLOSED'
+                          AND outcome_complete = 0
+                          AND COALESCE(position_model, 'UNKNOWN') != 'NETTING'
+                      )
+                  )
+                ORDER BY updated_at
+                """,
+                (logical_symbol,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def dashboard_trade_snapshot(self, limit_per_category: int = 200) -> dict[str, Any]:
         """Return a read-only, broker-authoritative dashboard view of live entries."""
         limit = max(1, min(int(limit_per_category), 1000))
-        pending_statuses = ("PLACING", "RETRY_SCHEDULED", "PENDING", "ORDER_HISTORY")
+        pending_statuses = ("PENDING",)
         open_statuses = ("FILLED",)
         closed_statuses = ("CLOSED",)
         canceled_statuses = ("CANCELLED", "CANCELED", "CANCEL_FAILED")
         expired_statuses = ("EXPIRED",)
+        rejected_statuses = ("REJECTED", "REJECTED_BY_BROKER")
         failed_statuses = (
-            "PERMANENT_FAILURE", "REJECTED", "REJECTED_BY_BROKER",
+            "PLACING", "RETRY_SCHEDULED", "ORDER_HISTORY", "PERMANENT_FAILURE",
             "BLOCKED_PRECHECK", "RISK_BLOCKED", "NOT_PLACED",
         )
 
@@ -494,22 +570,44 @@ class LebPrimeLiveRepository:
                 broker.broker_symbol,
                 broker.side,
                 broker.order_type,
+                COALESCE(broker.normalized_price, broker.entry_price) AS entry,
                 broker.entry_price AS requested_entry,
                 broker.normalized_price AS normalized_entry,
+                broker.fill_price,
                 broker.volume,
+                broker.filled_volume,
+                broker.closed_volume,
+                broker.remaining_volume,
+                broker.partial_close_count,
                 zone.stop_loss AS strategy_sl,
                 broker.sl AS broker_sl,
                 zone.tp1,
                 zone.tp2,
+                broker.mt5_order_ticket AS order_ticket,
+                broker.mt5_deal_ticket AS deal_ticket,
+                broker.mt5_position_ticket AS position_ticket,
                 broker.mt5_order_ticket,
                 broker.mt5_deal_ticket,
                 broker.mt5_position_ticket,
                 broker.broker_status AS status,
                 COALESCE(broker.broker_created_at, zone.created_at, broker.updated_at) AS created_at,
+                broker.broker_submitted_at AS submitted_at,
                 broker.broker_filled_at AS filled_at,
                 broker.broker_closed_at AS closed_at,
-                NULL AS close_price,
-                NULL AS realized_pnl,
+                broker.canceled_at,
+                broker.expired_at,
+                broker.close_price,
+                broker.realized_pnl,
+                broker.partial_realized_pnl,
+                broker.broker_profit,
+                broker.broker_commission,
+                broker.broker_swap,
+                broker.broker_fee,
+                broker.final_exit_reason,
+                broker.broker_retcode,
+                broker.outcome_complete,
+                broker.position_model,
+                broker.close_deal_tickets_json,
                 COALESCE(broker.last_failure, broker.failure_reason) AS failure_reason,
                 broker.attempt_count AS retry_count,
                 broker.retryable,
@@ -527,13 +625,20 @@ class LebPrimeLiveRepository:
                 select_sql.format(statuses=placeholders(statuses)),
                 (*statuses, limit),
             ).fetchall()
-            return [dict(row) for row in rows]
+            payload = [dict(row) for row in rows]
+            for row in payload:
+                row["outcome_complete"] = bool(row.get("outcome_complete"))
+                try:
+                    row["close_deal_tickets"] = json.loads(row.pop("close_deal_tickets_json") or "[]")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    row["close_deal_tickets"] = []
+            return payload
 
         with self._lock, self._connect() as connection:
             pending = fetch_category(connection, pending_statuses)
             open_entries = fetch_category(connection, open_statuses)
             closed = fetch_category(connection, closed_statuses)
-            failed = fetch_category(connection, failed_statuses + canceled_statuses + expired_statuses)
+            failed = fetch_category(connection, failed_statuses + rejected_statuses + canceled_statuses + expired_statuses)
             status_rows = connection.execute(
                 """
                 SELECT broker_status, COUNT(*) AS count
@@ -544,6 +649,13 @@ class LebPrimeLiveRepository:
             ).fetchall()
             historical_excluded = connection.execute(
                 "SELECT COUNT(*) FROM lebprime_broker_entries WHERE historical = 1"
+            ).fetchone()[0]
+            complete_outcomes = connection.execute(
+                """
+                SELECT COUNT(*) FROM lebprime_broker_entries
+                WHERE historical = 0 AND broker_status = 'CLOSED'
+                  AND outcome_complete = 1 AND realized_pnl IS NOT NULL
+                """
             ).fetchone()[0]
 
         status_counts = {str(row["broker_status"]): int(row["count"] or 0) for row in status_rows}
@@ -557,16 +669,17 @@ class LebPrimeLiveRepository:
                 "open": sum(status_counts.get(status, 0) for status in open_statuses),
                 "closed": sum(status_counts.get(status, 0) for status in closed_statuses),
                 "failed": sum(status_counts.get(status, 0) for status in failed_statuses),
+                "rejected": sum(status_counts.get(status, 0) for status in rejected_statuses),
                 "canceled": sum(status_counts.get(status, 0) for status in canceled_statuses),
                 "expired": sum(status_counts.get(status, 0) for status in expired_statuses),
+                "complete_outcomes": int(complete_outcomes or 0),
                 "historical_replay_excluded": int(historical_excluded or 0),
-                "realized_pnl_available": False,
+                "realized_pnl_available": bool(complete_outcomes),
             },
         }
 
     def dashboard_performance_snapshot(self) -> dict[str, Any]:
-        """Aggregate only facts persisted by the LebPrime zone/broker lifecycle."""
-        failed_statuses = ("PERMANENT_FAILURE", "REJECTED", "REJECTED_BY_BROKER", "BLOCKED_PRECHECK", "RISK_BLOCKED", "NOT_PLACED")
+        """Aggregate reliable persisted broker outcomes without mixing incomplete rows."""
         with self._lock, self._connect() as connection:
             zones_created = connection.execute(
                 """
@@ -586,13 +699,42 @@ class LebPrimeLiveRepository:
                 GROUP BY broker_status
                 """
             ).fetchall()
-            orders_accepted = connection.execute(
+            lifecycle_counts = dict(connection.execute(
                 """
-                SELECT COUNT(*) FROM lebprime_broker_entries
+                SELECT
+                    SUM(CASE WHEN broker_submitted_at IS NOT NULL THEN 1 ELSE 0 END) AS broker_orders_submitted,
+                    SUM(CASE WHEN NULLIF(mt5_order_ticket, '') IS NOT NULL
+                                  AND broker_status IN ('PENDING','ORDER_HISTORY','FILLED','CLOSED','CANCELLED','CANCELED','EXPIRED')
+                             THEN 1 ELSE 0 END) AS broker_orders_accepted,
+                    SUM(CASE WHEN NULLIF(mt5_deal_ticket, '') IS NOT NULL THEN 1 ELSE 0 END) AS fills,
+                    SUM(CASE WHEN broker_status = 'FILLED' THEN 1 ELSE 0 END) AS open_positions,
+                    SUM(CASE WHEN broker_status = 'CLOSED' THEN 1 ELSE 0 END) AS closed_entries,
+                    SUM(CASE WHEN broker_status IN ('CANCELLED','CANCELED') THEN 1 ELSE 0 END) AS canceled,
+                    SUM(CASE WHEN broker_status = 'EXPIRED' THEN 1 ELSE 0 END) AS expired,
+                    SUM(CASE WHEN broker_status IN ('REJECTED','REJECTED_BY_BROKER')
+                                  OR final_exit_reason = 'REJECTED' THEN 1 ELSE 0 END) AS rejected,
+                    SUM(CASE WHEN NULLIF(mt5_order_ticket, '') IS NULL
+                                  AND NULLIF(mt5_deal_ticket, '') IS NULL
+                                  AND COALESCE(final_exit_reason, '') != 'REJECTED'
+                                  AND broker_status IN ('PERMANENT_FAILURE','BLOCKED_PRECHECK','RISK_BLOCKED','NOT_PLACED')
+                             THEN 1 ELSE 0 END) AS failed_precheck
+                FROM lebprime_broker_entries
                 WHERE historical = 0
-                  AND NULLIF(mt5_order_ticket, '') IS NOT NULL
                 """
-            ).fetchone()[0]
+            ).fetchone())
+            outcome_rows = [
+                dict(row) for row in connection.execute(
+                    """
+                    SELECT broker.logical_symbol AS symbol, zone.timeframe, broker.entry_number,
+                           broker.side, broker.realized_pnl, broker.final_exit_reason,
+                           broker.outcome_complete
+                    FROM lebprime_broker_entries AS broker
+                    LEFT JOIN lebprime_live_zones AS zone ON zone.zone_id = broker.zone_id
+                    WHERE broker.historical = 0 AND broker.broker_status = 'CLOSED'
+                    ORDER BY broker.logical_symbol, zone.timeframe, broker.entry_number
+                    """
+                ).fetchall()
+            ]
             breakdown_rows = connection.execute(
                 """
                 SELECT broker.logical_symbol AS symbol, zone.timeframe, broker.entry_number,
@@ -608,30 +750,88 @@ class LebPrimeLiveRepository:
             ).fetchall()
 
         status_counts = {str(row["broker_status"]): int(row["count"] or 0) for row in status_rows}
-        orders_created = sum(status_counts.values())
+        complete_rows = [
+            row for row in outcome_rows
+            if bool(row.get("outcome_complete")) and row.get("realized_pnl") is not None
+        ]
+        incomplete_outcomes = len(outcome_rows) - len(complete_rows)
+        pnl_values = [float(row["realized_pnl"]) for row in complete_rows]
+        winners = [value for value in pnl_values if value > 0]
+        losers = [value for value in pnl_values if value < 0]
+        gross_profit = sum(winners)
+        gross_loss = abs(sum(losers))
+        complete_count = len(complete_rows)
+
+        def aggregate_dimension(field: str) -> list[dict[str, Any]]:
+            grouped: dict[str, dict[str, Any]] = {}
+            for row in outcome_rows:
+                key = str(row.get(field) if row.get(field) not in (None, "") else "UNKNOWN")
+                item = grouped.setdefault(
+                    key,
+                    {
+                        field: row.get(field),
+                        "closed_entries": 0,
+                        "complete_outcomes": 0,
+                        "incomplete_outcomes": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "net_realized_pnl": 0.0,
+                    },
+                )
+                item["closed_entries"] += 1
+                if bool(row.get("outcome_complete")) and row.get("realized_pnl") is not None:
+                    pnl = float(row["realized_pnl"])
+                    item["complete_outcomes"] += 1
+                    item["net_realized_pnl"] += pnl
+                    item["wins"] += int(pnl > 0)
+                    item["losses"] += int(pnl < 0)
+                else:
+                    item["incomplete_outcomes"] += 1
+            return list(grouped.values())
+
         summary = {
             "zones_created": int(zones_created or 0),
-            "orders_created": orders_created,
-            "orders_accepted": int(orders_accepted or 0),
-            "orders_filled": status_counts.get("FILLED", 0) + status_counts.get("CLOSED", 0),
-            "orders_failed": sum(status_counts.get(status, 0) for status in failed_statuses),
-            "orders_canceled": status_counts.get("CANCELLED", 0) + status_counts.get("CANCELED", 0),
-            "orders_expired": status_counts.get("EXPIRED", 0),
-            "open_entries": status_counts.get("FILLED", 0),
-            "closed_entries": status_counts.get("CLOSED", 0),
-            "realized_pnl": None,
-            "win_rate": None,
+            "broker_orders_submitted": int(lifecycle_counts.get("broker_orders_submitted") or 0),
+            "broker_orders_accepted": int(lifecycle_counts.get("broker_orders_accepted") or 0),
+            "fills": int(lifecycle_counts.get("fills") or 0),
+            "open_positions": int(lifecycle_counts.get("open_positions") or 0),
+            "closed_entries": int(lifecycle_counts.get("closed_entries") or 0),
+            "canceled": int(lifecycle_counts.get("canceled") or 0),
+            "expired": int(lifecycle_counts.get("expired") or 0),
+            "rejected": int(lifecycle_counts.get("rejected") or 0),
+            "failed_precheck": int(lifecycle_counts.get("failed_precheck") or 0),
+            "complete_outcomes": complete_count,
+            "incomplete_outcomes": incomplete_outcomes,
+            "tp_closes": sum(1 for row in complete_rows if row.get("final_exit_reason") == "TP"),
+            "sl_closes": sum(1 for row in complete_rows if row.get("final_exit_reason") == "SL"),
+            "manual_closes": sum(1 for row in complete_rows if row.get("final_exit_reason") == "MANUAL_CLOSE"),
+            "other_closes": sum(1 for row in complete_rows if row.get("final_exit_reason") not in {"TP", "SL", "MANUAL_CLOSE"}),
+            "gross_profit": gross_profit,
+            "gross_loss": gross_loss,
+            "net_realized_pnl": sum(pnl_values),
+            "average_winner": (gross_profit / len(winners)) if winners else None,
+            "average_loser": (sum(losers) / len(losers)) if losers else None,
+            "profit_factor": (gross_profit / gross_loss) if gross_loss > 0 else None,
+            "win_rate": (len(winners) / complete_count) if complete_count else None,
+            "average_r": None,
         }
         return {
             "summary": summary,
             "by_status": [{"status": key, "count": value} for key, value in sorted(status_counts.items())],
             "breakdown": [dict(row) for row in breakdown_rows],
+            "results_by_symbol": aggregate_dimension("symbol"),
+            "results_by_timeframe": aggregate_dimension("timeframe"),
+            "results_by_entry_number": aggregate_dimension("entry_number"),
             "notes": [
-                "Broker lifecycle records are authoritative.",
-                "Historical replay entries are excluded.",
-                "Realized PnL and win rate remain unknown because they are not persisted on LebPrime broker entries.",
+                "Broker lifecycle records are authoritative; historical replay entries are excluded.",
+                "PnL metrics include only CLOSED rows with outcome_complete=1.",
+                "Realized PnL is MT5 deal profit plus commission, swap, and fee.",
+                "Netting or unknown position-model rows remain incomplete to prevent duplicate per-entry attribution.",
+                "Average R remains unknown because a reliable per-entry risk basis is not persisted.",
             ],
         }
+
+
 
     def retryable_broker_entries(self, now_iso: str) -> list[dict[str, Any]]:
         with self._lock, self._connect() as connection:
@@ -644,7 +844,7 @@ class LebPrimeLiveRepository:
                   AND broker.mt5_order_ticket IS NULL
                   AND broker.mt5_deal_ticket IS NULL
                   AND (broker.next_retry_at IS NULL OR broker.next_retry_at <= ?)
-                  AND zone.execution_status NOT IN ('CLOSED','CANCELLED','EXPIRED','HISTORICAL_REPLAY')
+                  AND zone.execution_status NOT IN ('CLOSED','CANCELLED','CANCELED','EXPIRED','HISTORICAL_REPLAY')
                 ORDER BY broker.next_retry_at, broker.updated_at
                 """,
                 (now_iso,),
