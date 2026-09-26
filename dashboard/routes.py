@@ -313,11 +313,11 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         assert_not_readonly()
         return operator_service.set_signal_generation(payload.actor, payload.enabled)
 
-    @router.get("/api/strategies")
+    @router.get("/api/strategies", deprecated=True)
     async def get_strategies(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, **control_plane.get_section("strategies")}
 
-    @router.get("/api/strategies/lebprime-v3-4-0/status")
+    @router.get("/api/strategies/lebprime-v3-4-0/status", deprecated=True)
     async def get_lebprime_v3_4_0_status(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         if lebprime_live_service is None:
             return {"ok": False, "strategy": "lebprime_v3_4_0", "available": False}
@@ -349,53 +349,53 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
             return {"ok": False, "available": False, "summary": {}, "by_status": [], "breakdown": []}
         return {"ok": True, "available": True, **lebprime_live_service.dashboard_performance_snapshot()}
 
-    @router.patch("/api/strategies/settings")
-    @router.post("/api/strategies/settings")
+    @router.patch("/api/strategies/settings", deprecated=True)
+    @router.post("/api/strategies/settings", deprecated=True)
     async def update_strategy_settings(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="strategy", preview_only=payload.preview_only)
 
-    @router.get("/api/risk")
+    @router.get("/api/risk", deprecated=True)
     async def get_risk(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, **control_plane.get_section("risk")}
 
-    @router.patch("/api/risk/update")
-    @router.post("/api/risk/update")
+    @router.patch("/api/risk/update", deprecated=True)
+    @router.post("/api/risk/update", deprecated=True)
     async def update_risk(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="risk", preview_only=payload.preview_only)
 
-    @router.get("/api/execution")
+    @router.get("/api/execution", deprecated=True)
     async def get_execution(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, **control_plane.get_section("execution")}
 
-    @router.patch("/api/execution/update")
-    @router.post("/api/execution/update")
+    @router.patch("/api/execution/update", deprecated=True)
+    @router.post("/api/execution/update", deprecated=True)
     async def update_execution(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="execution", preview_only=payload.preview_only)
 
-    @router.get("/api/sessions")
+    @router.get("/api/sessions", deprecated=True)
     async def get_sessions(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, **control_plane.get_section("sessions")}
 
-    @router.patch("/api/sessions/update")
-    @router.post("/api/sessions/update")
+    @router.patch("/api/sessions/update", deprecated=True)
+    @router.post("/api/sessions/update", deprecated=True)
     async def update_sessions(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="sessions", preview_only=payload.preview_only)
 
-    @router.get("/api/symbols")
+    @router.get("/api/symbols", deprecated=True)
     async def get_symbols(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, **control_plane.get_section("symbols")}
 
-    @router.patch("/api/symbols/update")
-    @router.post("/api/symbols/update")
+    @router.patch("/api/symbols/update", deprecated=True)
+    @router.post("/api/symbols/update", deprecated=True)
     async def update_symbols(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="symbols", preview_only=payload.preview_only)
 
-    @router.get("/api/backtests")
+    @router.get("/api/backtests", deprecated=True)
     async def get_backtests(limit: int = 20, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, "backtest": control_plane.get_section("backtest").get("backtest", {}), "runs": dashboard_data.list_backtest_runs(limit=limit)}
 
@@ -417,7 +417,7 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     async def get_audit(limit: int = 50, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, "audit": dashboard_data.recent_audit(limit=limit)}
 
-    @router.post("/api/families/toggle")
+    @router.post("/api/families/toggle", deprecated=True)
     async def toggle_family(payload: FamilyToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         try:
@@ -426,7 +426,7 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
             status_code = 404 if str(exc).startswith("Unknown family") else 400
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
-    @router.post("/api/strategies/toggle")
+    @router.post("/api/strategies/toggle", deprecated=True)
     async def toggle_strategy(payload: StrategyToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         try:
