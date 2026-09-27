@@ -1,19 +1,19 @@
-# Phase 5 Consolidation Plan
+# Phase 5 Consolidation Record
 
-Phase 5 should consolidate only where the Phase 4 contracts can preserve byte-for-byte request intent or equivalent persisted outcomes. The statuses below apply to the current repository, not an aspirational redesign.
+Phase 5 consolidated only where the Phase 4 contracts preserve the same calls and outcomes. The statuses below describe the resulting repository, not an aspirational redesign.
 
 | Component | Classification | Rationale / next requirement |
 |---|---|---|
 | `RiskManager` | `KEEP SEPARATE` | It is the implementation owner for gates, sizing, margin fitting, and generic management. It now structurally satisfies `LebPrimeRiskService`; merging it into a facade adds no value. |
 | `RiskEngine` | `KEEP SEPARATE` | It composes generic spread/quality approval around `RiskManager`; LebPrime intentionally calls the narrower risk service after strategy intent exists. |
-| `DynamicPositionSizer` | `REMOVE LATER` | It overlaps percentage adjustment and is not authoritative for LebPrime. Confirm whether analytics/shadow users need it, then remove or explicitly designate it as advisory. |
+| `DynamicPositionSizer` | `KEEP SEPARATE` | It is not authoritative for LebPrime, but the enabled generic fallback path calls it for risk scaling and close-result updates. |
 | `MT5Connector` | `KEEP SEPARATE` | Proven low-level MT5 implementation and normalization boundary. Higher layers should adapt it, not absorb it. |
 | `MT5Broker` | `NEEDS ADAPTER FIRST` | Generic `ExecutionRequest` adapter reimplements parts of pending request assembly. Compare its produced request and result contract with `MT5BrokerGateway`/connector calls before consolidation. |
 | `ReplayBroker` | `KEEP SEPARATE` | Deterministic bar simulation is intentionally different from live account/history capabilities. Share only small execution/state protocols. |
 | `UnifiedStrategyEngine` | `KEEP SEPARATE` | Active backtest/research engine and temporary legacy fallback; it must not become the LebPrime live owner. |
 | `strategy_factory` | `KEEP SEPARATE` | Historical mode selection remains active. Live support construction cannot be removed until the generic fallback path is retired. |
 | `LebprimStrategy` | `KEEP SEPARATE` | Active research/backtest adapter implementation; not the production v3.4.0 engine. Rename/relocate only after external compatibility review. |
-| `LiveContextProvider` | `READY TO MERGE` | All clearly contextual live call sites already delegate to the adapter with identical arguments and return values. Broader use remains behavior-equivalent because the adapter performs direct forwarding and exposes no execution methods. |
+| `LiveContextProvider` | `READY TO MERGE — COMPLETED` | All contextual live call sites delegate to the adapter with identical arguments and return values. `main.py` now also names the dedicated support builder explicitly. |
 | `LebPrimeLiveService` | `KEEP SEPARATE` | Canonical owner of LebPrime zones, pending semantics, retries, reconciliation, and lifecycle persistence. |
 | `LivePositionLifecycleManager` | `NEEDS ADAPTER FIRST` | Owns generic positions while LebPrime owns its broker lifecycle. A shared lifecycle event contract and attribution rules are required before merging. |
 | `TradeJournalService` | `KEEP SEPARATE` | Cross-domain durable event sink with retry/outbox behavior. It should not be merged into a strategy repository. |
@@ -21,9 +21,13 @@ Phase 5 should consolidate only where the Phase 4 contracts can preserve byte-fo
 | Deprecated dashboard APIs | `REMOVE LATER` | Migrate documented clients and update `PROJECT_CONTEXT.md`; retain until external compatibility is explicitly retired. |
 | Legacy config aliases | `UNKNOWN` | Instrument actual access from persisted configs, workers, scripts, and imports before classifying individual aliases for removal. |
 
-## Ready-to-merge equivalence evidence
+## Completed safe consolidations
 
-Only the context boundary is marked ready. `UnifiedStrategyContextAdapter` forwards the same engine instance, arguments, and return values for dataframe preparation, session classification, and context analysis. It holds no state beyond the engine reference and cannot generate candidates or place trades. The runtime swap/rollback path replaces or restores the engine and adapter together.
+- `LiveContextProvider` remains the sole context path in the live runtime. The only remaining `self.strategy` method calls generate/select/evaluate candidates in the surviving generic fallback.
+- `LiveMT5Feed` now depends on `MarketDataGateway`; its runtime object and `fetch_rates()` call are unchanged.
+- The unused `LebPrimeLiveService.connectors` attribute alias was removed. `broker_gateways` is canonical.
+- `connector_factory` was retained because compatibility tests and older construction semantics still use it.
+- LebPrime trade/performance projections were confirmed canonical in `LebPrimeLiveRepository`; no second metric implementation was introduced.
 
 The MT5 gateway is safe as an introduced boundary but is not authorization for merging `MT5Broker` with the LebPrime flow. Its methods delegate directly, yet the two higher-level flows assemble different inputs and results.
 
@@ -36,4 +40,4 @@ The MT5 gateway is safe as an introduced boundary but is not authorization for m
 - Explicit netting/hedging attribution behavior.
 - Migration plan for documented APIs and stored configuration aliases.
 
-Phase 4 provides dependency seams only. It does not provide production or broker validation for a Phase 5 merge.
+Neither Phase 4 nor Phase 5 provides production or broker validation for a larger merge.

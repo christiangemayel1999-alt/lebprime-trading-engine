@@ -1,6 +1,6 @@
 # Canonical Runtime Architecture
 
-This document describes the code paths that exist after Phase 4. It distinguishes the production LebPrime v3.4.0 execution path from the compatibility strategy engine used for shared context, diagnostics, and research.
+This document describes the code paths that exist after Phase 5. It distinguishes the production LebPrime v3.4.0 execution path from the compatibility strategy engine used for shared context, diagnostics, and research.
 
 ## Production startup and live path
 
@@ -34,7 +34,7 @@ live cycle
   -> dashboard LebPrime APIs read repository projections only
 ```
 
-`LebPrimeLiveService` is the only production LebPrime v3.4.0 signal-to-pending-order path. `UnifiedStrategyEngine` is still constructed in live mode because the legacy fallback and shadow/diagnostic paths need its candidate contract, but contextual call sites use `LiveContextProvider`. `build_live_runtime_support_engine()` disables setup families in a private configuration copy. Neither the provider nor its adapter exposes or authorizes trade generation.
+`LebPrimeLiveService` is the only production LebPrime v3.4.0 signal-to-pending-order path. `UnifiedStrategyEngine` is still constructed in live mode because the legacy fallback and shadow/diagnostic paths need its candidate contract, but every contextual call site uses `LiveContextProvider`. `main.py` now names `build_live_runtime_support_engine()` directly rather than aliasing it as the generic builder. The builder disables setup families in a private configuration copy. Neither the provider nor its adapter exposes or authorizes trade generation.
 
 ## Lifecycle and persistence ownership
 
@@ -97,6 +97,8 @@ The dashboard and Telegram are outside the decision-to-broker authority chain. S
 | `services/database.py` | Runtime state and journal persistence | Backtest/OOS/Indicator Lab persistence | Dashboard and worker | Keep. |
 | `services/trade_journal.py` | Canonical journal facade | Shared where runtime-compatible events are written | scripts/manual service | Keep. |
 
+`LiveMT5Feed` now accepts `MarketDataGateway` rather than importing `MT5Connector`. This is a type/dependency-boundary consolidation only: its bar polling calls and returned data are unchanged. The process composition root, bootstrap checks, historical range acquisition, manual trading, and generic `MT5Broker` retain concrete connector ownership because their requirements exceed the existing narrow market-data contract or intentionally sit at the connector boundary.
+
 ## Backtest path
 
 The Research UI queues `POST /api/jobs/backtest`. `JobService` persists the job and the worker invokes `BacktestRunner`. The runner builds a mode-appropriate engine through `strategy_factory.build_strategy_engine()`, uses `ReplaySession` and `ReplayBroker` for deterministic execution, and stores run bundles plus playback frames/events through `BacktestStorage` and `DatabaseService`.
@@ -123,3 +125,8 @@ Dashboard routes call `IndicatorLabService`, which coordinates dataset and campa
 - Generic trade fields in `/api/status` because Logs/Health and compatibility consumers still use portions of the status payload.
 - `StrategyEngine`, `LebprimStrategy`, adapters, and configuration aliases because backtest/research and the live support engine still instantiate them.
 - Generic `ExecutionService`, `MT5Broker`, and `LivePositionLifecycleManager` because manual/generic runtime paths still call them.
+- The `connector_factory` constructor name on `LebPrimeLiveService` because the compatibility suite and older construction contract still use it. The unreferenced `connectors` attribute alias was removed; canonical state is `broker_gateways`.
+
+## Phase 5 read-side decision
+
+LebPrime Trades and Performance remain canonical repository projections through `LebPrimeLiveRepository.dashboard_trade_snapshot()` and `dashboard_performance_snapshot()`. The generic aggregates under `/api/status` were not merged with them: they serve compatibility, logs, health, and generic trade tables with different completeness semantics. Dashboard routes remain read-only and no write responsibility moved out of the live service/repository path.

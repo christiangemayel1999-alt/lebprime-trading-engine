@@ -1,6 +1,6 @@
 # Dashboard API Map
 
-This map describes the production dashboard after Phase 2. The live execution path and broker lifecycle writes remain owned by `LebPrimeLiveService`; dashboard lifecycle endpoints are read-only.
+This map describes the production dashboard after Phase 5. The live execution path and broker lifecycle writes remain owned by `LebPrimeLiveService`; dashboard lifecycle endpoints are read-only.
 
 ## Surviving sections
 
@@ -70,3 +70,11 @@ These remain available, are marked deprecated in FastAPI/OpenAPI where listed, a
 - Replay/stream: `GET /api/backtests/{run_id}/replay/*` and `GET /api/backtests/{run_id}/stream/*`
 
 The deprecated singular listing alternative `GET /api/backtests` delegates to the same run-list projection and adds its legacy configuration field. It remains because `PROJECT_CONTEXT.md` documents it as a compatibility surface.
+
+## Phase 5 read-side audit
+
+- `LebPrimeLiveRepository.dashboard_trade_snapshot()` is the single LebPrime trade projection.
+- `LebPrimeLiveRepository.dashboard_performance_snapshot()` is the single source for broker-complete LebPrime performance, including symbol/timeframe/entry breakdowns.
+- `LebPrimeLiveService.dashboard_*_snapshot()` remains a thin service boundary; it does not recalculate metrics.
+- `DashboardDataService.status_snapshot()` and `dashboard/queries.py` read generic runtime/trade tables for `/api/status`. They are not equivalent to the LebPrime broker-entry projection and were retained.
+- No dashboard API was removed. Every deprecated candidate remains either documented in `PROJECT_CONTEXT.md`, represented by compatibility contracts, or intentionally retained for backend operations.

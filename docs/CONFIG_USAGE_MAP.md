@@ -40,6 +40,10 @@ This map classifies the current `config.json` contract by actual code consumers.
 
 Generic top-level `symbols`, `timeframes`, and `strategy.lebprim_*` do not select the live LebPrime v3.4.0 symbol/timeframe matrix. The live matrix is owned by `lebprime_v3_4_0` and the fixed mappings in `services/lebprime_live/symbols.py` and `timeframes.py`.
 
-## Phase 4 configuration recommendation
+## Phase 5 compatibility decision
 
-Introduce a read-only typed configuration facade that exposes explicit `live_lebprime`, `live_infrastructure`, and `research` views while continuing to load the existing JSON shape. Measure access to compatibility aliases before attempting a migration. Remove keys only after stored configs, worker payloads, dashboard imports/exports, and external scripts have been migrated.
+No configuration key or normalized alias was removed. Static tracing still finds active research/backtest consumers for strategy, setup, session, regime, entry, symbol, and timeframe compatibility data, while `ConfigSchema.normalize()` continues to materialize compatibility views. Stored configs, worker payloads, imports/exports, and external scripts cannot be proven migrated from static evidence alone.
+
+`position_sizing` is classified `KEEP`: when enabled, `TradingBot` uses `DynamicPositionSizer` in the surviving generic fallback execution path and updates it after closes. It is not authoritative for LebPrime v3.4.0, but it is not dead.
+
+Phase 6 may remove individual aliases only after runtime access instrumentation and an explicit stored-config migration. Until then, legacy aliases remain `UNKNOWN`, not safe deletion candidates.

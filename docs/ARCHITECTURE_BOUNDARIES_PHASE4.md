@@ -40,7 +40,7 @@ The combined contract is intentionally specific to the current LebPrime service.
 
 `MT5BrokerGateway` is a delegation-only adapter around `MT5Connector`. It does not normalize, rebuild, reinterpret, retry, or serialize broker operations. Request construction, filling-mode choice, stop adjustment, margin calls, `order_check`, `order_send`, demo/account data, and history remain in the proven connector.
 
-`LebPrimeLiveService` accepts `broker_gateway_factory`. The previous `connector_factory` parameter and `connectors` attribute remain compatibility aliases for existing callers and fakes. Main uses `broker_gateway_factory`; the service no longer imports or names `MT5Connector`.
+`LebPrimeLiveService` accepts `broker_gateway_factory`. Phase 5 retained the previous `connector_factory` parameter because compatibility callers and fakes still construct the service with it, but removed the repository-unreferenced `connectors` attribute alias; canonical cached state is `broker_gateways`. Main uses `broker_gateway_factory`; the service no longer imports or names `MT5Connector`.
 
 ## 5. LebPrime dependency direction
 
@@ -145,7 +145,9 @@ Direct `MT5Connector` construction remains in:
 - `MT5Broker` for generic/manual execution
 - `ManualTradeService`
 - `BacktestRunner` and Indicator Lab dataset loading for historical MT5 acquisition
-- `LiveFeedService` and bootstrap diagnostics/scripts
+- bootstrap diagnostics/scripts
+
+`LiveMT5Feed` was migrated in Phase 5 to accept `MarketDataGateway`; it no longer imports or type-couples to `MT5Connector`.
 
 These are outside the newly bounded LebPrime dependency and need separate adapters or an explicit decision that low-level data acquisition should remain concrete.
 
