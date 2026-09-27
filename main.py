@@ -45,6 +45,7 @@ from trading_bot.execution.exposure_policy import ExposurePolicy, ExposureSnapsh
 from trading_bot.core.models import ExecutionRequest
 from trading_bot.execution.execution_service import ExecutionService
 from trading_bot.execution.mt5_broker import MT5Broker
+from trading_bot.execution.mt5_gateway import MT5BrokerGateway
 from trading_bot.core.reasons import JournalEventType, ReasonCode
 from trading_bot.positions.live_lifecycle import LivePositionLifecycleManager
 from trading_bot.analytics.correlation_monitor import StrategyCorrelationMonitor
@@ -54,6 +55,7 @@ from trading_bot.risk.engine import RiskEngine
 from trading_bot.risk.position_sizing import DynamicPositionSizer, PositionSizeConfig
 from trading_bot.strategy.shadow_tester import ShadowStrategyRunner
 from trading_bot.strategy.diagnostics import build_strategy_candidate_diagnostics
+from trading_bot.strategy.live_context import UnifiedStrategyContextAdapter
 from trading_bot.storage.repositories.journal import JournalRepository
 from utils import load_json, load_runtime_config, next_cycle_sleep_seconds, normalize_trading_mode, price_to_pips, to_utc, utc_now
 
@@ -146,6 +148,7 @@ class TradingBot:
         self.connector = MT5Connector(self.config, self.logger)
         self.execution_service = ExecutionService(MT5Broker(self.connector))
         self.strategy = build_strategy_engine(self.config, self.base_dir)
+        self.live_context = UnifiedStrategyContextAdapter(self.strategy)
         self._initialize_analytics_services()
         self.logger.structured(
             "engine_selection",
@@ -256,7 +259,7 @@ class TradingBot:
             self.config,
             self.database.db_path,
             logger=self.logger,
-            connector_factory=self._build_lebprime_connector,
+            broker_gateway_factory=self._build_lebprime_broker_gateway,
             risk_manager=self.risk_manager,
             risk_state=self.state,
             notifier=self.notifier,
@@ -273,13 +276,13 @@ class TradingBot:
             logger=self.logger,
         )
 
-    def _build_lebprime_connector(self, mapping: Any) -> MT5Connector:
-        """Build a symbol-bound connector while sharing the existing XAU connection."""
+    def _build_lebprime_broker_gateway(self, mapping: Any) -> MT5BrokerGateway:
+        """Adapt the proven symbol-bound connector to the LebPrime broker contract."""
         if str(self.connector.symbol).upper() == str(mapping.mt5_symbol).upper():
-            return self.connector
+            return MT5BrokerGateway(self.connector)
         symbol_config = copy.deepcopy(self.config)
         symbol_config.setdefault("mt5", {})["symbol"] = mapping.mt5_symbol
-        return MT5Connector(symbol_config, self.logger)
+        return MT5BrokerGateway(MT5Connector(symbol_config, self.logger))
 
     def _acquire_instance_lock(self) -> None:
         """Ensure only one bot process runs at a time."""
@@ -383,6 +386,7 @@ class TradingBot:
                 # Save current state in case reload fails
                 previous_config = dict(self.config)
                 previous_strategy = self.strategy
+                previous_live_context = self.live_context
                 
                 # Load new config
                 refreshed = load_runtime_config(self.base_dir, require_mt5_credentials=False, apply_mode_env_override=False)
@@ -391,6 +395,7 @@ class TradingBot:
                 new_strategy = build_strategy_engine(refreshed, self.base_dir)
                 if new_strategy is None:
                     raise ValueError("Strategy engine build returned None (invalid configuration)")
+                new_live_context = UnifiedStrategyContextAdapter(new_strategy)
                 
                 # Only apply changes if all critical components succeeded
                 self.config = refreshed
@@ -399,6 +404,7 @@ class TradingBot:
                 self.connector.mt5_config = refreshed["mt5"]
                 self.execution_service = ExecutionService(MT5Broker(self.connector))
                 self.strategy = new_strategy
+                self.live_context = new_live_context
                 lebprime_live = getattr(self, "lebprime_v3_4_0", None)
                 if lebprime_live is not None:
                     lebprime_live.refresh_config(refreshed)
@@ -431,6 +437,7 @@ class TradingBot:
                 )
                 # Explicitly restore previous strategy if needed
                 self.strategy = previous_strategy
+                self.live_context = previous_live_context
                 # Mark control state to clear reload request since we handled (even with fallback)
                 control["request_reload_config"] = False
                 self.control_state.update({"request_reload_config": False})
@@ -1314,7 +1321,7 @@ class TradingBot:
                 self.logger.warning("DRY_RUN mode startup: stale/no tick detected, execution paused until fresh data.")
         health_report = self.connector.health_report()
         account_info = self.connector.get_account_info()
-        self._sync_risk_state(utc_now(), float(account_info.balance), self.strategy.classify_session(utc_now())["session_name"])
+        self._sync_risk_state(utc_now(), float(account_info.balance), self.live_context.classify_session(utc_now())["session_name"])
         startup_payload = {
             "config_path": str((self.base_dir / "config.json").resolve()),
             "mode": mode_ctx["mode"],
@@ -1544,9 +1551,9 @@ class TradingBot:
     def _fetch_market_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Fetch and prepare all required timeframes."""
         bars = int(self.config["timeframes"]["bars_to_fetch"])
-        trend_df = self.strategy.prepare_trend_dataframe(self.connector.fetch_rates(self.config["timeframes"]["trend"], bars))
-        setup_df = self.strategy.prepare_setup_dataframe(self.connector.fetch_rates(self.config["timeframes"]["setup"], bars))
-        trigger_df = self.strategy.prepare_trigger_dataframe(self.connector.fetch_rates(self.config["timeframes"]["trigger"], bars))
+        trend_df = self.live_context.prepare_trend_dataframe(self.connector.fetch_rates(self.config["timeframes"]["trend"], bars))
+        setup_df = self.live_context.prepare_setup_dataframe(self.connector.fetch_rates(self.config["timeframes"]["setup"], bars))
+        trigger_df = self.live_context.prepare_trigger_dataframe(self.connector.fetch_rates(self.config["timeframes"]["trigger"], bars))
         return trend_df, setup_df, trigger_df
 
     def _has_open_position(self) -> bool:
@@ -2207,7 +2214,7 @@ class TradingBot:
         previous_session_state = dict(self.state.get("session_stats", {})) if isinstance(self.state.get("session_stats"), dict) else {}
         self.state["execution_status"] = "idle"
         self.state["execution_reason_code"] = "cycle_idle"
-        session_info = self.strategy.classify_session(now_utc)
+        session_info = self.live_context.classify_session(now_utc)
         self.logger.structured(
             "cycle_start",
             {
@@ -2297,7 +2304,7 @@ class TradingBot:
         tick_snapshot = tick_stage["payload"].get("tick", {}) or {}
         point = float(symbol_spec["point"])
         spread_points = ((float(tick_snapshot.get("ask", 0.0)) - float(tick_snapshot.get("bid", 0.0))) / point) if point > 0 else 0.0
-        market_context = self.strategy.analyze_market_context(now_utc, trend_df, setup_df, trigger_df, spread_points)
+        market_context = self.live_context.analyze_market_context(now_utc, trend_df, setup_df, trigger_df, spread_points)
         cycle_id = f"{now_utc.strftime('%Y%m%dT%H%M%S.%f')}-{int(time.time() * 1000) % 1000000}"
         if self.decision_logger is not None:
             self.decision_logger.log_market_context(market_context, cycle_id)
@@ -4517,7 +4524,7 @@ class TradingBot:
             now_utc = utc_now()
             mode_ctx = self._execution_mode_summary()
             report = self.connector.health_report()
-            session_info = self.strategy.classify_session(now_utc)
+            session_info = self.live_context.classify_session(now_utc)
             try:
                 account_info = self.connector.get_account_info() if report.get("connection_ok") and report.get("symbol_ok") else None
             except Exception:
