@@ -146,48 +146,7 @@ class TradingBot:
         self.connector = MT5Connector(self.config, self.logger)
         self.execution_service = ExecutionService(MT5Broker(self.connector))
         self.strategy = build_strategy_engine(self.config, self.base_dir)
-        analytics_cfg = self.config.get("analytics", {})
-        decision_cfg = analytics_cfg.get("decision_logging", {})
-        shadow_cfg = analytics_cfg.get("shadow_testing", {})
-        corr_cfg = analytics_cfg.get("correlation_monitoring", {})
-        self.decision_logger = (
-            StrategyDecisionLogger(log_dir=str(self.base_dir / str(decision_cfg.get("log_dir", "logs/strategy_decisions"))))
-            if bool(decision_cfg.get("enabled", False))
-            else None
-        )
-        self.r_calculator = RMultipleCalculator()
-        self.shadow_runner = (
-            ShadowStrategyRunner(
-                strategy_engine=self.strategy,
-                min_shadow_samples=int(shadow_cfg.get("min_samples_before_recommendation", 50)),
-                required_win_rate=float(shadow_cfg.get("required_win_rate", 0.45)),
-                required_expectancy=float(shadow_cfg.get("required_expectancy", 0.2)),
-                shadow_families=list(shadow_cfg.get("families", ["TREND_PULLBACK_RECLAIM", "LIQUIDITY_SWEEP_REVERSAL"])),
-            )
-            if bool(shadow_cfg.get("enabled", False))
-            else None
-        )
-        self.correlation_monitor = (
-            StrategyCorrelationMonitor(
-                correlation_threshold=float(corr_cfg.get("correlation_threshold", 0.7)),
-                concentration_threshold=float(corr_cfg.get("concentration_threshold", 0.8)),
-            )
-            if bool(corr_cfg.get("enabled", False))
-            else None
-        )
-        sizing_cfg = self.config.get("position_sizing", {})
-        self.dynamic_position_sizer = (
-            DynamicPositionSizer(
-                PositionSizeConfig(
-                    base_risk_percent=float(sizing_cfg.get("base_risk_percent", self.config.get("risk", {}).get("risk_percent", 1.0))),
-                    max_risk_percent=float(sizing_cfg.get("max_risk_percent", 2.0)),
-                    min_risk_percent=float(sizing_cfg.get("min_risk_percent", 0.25)),
-                    regime_multipliers=dict(sizing_cfg.get("regime_multipliers", {})) or PositionSizeConfig().regime_multipliers,
-                )
-            )
-            if bool(sizing_cfg.get("dynamic_enabled", False))
-            else None
-        )
+        self._initialize_analytics_services()
         self.logger.structured(
             "engine_selection",
             {
@@ -198,28 +157,7 @@ class TradingBot:
             },
             level="INFO",
         )
-        self.risk_manager = RiskManager(self.config, logger=self.logger)
-        self.risk_engine = RiskEngine(self.config, self.risk_manager, logger=self.logger)
-        self.lebprime_v3_4_0 = LebPrimeLiveService(
-            self.config,
-            self.database.db_path,
-            logger=self.logger,
-            connector_factory=self._build_lebprime_connector,
-            risk_manager=self.risk_manager,
-            risk_state=self.state,
-            notifier=self.notifier,
-            trade_journal=self.trade_journal,
-        )
-        self.journal_repository = JournalRepository(self.logger, self.trade_journal)
-        self.live_lifecycle = LivePositionLifecycleManager(
-            config=self.config,
-            state=self.state,
-            connector=self.connector,
-            execution_service=self.execution_service,
-            risk_manager=self.risk_manager,
-            trade_journal=self.trade_journal,
-            logger=self.logger,
-        )
+        self._initialize_live_execution_services()
         self.running = True
         self.execution_paused = False
         self.auto_execution_enabled = True
@@ -264,6 +202,76 @@ class TradingBot:
             level="INFO",
         )
         self._acquire_instance_lock()
+
+    def _initialize_analytics_services(self) -> None:
+        """Build optional analytics helpers without changing startup ordering."""
+        analytics_cfg = self.config.get("analytics", {})
+        decision_cfg = analytics_cfg.get("decision_logging", {})
+        shadow_cfg = analytics_cfg.get("shadow_testing", {})
+        corr_cfg = analytics_cfg.get("correlation_monitoring", {})
+        self.decision_logger = (
+            StrategyDecisionLogger(log_dir=str(self.base_dir / str(decision_cfg.get("log_dir", "logs/strategy_decisions"))))
+            if bool(decision_cfg.get("enabled", False))
+            else None
+        )
+        self.r_calculator = RMultipleCalculator()
+        self.shadow_runner = (
+            ShadowStrategyRunner(
+                strategy_engine=self.strategy,
+                min_shadow_samples=int(shadow_cfg.get("min_samples_before_recommendation", 50)),
+                required_win_rate=float(shadow_cfg.get("required_win_rate", 0.45)),
+                required_expectancy=float(shadow_cfg.get("required_expectancy", 0.2)),
+                shadow_families=list(shadow_cfg.get("families", ["TREND_PULLBACK_RECLAIM", "LIQUIDITY_SWEEP_REVERSAL"])),
+            )
+            if bool(shadow_cfg.get("enabled", False))
+            else None
+        )
+        self.correlation_monitor = (
+            StrategyCorrelationMonitor(
+                correlation_threshold=float(corr_cfg.get("correlation_threshold", 0.7)),
+                concentration_threshold=float(corr_cfg.get("concentration_threshold", 0.8)),
+            )
+            if bool(corr_cfg.get("enabled", False))
+            else None
+        )
+        sizing_cfg = self.config.get("position_sizing", {})
+        self.dynamic_position_sizer = (
+            DynamicPositionSizer(
+                PositionSizeConfig(
+                    base_risk_percent=float(sizing_cfg.get("base_risk_percent", self.config.get("risk", {}).get("risk_percent", 1.0))),
+                    max_risk_percent=float(sizing_cfg.get("max_risk_percent", 2.0)),
+                    min_risk_percent=float(sizing_cfg.get("min_risk_percent", 0.25)),
+                    regime_multipliers=dict(sizing_cfg.get("regime_multipliers", {})) or PositionSizeConfig().regime_multipliers,
+                )
+            )
+            if bool(sizing_cfg.get("dynamic_enabled", False))
+            else None
+        )
+
+    def _initialize_live_execution_services(self) -> None:
+        """Wire risk, LebPrime reconciliation, journal, and live lifecycle services."""
+        self.risk_manager = RiskManager(self.config, logger=self.logger)
+        self.risk_engine = RiskEngine(self.config, self.risk_manager, logger=self.logger)
+        self.lebprime_v3_4_0 = LebPrimeLiveService(
+            self.config,
+            self.database.db_path,
+            logger=self.logger,
+            connector_factory=self._build_lebprime_connector,
+            risk_manager=self.risk_manager,
+            risk_state=self.state,
+            notifier=self.notifier,
+            trade_journal=self.trade_journal,
+        )
+        self.journal_repository = JournalRepository(self.logger, self.trade_journal)
+        self.live_lifecycle = LivePositionLifecycleManager(
+            config=self.config,
+            state=self.state,
+            connector=self.connector,
+            execution_service=self.execution_service,
+            risk_manager=self.risk_manager,
+            trade_journal=self.trade_journal,
+            logger=self.logger,
+        )
 
     def _build_lebprime_connector(self, mapping: Any) -> MT5Connector:
         """Build a symbol-bound connector while sharing the existing XAU connection."""
