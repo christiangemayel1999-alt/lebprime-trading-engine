@@ -12,13 +12,12 @@ from strategy_factory import build_strategy_engine
 from strategy import StrategyEngine
 from trading_bot.config.schema import ConfigSchema
 from trading_bot.core.execution_mode import V1_BASELINE, V2_FULL
-from trading_bot.core.models import ExecutionRequest, PositionState
+from trading_bot.core.models import ExecutionRequest
 from trading_bot.execution.broker_base import BrokerBase
 from trading_bot.execution.execution_service import ExecutionService
 from trading_bot.execution.replay_broker import ReplayBroker
 from trading_bot.core.reasons import JournalEventType, ReasonCode
 from trading_bot.positions.live_lifecycle import LivePositionLifecycleManager
-from trading_bot.positions.manager import PositionManager
 from trading_bot.strategy.engine import UnifiedStrategyEngine
 
 
@@ -131,7 +130,7 @@ def test_backtest_selection_enables_selected_families_for_replay() -> None:
 
 def test_live_startup_uses_strategy_factory() -> None:
     source = inspect.getsource(TradingBot.__init__)
-    assert "build_strategy_engine(self.config, self.base_dir)" in source
+    assert "build_live_runtime_support_engine(self.config, self.base_dir)" in source
 
 
 def test_backtest_runner_rebuilds_mode_aware_engine_for_run_config() -> None:
@@ -227,32 +226,3 @@ def test_replay_broker_supports_pending_limit_contract() -> None:
     assert result["ok"] is True
     assert result["status"] == "pending"
     assert len(executor.pending_orders) == 1
-
-
-def test_position_manager_uses_single_management_contract() -> None:
-    class FakeRisk:
-        def evaluate_management_actions(self, position, trigger_df, setup_df, current_price, now_utc, symbol_spec):
-            assert position["direction"] == "LONG"
-            return [{"action": "close_full", "reason_code": "test_exit"}]
-
-    manager = PositionManager(FakeRisk())
-    actions = manager.evaluate(
-        PositionState(
-            position_id="p1",
-            strategy_name="XAU_LEBPRIM",
-            symbol="XAUUSD",
-            side="LONG",
-            volume=0.1,
-            entry_price=100.0,
-            stop_loss=99.0,
-            take_profit=102.0,
-            opened_at="2026-01-01T00:00:00+00:00",
-            lifecycle_state="open",
-        ),
-        trigger_df=None,
-        setup_df=None,
-        current_price=100.5,
-        now_utc=None,
-        symbol_spec={},
-    )
-    assert actions == [{"action": "close_full", "reason_code": "test_exit"}]

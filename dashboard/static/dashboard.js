@@ -4042,7 +4042,7 @@ const brokerEntries = asArray(status.broker_entries);
         renderTopStatusBar();
         renderQuickActions();
         safeRenderSection("section-overview", "Overview", renderOverview);
-        safeRenderSection("section-strategies", "LebPrime", renderStrategies);
+        safeRenderSection("section-lebprime", "LebPrime", renderStrategies);
         safeRenderSection("section-risk", "Risk Management", renderRisk);
         safeRenderSection("section-alerts", "Alerts", renderAlerts);
         safeRenderSection("section-trades", "Trades", renderTrades);

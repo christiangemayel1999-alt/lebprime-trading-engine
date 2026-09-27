@@ -86,6 +86,7 @@ def _build_stub_bot(mode: str, startup_reason: str):
     bot.connector = _FakeConnector(startup_ok=True, startup_reason=startup_reason)
     bot.logger = _FakeLogger()
     bot.strategy = SimpleNamespace(classify_session=lambda _now: {"session_name": "ASIA"})
+    bot.live_context = bot.strategy
     bot.notifier = SimpleNamespace(send_info=lambda *_a, **_k: True)
     bot.telegram_command_service = SimpleNamespace(start=lambda: None)
     bot.config = {

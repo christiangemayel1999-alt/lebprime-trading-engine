@@ -99,7 +99,6 @@ class LebPrimeLiveService:
         db_path: str | Path,
         *,
         logger: Any | None = None,
-        connector_factory: Callable[[SymbolMapping], LebPrimeBrokerGateway] | None = None,
         broker_gateway_factory: Callable[[SymbolMapping], LebPrimeBrokerGateway] | None = None,
         risk_manager: LebPrimeRiskService | None = None,
         risk_state: dict[str, Any] | None = None,
@@ -108,9 +107,7 @@ class LebPrimeLiveService:
     ) -> None:
         self.config = config
         self.logger = logger
-        # connector_factory remains as a compatibility alias for tests and older callers.
-        self.connector_factory = connector_factory
-        self.broker_gateway_factory = broker_gateway_factory or connector_factory
+        self.broker_gateway_factory = broker_gateway_factory
         self.risk_manager = risk_manager
         self.risk_state = risk_state if risk_state is not None else {}
         self.notifier = notifier

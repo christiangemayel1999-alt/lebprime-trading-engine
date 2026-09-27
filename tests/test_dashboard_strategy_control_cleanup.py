@@ -17,10 +17,10 @@ def test_active_dashboard_has_one_strategy_control_surface() -> None:
 
     assert 'data-section="bot-control"' not in template
     assert 'data-section="families"' not in template
-    assert 'data-section="strategies"' in template
+    assert 'data-section="lebprime"' in template
     assert 'safeRenderSection("section-bot-control"' not in source
     assert 'safeRenderSection("section-families"' not in source
-    assert 'safeRenderSection("section-strategies", "Strategies", renderStrategies);' in source
+    assert 'safeRenderSection("section-lebprime", "LebPrime", renderStrategies);' in source
     header_renderer = source.split("function renderTopStatusBar()", 1)[1].split("function renderQuickActions()", 1)[0]
     assert "V1" not in header_renderer
     assert "V2" not in header_renderer
@@ -94,7 +94,7 @@ def test_save_and_unsaved_workflow_is_explicit() -> None:
     assert "state.strategiesUi.draft = localDraft;" in source
     assert '"Unsaved changes"' in source
     assert '"Saved - RESTART REQUIRED"' in source
-    assert "You have unsaved LebPrime changes. Leave Strategies and discard them?" in source
+    assert "You have unsaved LebPrime changes. Leave LebPrime and discard them?" in source
     assert 'window.addEventListener("beforeunload"' in source
 
 

@@ -349,37 +349,6 @@ class PresetRequest(ActorRequest):
         return normalized
 
 
-class FamilyToggleRequest(ActorRequest):
-    """Toggle a strategy family and optional live permission."""
-
-    family_name: str
-    enabled: bool
-    live_allowed: bool | None = None
-
-    @field_validator("family_name")
-    @classmethod
-    def validate_family_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("family_name is required")
-        return normalized
-
-
-class StrategyToggleRequest(ActorRequest):
-    """Toggle an individual strategy/setup control."""
-
-    strategy_name: str
-    enabled: bool
-
-    @field_validator("strategy_name")
-    @classmethod
-    def validate_strategy_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("strategy_name is required")
-        return normalized
-
-
 class ManualTradeOpenRequest(ActorRequest):
     """Open a manual market trade."""
 

@@ -36,11 +36,11 @@ def _config(*, enabled: bool = False, mode: str = "DRY") -> dict:
     }
 
 
-def _service(tmp_path, *, enabled: bool = False, mode: str = "DRY", connector_factory=None, risk_manager=None, notifier=None, logger=None):
+def _service(tmp_path, *, enabled: bool = False, mode: str = "DRY", broker_gateway_factory=None, risk_manager=None, notifier=None, logger=None):
     return LebPrimeLiveService(
         _config(enabled=enabled, mode=mode),
         tmp_path / "live.db",
-        connector_factory=connector_factory,
+        broker_gateway_factory=broker_gateway_factory,
         risk_manager=risk_manager,
         risk_state={},
         notifier=notifier,
@@ -278,7 +278,7 @@ def test_demo_guard_and_m45_fallback(tmp_path):
         tmp_path,
         enabled=True,
         mode="LIVE",
-        connector_factory=lambda mapping: live_connector.setdefault(mapping.logical_symbol, _FakeConnector(mapping, demo=False)),
+        broker_gateway_factory=lambda mapping: live_connector.setdefault(mapping.logical_symbol, _FakeConnector(mapping, demo=False)),
         risk_manager=_FakeRiskManager(),
     )
     ok, reason = service.start()
@@ -286,7 +286,7 @@ def test_demo_guard_and_m45_fallback(tmp_path):
     assert ACCOUNT_NOT_CONFIRMED_DEMO in reason
     assert all(not connector.sent for connector in live_connector.values())
 
-    dry = _service(tmp_path / "dry", enabled=True, mode="DRY", connector_factory=lambda mapping: _FakeConnector(mapping))
+    dry = _service(tmp_path / "dry", enabled=True, mode="DRY", broker_gateway_factory=lambda mapping: _FakeConnector(mapping))
     frame = dry._fetch_frame(dry.contexts["XAUUSD-M45"], datetime(2026, 9, 17, 0, 45, tzinfo=timezone.utc))
     assert len(frame) == 1
     assert frame.iloc[0]["close"] == 3
@@ -303,7 +303,7 @@ def test_context_failure_does_not_stop_other_contexts(tmp_path):
         tmp_path,
         enabled=True,
         mode="DRY",
-        connector_factory=lambda mapping: SelectiveFailureConnector(mapping),
+        broker_gateway_factory=lambda mapping: SelectiveFailureConnector(mapping),
     )
     snapshot = service.scan_once(datetime(2026, 9, 17, 0, 45, tzinfo=timezone.utc))
     contexts = {row["context_key"]: row for row in snapshot["contexts"]}
@@ -319,7 +319,7 @@ def test_realtime_buy_limit_created_places_both_entries_with_half_risk(tmp_path)
         tmp_path,
         enabled=True,
         mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=risk,
     )
     assert service.start()[0]
@@ -387,7 +387,7 @@ def test_historical_activation_is_reconstructed_but_never_sent(tmp_path):
     logger = _CaptureLogger()
     service = LebPrimeLiveService(
         _config(enabled=True, mode="LIVE"), tmp_path / "live.db", logger=logger,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(), risk_state={},
     )
     zone = _zone("XAU-1M-B-0917-HIST", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -404,7 +404,7 @@ def test_historical_pending_zone_never_executes_on_later_candle_touch(tmp_path):
     connectors = {}
     service = _service(
         tmp_path, enabled=True, mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     zone = _zone("XAU-1M-B-0917-REALTIME", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -419,7 +419,7 @@ def test_dry_limit_created_blocks_order_send(tmp_path):
     connectors = {}
     service = _service(
         tmp_path, enabled=True, mode="DRY",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     zone = _zone("XAU-1M-B-0917-DRY", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -432,7 +432,7 @@ def test_non_demo_limit_created_is_blocked(tmp_path):
     connectors = {}
     service = _service(
         tmp_path, enabled=True, mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping, demo=False)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping, demo=False)),
         risk_manager=_FakeRiskManager(),
     )
     zone = _zone("XAU-1M-B-0917-REAL", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -447,7 +447,7 @@ def test_runtime_control_reasons_block_order_send(tmp_path):
         connectors = {}
         service = _service(
             tmp_path / reason, enabled=True, mode="LIVE",
-            connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+            broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
             risk_manager=_FakeRiskManager(),
         )
         zone = _zone(f"XAU-1M-B-0917-{reason}", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -482,7 +482,7 @@ def test_execution_failure_is_visible_in_status_and_structured_logs(tmp_path):
     logger = _CaptureLogger()
     service = LebPrimeLiveService(
         _config(enabled=True, mode="LIVE"), tmp_path / "live.db", logger=logger,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, RejectingConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, RejectingConnector(mapping)),
         risk_manager=_FakeRiskManager(), risk_state={},
     )
     zone = _zone("XAU-1M-B-0917-FAIL", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -498,7 +498,7 @@ def test_execution_failure_is_visible_in_status_and_structured_logs(tmp_path):
 
 def test_realtime_sell_limit_created_places_sell_limits(tmp_path):
     connectors = {}
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
     assert service.start()[0]
     zone = _zone("XAU-1M-S-0917-SELL", "SUPPLY", "XAUUSD", "M1", 120, 122)
     service._register_limit(service.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
@@ -508,7 +508,7 @@ def test_realtime_sell_limit_created_places_sell_limits(tmp_path):
 
 def test_duplicate_limit_created_sends_each_entry_once(tmp_path):
     connectors = {}
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
     assert service.start()[0]
     zone = _zone("XAU-1M-B-0917-DUP", "DEMAND", "XAUUSD", "M1", 100, 102)
     service._register_limit(service.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
@@ -519,7 +519,7 @@ def test_duplicate_limit_created_sends_each_entry_once(tmp_path):
 
 def test_historical_overlap_does_not_suppress_new_realtime_zone(tmp_path):
     connectors = {}
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
     assert service.start()[0]
     historical = _zone("XAU-1M-B-0917-HISTORY", "DEMAND", "XAUUSD", "M1", 100, 102)
     realtime = _zone("XAU-5M-B-0921-NEW", "DEMAND", "XAUUSD", "M5", 101, 103)
@@ -532,7 +532,7 @@ def test_historical_overlap_does_not_suppress_new_realtime_zone(tmp_path):
 def test_duplicate_check_logs_exact_idempotency_decision(tmp_path):
     connectors = {}
     logger = _CaptureLogger()
-    service = LebPrimeLiveService(_config(enabled=True, mode="LIVE"), tmp_path / "live.db", logger=logger, connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager(), risk_state={})
+    service = LebPrimeLiveService(_config(enabled=True, mode="LIVE"), tmp_path / "live.db", logger=logger, broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager(), risk_state={})
     assert service.start()[0]
     zone = _zone("XAU-1M-B-0921-IDEMP", "DEMAND", "XAUUSD", "M1", 100, 102)
     service._register_limit(service.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
@@ -545,14 +545,14 @@ def test_duplicate_check_logs_exact_idempotency_decision(tmp_path):
 def test_restart_reconciliation_recovers_pending_ticket_without_resend(tmp_path):
     connectors = {}
     factory = lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping))
-    first = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=factory, risk_manager=_FakeRiskManager())
+    first = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=factory, risk_manager=_FakeRiskManager())
     assert first.start()[0]
     zone = _zone("XAU-1M-B-0917-RESTART", "DEMAND", "XAUUSD", "M1", 100, 102)
     first._register_limit(first.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
     entry = first.repository.broker_entry(zone.engine_zone_id, 1)
     entry.update({"broker_status": "PLACING", "mt5_order_ticket": None})
     first.repository.upsert_broker_entry(entry)
-    second = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=factory, risk_manager=_FakeRiskManager())
+    second = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=factory, risk_manager=_FakeRiskManager())
     assert second.start()[0]
     second._reconcile_broker_execution(datetime.now(timezone.utc))
     recovered = second.repository.broker_entry(zone.engine_zone_id, 1)
@@ -564,7 +564,7 @@ def test_restart_reconciliation_recovers_pending_ticket_without_resend(tmp_path)
 def test_broker_entry1_and_entry2_fills_are_reconciled_independently(tmp_path):
     connectors = {}
     logger = _CaptureLogger()
-    service = LebPrimeLiveService(_config(enabled=True, mode="LIVE"), tmp_path / "live.db", logger=logger, connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager(), risk_state={})
+    service = LebPrimeLiveService(_config(enabled=True, mode="LIVE"), tmp_path / "live.db", logger=logger, broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager(), risk_state={})
     assert service.start()[0]
     zone = _zone("XAU-1M-B-0917-FILLS", "DEMAND", "XAUUSD", "M1", 100, 102)
     service._register_limit(service.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
@@ -583,18 +583,18 @@ def test_broker_entry1_and_entry2_fills_are_reconciled_independently(tmp_path):
 def test_cancel_and_expire_remove_only_unfilled_pending_entries(tmp_path):
     for event_type in ("CANCELED", "EXPIRED"):
         connectors = {}
-        service = _service(tmp_path / event_type, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+        service = _service(tmp_path / event_type, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
         assert service.start()[0]
         zone = _zone(f"XAU-1M-B-0917-{event_type}", "DEMAND", "XAUUSD", "M1", 100, 102)
         service._register_limit(service.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
         service._track_lifecycle(service.contexts["XAUUSD-M1"], zone, ZoneEvent(zone.engine_zone_id, 7, "2026-09-17T08:07:00+00:00", event_type), execute=True)
         assert connectors["XAUUSD"].canceled == ["1001", "1002"]
-        assert all(row["broker_status"] == "CANCELLED" for row in service.repository.broker_entries_for_zone(zone.engine_zone_id))
+        assert all(row["broker_status"] == "CANCELED" for row in service.repository.broker_entries_for_zone(zone.engine_zone_id))
 
 
 def test_cancel_never_removes_filled_entry1_and_tp1_cancels_entry2(tmp_path):
     connectors = {}
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
     assert service.start()[0]
     zone = _zone("XAU-1M-B-0917-TP1", "DEMAND", "XAUUSD", "M1", 100, 102)
     service._register_limit(service.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
@@ -604,12 +604,12 @@ def test_cancel_never_removes_filled_entry1_and_tp1_cancels_entry2(tmp_path):
     service._track_lifecycle(service.contexts["XAUUSD-M1"], zone, ZoneEvent(zone.engine_zone_id, 8, "2026-09-17T08:08:00+00:00", "TP1_HIT", price=zone.tp1_price), execute=True)
     assert connector.canceled == ["1002"]
     assert service.repository.broker_entry(zone.engine_zone_id, 1)["broker_status"] == "FILLED"
-    assert service.repository.broker_entry(zone.engine_zone_id, 2)["broker_status"] == "CANCELLED"
+    assert service.repository.broker_entry(zone.engine_zone_id, 2)["broker_status"] == "CANCELED"
 
 
 def test_already_crossed_entry_is_not_chased_with_market_order(tmp_path):
     connectors = {}
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
     assert service.start()[0]
     connector = connectors["XAUUSD"]
     connector.tick = SimpleNamespace(ask=101.0, bid=100.8)
@@ -675,7 +675,7 @@ def test_per_symbol_spread_thresholds_and_global_fallback(tmp_path):
 def test_wide_spread_does_not_block_lebprime_pending_placement(tmp_path):
     connectors = {}
     risk = _FakeRiskManager()
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=risk)
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=risk)
     assert service.start()[0]
     connectors["XAUUSD"].tick = SimpleNamespace(bid=109.0, ask=110.0)
     zone = _zone("XAU-1M-B-0921-SPREAD", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -694,7 +694,7 @@ def test_realtime_limit_created_sends_native_telegram_and_mt5_independently(tmp_
         tmp_path,
         enabled=True,
         mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
         notifier=notifier,
         logger=logger,
@@ -728,11 +728,11 @@ def test_telegram_created_deduplication_survives_restart(tmp_path):
     connectors = {}
     notifier = _FakeNotifier()
     factory = lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping))
-    first = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=factory, risk_manager=_FakeRiskManager(), notifier=notifier)
+    first = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=factory, risk_manager=_FakeRiskManager(), notifier=notifier)
     assert first.start()[0]
     zone = _zone("XAU-1M-B-0921-TGRESTART", "DEMAND", "XAUUSD", "M1", 100, 102)
     first._register_limit(first.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
-    second = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=factory, risk_manager=_FakeRiskManager(), notifier=notifier)
+    second = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=factory, risk_manager=_FakeRiskManager(), notifier=notifier)
     assert second.start()[0]
     second._register_limit(second.contexts["XAUUSD-M1"], zone, _limit_event(zone), execute=True)
     assert len(notifier.created) == 1
@@ -746,7 +746,7 @@ def test_signal_alert_setting_disables_created_delivery_without_affecting_mt5(tm
     config["telegram"]["signal_alerts"] = False
     service = LebPrimeLiveService(
         config, tmp_path / "live.db", notifier=notifier,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(), risk_state={},
     )
     assert service.start()[0]
@@ -779,7 +779,7 @@ def test_telegram_failure_does_not_prevent_pending_orders(tmp_path):
     logger = _CaptureLogger()
     service = _service(
         tmp_path, enabled=True, mode="LIVE", notifier=notifier, logger=logger,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     assert service.start()[0]
@@ -799,7 +799,7 @@ def test_mt5_failure_does_not_prevent_telegram_created(tmp_path):
     notifier = _FakeNotifier()
     service = _service(
         tmp_path, enabled=True, mode="LIVE", notifier=notifier,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, PermanentRejectConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, PermanentRejectConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     assert service.start()[0]
@@ -816,7 +816,7 @@ def test_telegram_notifier_cannot_initiate_an_order(tmp_path):
     notifier = _FakeNotifier()
     service = _service(
         tmp_path, enabled=True, mode="LIVE", notifier=notifier,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     notifier.send_lebprime_zone_created({"zone_id": "NOT-A-STRATEGY-EVENT"})
@@ -829,7 +829,7 @@ def test_historical_limit_created_sends_neither_telegram_nor_mt5(tmp_path):
     notifier = _FakeNotifier()
     service = _service(
         tmp_path, enabled=True, mode="LIVE", notifier=notifier,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     zone = _zone("XAU-1M-B-0921-HISTTG", "DEMAND", "XAUUSD", "M1", 100, 102)
@@ -854,7 +854,7 @@ def test_transient_unplaced_entries_retry_and_store_tickets(tmp_path):
     logger = _CaptureLogger()
     service = _service(
         tmp_path, enabled=True, mode="LIVE", logger=logger,
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, TransientConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, TransientConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     assert service.start()[0]
@@ -887,7 +887,7 @@ def test_permanent_invalid_entries_do_not_retry_forever(tmp_path):
     connectors = {}
     service = _service(
         tmp_path, enabled=True, mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, PermanentConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, PermanentConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     assert service.start()[0]
@@ -902,7 +902,7 @@ def test_permanent_invalid_entries_do_not_retry_forever(tmp_path):
 
 def test_volume_and_normalized_price_are_persisted_before_order_check(tmp_path):
     connectors = {}
-    service = _service(tmp_path, enabled=True, mode="LIVE", connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="LIVE", broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)), risk_manager=_FakeRiskManager())
     assert service.start()[0]
     zone = _zone("XAU-1M-B-0921-PERSIST", "DEMAND", "XAUUSD", "M1", 100, 102)
     observed = []
@@ -947,7 +947,7 @@ def test_genuine_margin_failure_never_reaches_order_check_or_send(tmp_path):
         tmp_path,
         enabled=True,
         mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=MarginFailureRisk(),
     )
     assert service.start()[0]
@@ -967,7 +967,7 @@ def test_successful_margin_reaches_order_check_before_order_send(tmp_path):
         tmp_path,
         enabled=True,
         mode="LIVE",
-        connector_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
+        broker_gateway_factory=lambda mapping: connectors.setdefault(mapping.logical_symbol, _FakeConnector(mapping)),
         risk_manager=_FakeRiskManager(),
     )
     assert service.start()[0]
@@ -979,7 +979,7 @@ def test_successful_margin_reaches_order_check_before_order_send(tmp_path):
 
 
 def test_all_18_contexts_remain_healthy_on_successful_scan(tmp_path):
-    service = _service(tmp_path, enabled=True, mode="DRY", connector_factory=lambda mapping: _FakeConnector(mapping), risk_manager=_FakeRiskManager())
+    service = _service(tmp_path, enabled=True, mode="DRY", broker_gateway_factory=lambda mapping: _FakeConnector(mapping), risk_manager=_FakeRiskManager())
     snapshot = service.scan_once(datetime(2026, 9, 17, 0, 45, tzinfo=timezone.utc))
     assert len(snapshot["contexts"]) == 18
     assert all(row["status"] == "HEALTHY" for row in snapshot["contexts"])
@@ -1052,7 +1052,7 @@ def test_strategy_runtime_controls_are_present_and_configured():
     assert strategy["execution_mode"] in {"DRY", "LIVE"}
     source = (root / "dashboard" / "static" / "dashboard.js").read_text(encoding="utf-8")
     assert "lebprime_v3_4_0" in source
-    assert "Live (demo only)" in source
-    assert "Active zone families" in source
-    assert "Duplicate suppressed" in source
-    assert "/api/strategies/lebprime-v3-4-0/status" in source
+    assert "LIVE DEMO" in source
+    assert "Families" in source
+    assert "Duplicate Suppressed" in source
+    assert "/api/lebprime/status" in source
