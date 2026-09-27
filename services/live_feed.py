@@ -6,14 +6,14 @@ from typing import Any
 
 import pandas as pd
 
-from mt5_connector import MT5Connector
 from services.market_data import MarketDataFeed
+from trading_bot.execution.gateway import MarketDataGateway
 
 
 class LiveMT5Feed(MarketDataFeed):
-    """Small adapter over MT5Connector for live bar polling."""
+    """Small adapter over a market-data gateway for live bar polling."""
 
-    def __init__(self, connector: MT5Connector, timeframe: str, bars_to_fetch: int = 500) -> None:
+    def __init__(self, connector: MarketDataGateway, timeframe: str, bars_to_fetch: int = 500) -> None:
         self.connector = connector
         self.timeframe = timeframe
         self.bars_to_fetch = max(50, int(bars_to_fetch))
