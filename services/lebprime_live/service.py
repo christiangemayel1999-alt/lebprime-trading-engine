@@ -18,6 +18,8 @@ from services.indicator_lab.models import Candle, ZoneEvent, ZoneRecord
 from services.lebprime_live.repository import LebPrimeLiveRepository
 from services.lebprime_live.symbols import SYMBOLS, SymbolMapping, resolve_symbol
 from services.lebprime_live.timeframes import TIMEFRAMES, aggregate_m45, normalize_lebprime_timeframe
+from trading_bot.execution.gateway import LebPrimeBrokerGateway
+from trading_bot.risk.contracts import LebPrimeRiskService
 
 
 STRATEGY_NAME = "lebprime_v3_4_0"
@@ -97,21 +99,25 @@ class LebPrimeLiveService:
         db_path: str | Path,
         *,
         logger: Any | None = None,
-        connector_factory: Callable[[SymbolMapping], Any] | None = None,
-        risk_manager: Any | None = None,
+        connector_factory: Callable[[SymbolMapping], LebPrimeBrokerGateway] | None = None,
+        broker_gateway_factory: Callable[[SymbolMapping], LebPrimeBrokerGateway] | None = None,
+        risk_manager: LebPrimeRiskService | None = None,
         risk_state: dict[str, Any] | None = None,
         notifier: Any | None = None,
         trade_journal: Any | None = None,
     ) -> None:
         self.config = config
         self.logger = logger
+        # connector_factory remains as a compatibility alias for tests and older callers.
         self.connector_factory = connector_factory
+        self.broker_gateway_factory = broker_gateway_factory or connector_factory
         self.risk_manager = risk_manager
         self.risk_state = risk_state if risk_state is not None else {}
         self.notifier = notifier
         self.trade_journal = trade_journal
         self.repository = LebPrimeLiveRepository(db_path)
-        self.connectors: dict[str, Any] = {}
+        self.broker_gateways: dict[str, LebPrimeBrokerGateway] = {}
+        self.connectors = self.broker_gateways  # Compatibility alias for existing diagnostics/callers.
         self.contexts: dict[str, LiveContext] = {}
         self.started = False
         self.startup_block_reason: str | None = None
@@ -174,13 +180,13 @@ class LebPrimeLiveService:
         value = getattr(account_info, "trade_mode", None)
         return value is not None and int(value) == int(demo_trade_mode)
 
-    def _connector(self, logical_symbol: str) -> Any:
+    def _connector(self, logical_symbol: str) -> LebPrimeBrokerGateway:
         mapping = resolve_symbol(logical_symbol)
-        if logical_symbol not in self.connectors:
-            if self.connector_factory is None:
-                raise RuntimeError("LebPrime connector factory is not configured")
-            self.connectors[logical_symbol] = self.connector_factory(mapping)
-        return self.connectors[logical_symbol]
+        if logical_symbol not in self.broker_gateways:
+            if self.broker_gateway_factory is None:
+                raise RuntimeError("LebPrime broker gateway factory is not configured")
+            self.broker_gateways[logical_symbol] = self.broker_gateway_factory(mapping)
+        return self.broker_gateways[logical_symbol]
 
     def start(self) -> tuple[bool, str]:
         if not self.enabled:
@@ -2444,7 +2450,7 @@ class LebPrimeLiveService:
         return self.repository.dashboard_performance_snapshot()
 
     def shutdown(self) -> None:
-        for connector in self.connectors.values():
+        for connector in self.broker_gateways.values():
             if hasattr(connector, "shutdown"):
                 connector.shutdown()
         self.started = False
