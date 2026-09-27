@@ -11,7 +11,7 @@ This map describes the production dashboard after Phase 2. The live execution pa
 | Trades | `refreshLebprimeReadModels()` -> `renderTrades()` | `GET /api/trades/lebprime` | `get_lebprime_trades` | `LebPrimeLiveService.dashboard_trade_snapshot()` -> `LebPrimeLiveRepository.dashboard_trade_snapshot()` | `lebprime_broker_entries` joined read-only to `lebprime_live_zones`; current MT5 orders/positions plus order/deal history persisted by reconciliation |
 | Performance | `refreshLebprimeReadModels()` -> `renderPerformance()` | `GET /api/performance/lebprime` | `get_lebprime_performance` | `LebPrimeLiveService.dashboard_performance_snapshot()` -> `LebPrimeLiveRepository.dashboard_performance_snapshot()` | reliable broker outcomes in `lebprime_broker_entries`; incomplete and historical/replay rows are excluded from outcome arithmetic |
 | Risk | `refreshConfig()` -> `renderRisk()` | `GET /api/config`, `POST /api/config/preview`, `POST /api/config` | `get_config`, `preview_config`, `update_config` | control plane/config manager; live consumers include `LebPrimeLiveService`, risk manager, and position lifecycle | canonical `risk` and `exit` config sections |
-| Research / Backtest | `fetchBacktests()`, `fetchJobs()` -> `renderBacktest()` | `GET /api/backtest/runs`, `GET /api/backtest/run/{run_id}`, `POST /api/jobs/backtest`, `GET /api/jobs` | corresponding backtest/job handlers in `dashboard/routes.py` | `DashboardDataService`, backtest storage, job service | persisted backtest runs, job records, result bundles |
+| Research / Backtest | `fetchBacktests()`, `fetchJobs()` -> `renderBacktest()` | `GET /api/backtest/runs`, `GET /api/backtest/run/{run_id}`, `POST /api/jobs/backtest`, `GET /api/jobs` | corresponding backtest/job handlers in `dashboard/routes.py` | `DashboardDataService`, backtest storage, job service | persisted backtest runs, job records, result bundles; `/api/backtest/*` is the canonical list/detail family |
 | Research / Replay | `fetchBacktests()`, replay fetch/poll functions -> `renderBacktestReplay()` | `GET /api/backtests/{run_id}/replay/*`, `GET /api/backtests/{run_id}/stream/*` | replay/stream handlers | `DashboardDataService` | backtest playback frames/events and run stream state |
 | Research / Indicator Lab | `fetchIndicatorLab()` -> `renderIndicatorLab()` | `/api/indicator-lab/datasets*`, `/api/indicator-lab/parameters/*`, `/api/indicator-lab/campaigns*`, `/api/indicator-lab/tests/*`, `/api/indicator-lab/zones/*` | Indicator Lab handlers | `IndicatorLabService` | Indicator Lab datasets, campaign/test results, zones, and events |
 | Research / OOS | `fetchOOS()` -> `renderOOS()` | `GET /api/oos/status`, `GET /api/oos/history`, `POST /api/oos/run`, `POST /api/oos/resume`, `POST /api/oos/rebuild-report` | OOS handlers | `OOSService`, job service | persisted OOS runs/scenarios and generated reports |
@@ -60,3 +60,13 @@ These remain available, are marked deprecated in FastAPI/OpenAPI where listed, a
 - Legacy closed rows can remain incomplete if their broker ticket relationships or relevant broker history are no longer available. They are excluded from outcome arithmetic.
 - Broker exit reason uses MT5 reason/comment data. If it is insufficient, reconciliation persists `UNKNOWN`; price proximity is not used as a substitute.
 - `/api/status` still includes generic trade/performance aggregates for compatibility. The surviving Trades and Performance sections do not consume those fields.
+
+## Canonical backtest API
+
+- List: `GET /api/backtest/runs`
+- Detail: `GET /api/backtest/run/{run_id}`
+- Queue execution: `POST /api/jobs/backtest`
+- Job state: `GET /api/jobs`
+- Replay/stream: `GET /api/backtests/{run_id}/replay/*` and `GET /api/backtests/{run_id}/stream/*`
+
+The deprecated singular listing alternative `GET /api/backtests` delegates to the same run-list projection and adds its legacy configuration field. It remains because `PROJECT_CONTEXT.md` documents it as a compatibility surface.
