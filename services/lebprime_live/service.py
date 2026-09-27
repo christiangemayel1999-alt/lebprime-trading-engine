@@ -117,7 +117,6 @@ class LebPrimeLiveService:
         self.trade_journal = trade_journal
         self.repository = LebPrimeLiveRepository(db_path)
         self.broker_gateways: dict[str, LebPrimeBrokerGateway] = {}
-        self.connectors = self.broker_gateways  # Compatibility alias for existing diagnostics/callers.
         self.contexts: dict[str, LiveContext] = {}
         self.started = False
         self.startup_block_reason: str | None = None
