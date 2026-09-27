@@ -38,7 +38,6 @@ Trades are only allowed when:
 - `main.py`
 - `strategy.py`
 - `risk_manager.py`
-- `filters.py`
 - `indicators.py`
 - `logger.py`
 - `utils.py`

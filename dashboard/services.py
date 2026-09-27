@@ -724,15 +724,3 @@ class DashboardDataService:
     def worker_status(self, stale_seconds: int = DEFAULT_WORKER_STALE_SECONDS) -> dict[str, Any]:
         """Return dashboard-friendly worker heartbeat status."""
         return read_worker_status(self.base_dir, stale_seconds=stale_seconds)
-
-    def list_oos_runs(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Return recent OOS runs with parsed manifest fields."""
-        rows = self.database.get_oos_runs(limit=limit)
-        payload: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            item["request_json"] = json.loads(item["request_json"]) if item.get("request_json") else {}
-            item["metadata_json"] = json.loads(item["metadata_json"]) if item.get("metadata_json") else {}
-            item["scenarios"] = []
-            payload.append(item)
-        return payload

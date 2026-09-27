@@ -173,40 +173,6 @@ def get_daily_pnl_curve(db_path: str | Path) -> pd.DataFrame:
     return frame
 
 
-def get_trades_by_day(db_path: str | Path) -> pd.DataFrame:
-    """Return daily trade counts."""
-    return query_dataframe(
-        db_path,
-        """
-        SELECT
-            substr(COALESCE(closed_at, exit_time, updated_at, timestamp), 1, 10) AS day,
-            COUNT(*) AS trade_count
-        FROM trades
-        WHERE status IN ('CLOSED', 'FINALIZED', 'CLOSED_UNVERIFIED')
-          AND status NOT IN ('MERGED_DUPLICATE', 'IGNORED_ORPHAN')
-        GROUP BY substr(COALESCE(closed_at, exit_time, updated_at, timestamp), 1, 10)
-        ORDER BY day;
-        """,
-    )
-
-
-def get_win_loss_counts(db_path: str | Path) -> pd.DataFrame:
-    """Return aggregate win/loss distribution."""
-    return query_dataframe(
-        db_path,
-        """
-        SELECT
-            COALESCE(outcome_label, CASE WHEN pnl IS NULL THEN 'OPEN' WHEN pnl >= 0 THEN 'WIN' ELSE 'LOSS' END) AS outcome,
-            COUNT(*) AS count
-        FROM trades
-        WHERE status IN ('CLOSED', 'FINALIZED', 'CLOSED_UNVERIFIED')
-          AND status NOT IN ('MERGED_DUPLICATE', 'IGNORED_ORPHAN')
-        GROUP BY outcome
-        ORDER BY outcome;
-        """,
-    )
-
-
 def get_top_metrics(db_path: str | Path, stale_seconds: int) -> dict[str, Any]:
     """Return dashboard summary metrics."""
     latest_heartbeat = get_latest_heartbeat(db_path)

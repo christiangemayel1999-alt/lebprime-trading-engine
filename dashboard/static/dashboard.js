@@ -547,23 +547,6 @@
         const node = safeSetText("bt-replay-status", message);
         if (node) node.className = error ? "small text-danger" : "small text-secondary";
     }
-    function replaySerializeCandidate(candidate) {
-        if (!candidate || typeof candidate !== "object") return {};
-        return {
-            setup_family: textOr(candidate.setup_family),
-            side: textOr(candidate.side),
-            setup_score: num(candidate.setup_score),
-            trend_score: num(candidate.trend_score),
-            session_quality_score: num(candidate.session_quality_score),
-            regime_confidence: num(candidate.regime_confidence),
-            setup_fingerprint: textOr(candidate.setup_fingerprint),
-            reason_code: textOr(candidate.reason_code),
-        };
-    }
-    function replaySetSelection(updates = {}) {
-        const replay = replayState();
-        Object.assign(replay, updates);
-    }
     function replayWindowBoundsAround(barIndex) {
         const replay = replayState();
         const total = Math.max(num(replay.totalBars, 0), replayVisibleFrames().length);
@@ -593,11 +576,6 @@
     function replayFrameIndexByBar(barIndex) {
         return replayVisibleFrames().findIndex((frame) => num(frame.bar_index) === num(barIndex));
     }
-    function replayViewportContainsBar(barIndex) {
-        const idx = replayFrameIndexByBar(barIndex);
-        const replay = replayState();
-        return idx >= replay.viewportStart && idx <= replay.viewportStart + num(replay.viewportSize, 120) - 1;
-    }
     function replaySetViewport(startIndex, size = null, { clampToCurrent = true } = {}) {
         const replay = replayState();
         const frames = replayVisibleFrames();
@@ -626,14 +604,6 @@
         const current = Math.max(24, Math.min(num(replay.viewportSize, 120), frames.length));
         const nextSize = direction < 0 ? Math.max(24, Math.floor(current * 0.75)) : Math.min(frames.length, Math.ceil(current * 1.35));
         replayCenterViewportOnBar(replaySelectedBarIndex(), nextSize);
-        scheduleReplayRender();
-    }
-    function replayPanViewport(offsetBars = 0) {
-        const replay = replayState();
-        const frames = replayVisibleFrames();
-        if (!frames.length) return;
-        const nextStart = Math.max(0, Math.min(num(replay.viewportStart, 0) + num(offsetBars, 0), Math.max(0, frames.length - num(replay.viewportSize, 120))));
-        replaySetViewport(nextStart, replay.viewportSize, { clampToCurrent: false });
         scheduleReplayRender();
     }
     function replayAutoScrollToBar(barIndex) {
@@ -964,12 +934,6 @@
         }, intervalMs);
         scheduleReplayRender();
     }
-    function replayPause() {
-        const replay = replayState();
-        replay.isPlaying = false;
-        stopReplayTimers();
-        scheduleReplayRender();
-    }
     function replaySetSpeed(speed) {
         const replay = replayState();
         replay.playbackSpeed = BACKTEST_REPLAY_SPEEDS.includes(num(speed)) ? num(speed) : 1;
@@ -1217,77 +1181,6 @@
                     replaySetBar(marker.bar_index, { event: marker.event, center: true });
                 };
             });
-        }
-    }
-    function replayDrawNavigator() {
-        const canvas = document.getElementById("bt-replay-navigator");
-        if (!canvas) return;
-        const wrap = canvas.parentElement;
-        if (!wrap) return;
-        const frames = replayVisibleFrames();
-        const replay = replayState();
-        const dpr = window.devicePixelRatio || 1;
-        const rect = wrap.getBoundingClientRect();
-        const width = Math.max(320, Math.floor(rect.width));
-        const height = Math.max(54, Math.floor(rect.height));
-        canvas.width = Math.floor(width * dpr);
-        canvas.height = Math.floor(height * dpr);
-        canvas.style.width = `${width}px`;
-        canvas.style.height = `${height}px`;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.clearRect(0, 0, width, height);
-        ctx.fillStyle = "rgba(7,11,18,0.95)";
-        ctx.fillRect(0, 0, width, height);
-        if (!frames.length) {
-            ctx.fillStyle = "rgba(255,255,255,0.55)";
-            ctx.font = "12px Consolas, monospace";
-            ctx.fillText("Navigator unavailable", 20, 24);
-            return;
-        }
-        const lows = frames.map((frame) => num(frame.low));
-        const highs = frames.map((frame) => num(frame.high));
-        let maxPrice = Math.max(...highs);
-        let minPrice = Math.min(...lows);
-        if (maxPrice === minPrice) {
-            maxPrice += 1;
-            minPrice -= 1;
-        }
-        const range = maxPrice - minPrice;
-        const toY = (price) => 8 + ((height - 16) * (maxPrice - price)) / range;
-        const step = width / Math.max(frames.length, 1);
-        frames.forEach((frame, index) => {
-            const x = (index + 0.5) * step;
-            const closeY = toY(num(frame.close));
-            const openY = toY(num(frame.open));
-            ctx.strokeStyle = num(frame.close) >= num(frame.open) ? "rgba(34,197,94,0.7)" : "rgba(248,113,113,0.7)";
-            ctx.beginPath();
-            ctx.moveTo(x, toY(num(frame.high)));
-            ctx.lineTo(x, toY(num(frame.low)));
-            ctx.stroke();
-            ctx.fillStyle = num(frame.close) >= num(frame.open) ? "rgba(34,197,94,0.55)" : "rgba(248,113,113,0.55)";
-            ctx.fillRect(x - Math.max(1, step * 0.25), Math.min(openY, closeY), Math.max(2, step * 0.5), Math.max(1, Math.abs(closeY - openY)));
-        });
-        const viewport = replayViewportBounds();
-        const start = viewport.start;
-        const end = viewport.end;
-        const left = start * step;
-        const right = (end + 1) * step;
-        ctx.fillStyle = "rgba(110,168,254,0.16)";
-        ctx.fillRect(left, 0, Math.max(2, right - left), height);
-        ctx.strokeStyle = "rgba(110,168,254,0.9)";
-        ctx.setLineDash([4, 4]);
-        ctx.strokeRect(left, 1, Math.max(2, right - left), height - 2);
-        ctx.setLineDash([]);
-        const cursorIndex = replayFrameIndexByBar(replaySelectedBarIndex());
-        if (cursorIndex >= 0) {
-            const x = (cursorIndex + 0.5) * step;
-            ctx.strokeStyle = "rgba(255, 193, 7, 0.95)";
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, height);
-            ctx.stroke();
         }
     }
     function replayBarIndexFromCanvasX(canvas, clientX) {
@@ -3440,31 +3333,6 @@ const brokerEntries = asArray(status.broker_entries);
                     state.backtestResult = latestPayload.result || null;
                 } catch {}
             }
-        }
-        renderAll();
-    }
-    async function refreshExecutionMode() {
-        state.modeControl.loading = true;
-        state.modeControl.error = null;
-        renderAll();
-        try {
-            dashboardLog("mode", "GET /api/mode");
-            const payload = await api("/api/mode");
-            const normalizedMode = normalizeModeData(payload.mode || payload);
-            state.modeControl = {
-                mode: normalizedMode,
-                options: normalizeModeOptions(payload.options),
-                loading: false,
-                error: null,
-            };
-            state.config.mode = normalizedMode;
-            dashboardLog("mode", "execution mode payload received", normalizedMode);
-        } catch (error) {
-            state.modeControl.loading = false;
-            state.modeControl.error = error.message;
-            dashboardLog("mode", "execution mode load failed", { error: error.message }, "error");
-            renderAll();
-            throw error;
         }
         renderAll();
     }
