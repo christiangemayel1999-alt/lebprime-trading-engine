@@ -1,6 +1,6 @@
 # Canonical Runtime Architecture
 
-This document describes the code paths that exist after Phase 3. It distinguishes the production LebPrime v3.4.0 execution path from the compatibility strategy engine used for shared context, diagnostics, and research.
+This document describes the code paths that exist after Phase 4. It distinguishes the production LebPrime v3.4.0 execution path from the compatibility strategy engine used for shared context, diagnostics, and research.
 
 ## Production startup and live path
 
@@ -12,19 +12,21 @@ TradingBot startup
   -> initialize TelegramNotifier and MT5Connector
   -> wrap MT5Connector with MT5Broker + ExecutionService (generic/manual path)
   -> build live runtime support UnifiedStrategyEngine (legacy families disabled)
+  -> restrict contextual calls through UnifiedStrategyContextAdapter
   -> initialize optional analytics/shadow/correlation services
   -> initialize RiskManager + RiskEngine
-  -> initialize LebPrimeLiveService
+  -> adapt MT5Connector through MT5BrokerGateway
+  -> initialize LebPrimeLiveService against broker/risk protocols
   -> initialize LivePositionLifecycleManager (generic position lifecycle)
   -> acquire the single-instance lock
 
 live cycle
-  -> support-engine market/session diagnostics
+  -> LiveContextProvider market/session diagnostics
   -> LebPrimeLiveService.scan_once()
   -> LiveLebPrimeEngine consumes closed broker candles
   -> zones and Entry1/Entry2 are persisted by LebPrimeLiveRepository
   -> LebPrime preflight uses account/symbol/risk state
-  -> MT5Connector builds/checks/sends pending broker orders
+  -> MT5BrokerGateway delegates request building/check/send to MT5Connector
   -> reconciliation reads current orders, positions, order history, and deal history
   -> broker lifecycle is persisted in lebprime_broker_entries
   -> TradeJournalService records idempotent lifecycle events
@@ -32,14 +34,15 @@ live cycle
   -> dashboard LebPrime APIs read repository projections only
 ```
 
-`LebPrimeLiveService` is the only production LebPrime v3.4.0 signal-to-pending-order path. `UnifiedStrategyEngine` is still constructed in live mode because `main.py` uses shared context/diagnostic interfaces, but `build_live_runtime_support_engine()` disables its setup families in a private configuration copy. It does not replace or authorize LebPrime v3.4.0 broker execution.
+`LebPrimeLiveService` is the only production LebPrime v3.4.0 signal-to-pending-order path. `UnifiedStrategyEngine` is still constructed in live mode because the legacy fallback and shadow/diagnostic paths need its candidate contract, but contextual call sites use `LiveContextProvider`. `build_live_runtime_support_engine()` disables setup families in a private configuration copy. Neither the provider nor its adapter exposes or authorizes trade generation.
 
 ## Lifecycle and persistence ownership
 
 | Concern | Canonical owner | Notes |
 |---|---|---|
 | LebPrime zones and Entry1/Entry2 | `services/lebprime_live/service.py` + `LiveLebPrimeEngine` | Closed-candle/Pine-parity path. |
-| Pending request construction and broker checks | `LebPrimeLiveService` calling `MT5Connector` | Uses connector normalization, `order_check`, and `order_send` wrappers. |
+| Live context | `LiveContextProvider` / `UnifiedStrategyContextAdapter` | Read-only dataframe preparation plus session and market-context analysis. |
+| Pending request construction and broker checks | `LebPrimeLiveService` calling `LebPrimeBrokerGateway` | `MT5BrokerGateway` delegates unchanged to connector normalization, `order_check`, and `order_send` wrappers. |
 | LebPrime idempotency | `LebPrimeLiveRepository` entry key plus service reservation/retry flow | Prevents duplicate placement across cycles/restarts. |
 | Broker lifecycle reconciliation | `LebPrimeLiveService._reconcile_broker_execution()` | Broker orders, positions, order history, and position deal history are authoritative. |
 | LebPrime lifecycle write model | `lebprime_broker_entries` through `LebPrimeLiveRepository` | Single durable per-entry projection; no dashboard writes. |
@@ -47,6 +50,32 @@ live cycle
 | Trades/Performance read models | `LebPrimeLiveRepository.dashboard_*_snapshot()` | Exclude historical rows and incomplete outcomes from PnL arithmetic. |
 | Generic/manual execution | `ExecutionService` + `MT5Broker` + `MT5Connector` | Retained for current generic/manual callers; not the LebPrime pending placement owner. |
 | Generic position management | `LivePositionLifecycleManager` | Retained for the generic execution path and existing live lifecycle contracts. |
+
+## Dependency direction
+
+```text
+LiveContextProvider (read-only)               LiveLebPrimeEngine
+             |                                      |
+             | context                              | zone / Entry1 / Entry2 intent
+             v                                      v
+        TradingBot ------------------------> LebPrimeLiveService
+                                                     |
+                                      LebPrimeRiskService approval/sizing
+                                                     |
+                                                     v
+                                          LebPrimeBrokerGateway
+                                                     |
+                                                     v
+                                              MT5BrokerGateway
+                                                     |
+                                                     v
+                                                MT5Connector
+
+MT5 broker state/history -> gateway -> reconciliation -> repository + journal
+repository/database -> dashboard read API -> frontend
+```
+
+The dashboard and Telegram are outside the decision-to-broker authority chain. See `ARCHITECTURE_BOUNDARIES_PHASE4.md` for the capability and ownership tables.
 
 ## Dependency map
 
