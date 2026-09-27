@@ -41,17 +41,19 @@ Historical rows (`historical = 1`) are excluded so replay state cannot be presen
 - Research only: backtest, replay, Indicator Lab, and OOS configuration/data.
 - Legacy compatibility: generic `strategy.setup_controls`, `strategy.setup_families`, generic session controls, and generic symbol controls. These remain in configuration because compatibility/backtest code may read them, but they are not exposed as active LebPrime production controls.
 
-## Deprecated compatibility endpoints
+## Final endpoint classification
 
-These remain available, are marked deprecated in FastAPI/OpenAPI where listed, and were not deleted in Phase 2:
-
-- `GET /api/strategies/lebprime-v3-4-0/status`: replaced in the dashboard by `GET /api/lebprime/status`.
-- `GET /api/strategies`, `POST|PATCH /api/strategies/settings`, `POST /api/strategies/toggle`, and `POST /api/families/toggle`: no longer used by the production dashboard.
-- `GET|POST|PATCH /api/sessions*` and `/api/symbols*`: generic controls no longer used by the production dashboard; LebPrime symbols/timeframes live under `lebprime_v3_4_0`.
-- `/api/manual/*` and `POST /api/control/close-all`: intentionally preserved backend operations, but Manual Trading is absent from navigation and JavaScript.
-- `GET /api/backtests`: overlaps with `GET /api/backtest/runs`; research currently uses the latter, but `PROJECT_CONTEXT.md` still documents it.
-- `GET /api/risk` and `POST|PATCH /api/risk/update`: current Risk UI uses the canonical config preview/update flow; consolidate only after all non-dashboard callers are checked.
-- `GET /api/execution` and `POST|PATCH /api/execution/update`: not called by the surviving dashboard UI.
+| Status | Endpoints | Reason |
+|---|---|---|
+| `ACTIVE` | `/api/lebprime/status`, `/api/trades/lebprime`, `/api/performance/lebprime` | Canonical LebPrime status and broker-authoritative read models. |
+| `ACTIVE` | `/api/config*`, `/api/runtime*`, `/api/control*`, `/api/mode`, `/api/worker/status`, `/api/status` | Current configuration, runtime control, and health surfaces. |
+| `ACTIVE` | `/api/backtest/runs`, `/api/backtest/run/{run_id}`, `/api/jobs/backtest`, `/api/jobs*` | Canonical research execution/list/detail/job surfaces. |
+| `ACTIVE` | `/api/backtests/{run_id}/replay/*`, `/api/backtests/{run_id}/stream/*` | Current playback paths; not the removed singular listing. |
+| `ACTIVE` | `/api/manual/*`, `/api/control/close-all` | Supported backend operations even though Manual Trading is absent from navigation. |
+| `DEPRECATED-RETAINED` | None | No marked-deprecated route retained a supported caller contract. |
+| `REMOVED` | old `/api/strategies*`, `/api/families/toggle`, `/api/risk*`, `/api/execution*`, `/api/sessions*`, `/api/symbols*` compatibility routes | No HTTP client caller; Telegram calls `OperatorService` directly and canonical config APIs replace settings writes. |
+| `REMOVED` | `/api/strategies/lebprime-v3-4-0/status` | Replaced by `/api/lebprime/status`; its only test asserted stale source text. |
+| `REMOVED` | singular `GET /api/backtests` | Duplicate listing with no caller; canonical list is `/api/backtest/runs`. |
 
 ## Known source limitations
 
@@ -69,7 +71,7 @@ These remain available, are marked deprecated in FastAPI/OpenAPI where listed, a
 - Job state: `GET /api/jobs`
 - Replay/stream: `GET /api/backtests/{run_id}/replay/*` and `GET /api/backtests/{run_id}/stream/*`
 
-The deprecated singular listing alternative `GET /api/backtests` delegates to the same run-list projection and adds its legacy configuration field. It remains because `PROJECT_CONTEXT.md` documents it as a compatibility surface.
+The singular listing alternative `GET /api/backtests` was removed. The plural prefix remains only for active replay/stream resources scoped by run ID.
 
 ## Phase 5 read-side audit
 
@@ -77,4 +79,4 @@ The deprecated singular listing alternative `GET /api/backtests` delegates to th
 - `LebPrimeLiveRepository.dashboard_performance_snapshot()` is the single source for broker-complete LebPrime performance, including symbol/timeframe/entry breakdowns.
 - `LebPrimeLiveService.dashboard_*_snapshot()` remains a thin service boundary; it does not recalculate metrics.
 - `DashboardDataService.status_snapshot()` and `dashboard/queries.py` read generic runtime/trade tables for `/api/status`. They are not equivalent to the LebPrime broker-entry projection and were retained.
-- No dashboard API was removed. Every deprecated candidate remains either documented in `PROJECT_CONTEXT.md`, represented by compatibility contracts, or intentionally retained for backend operations.
+- Phase 6 removed only caller-free compatibility APIs. Operational/manual APIs and all current frontend routes remain active.

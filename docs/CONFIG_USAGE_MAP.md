@@ -9,7 +9,7 @@ This map classifies the current `config.json` contract by actual code consumers.
 | `LIVE_LEBPRIME` | `lebprime_v3_4_0`, relevant `risk`, `exit`, and `mt5` values | `LebPrimeLiveService._strategy_config()`, `_selected_symbols()`, `_selected_timeframes()`, `_preflight()`, `RiskManager`, `MT5Connector` |
 | `LIVE_INFRASTRUCTURE` | `bot`, `runtime`, `mt5`, `broker`, `risk`, `exit`, `cooldowns`, `safety`, `storage`, `logging`, `journaling`, `telegram`, `integrations`, `dashboard`, `analytics`, `position_sizing` | `TradingBot`, `ConfigManager`, `ControlStateService`, `MT5Connector`, `RiskManager`, `TradeJournalService`, Telegram and dashboard services |
 | `BACKTEST_RESEARCH` | `backtest`, `indicators`, `regime`, `sessions`, `entry`, `shorts`, `validation`, plus research-selected portions of `strategy`, `execution`, `risk`, and `exit` | `BacktestRunner`, `ReplaySession`/`StrategyReplayEvaluator`, `UnifiedStrategyEngine`, `OOSService`, Indicator Lab services |
-| `LEGACY_COMPATIBILITY` | `strategy.setup_controls`, `strategy.setup_families`, `strategy.lebprim_*`, top-level `strategies`, generic `symbols` and `timeframes` aliases | `strategy_factory`, `StrategyEngine`, `LebprimStrategy`, `UnifiedStrategyEngine`, execution-mode normalization, config/control compatibility routes |
+| `LEGACY_COMPATIBILITY` | `strategy.setup_controls`, `strategy.setup_families`, `strategy.lebprim_*`, top-level `strategies`, generic `symbols` and `timeframes` aliases | `strategy_factory`, `StrategyEngine`, `LebprimStrategy`, `UnifiedStrategyEngine`, execution-mode normalization, backtest/replay, config normalization, and Telegram/operator controls |
 | `UNUSED` | None proven safe at key level | Static references and compatibility normalization prevent classifying any current persisted section as unused with sufficient confidence. |
 
 ## High-priority key tracing
@@ -20,7 +20,7 @@ This map classifies the current `config.json` contract by actual code consumers.
 | `lebprime_v3_4_0.symbols` | `LIVE_LEBPRIME` | `LebPrimeLiveService._selected_symbols()`; resolved through `services.lebprime_live.symbols.resolve_symbol()`. It is separate from generic top-level `symbols`. |
 | `lebprime_v3_4_0.timeframes` | `LIVE_LEBPRIME` | `LebPrimeLiveService._selected_timeframes()`; normalized through `services.lebprime_live.timeframes.normalize_lebprime_timeframe()`. |
 | `lebprime_v3_4_0.parameters` | `LIVE_LEBPRIME` | Copied into each `LiveLebPrimeEngine` by `_parameters()`/`_build_contexts()`. This owns current Pine-parity zone calculations. |
-| `strategy.setup_controls` | `LEGACY_COMPATIBILITY` + `BACKTEST_RESEARCH` | Read by `StrategyEngine`, strategy diagnostics, `BacktestRunner`, execution-mode normalization, `ConfigManager`, `ControlPlaneService`, and operator compatibility routes. `build_live_runtime_support_engine()` disables every family in a private copy. |
+| `strategy.setup_controls` | `LEGACY_COMPATIBILITY` + `BACKTEST_RESEARCH` | Read by `StrategyEngine`, strategy diagnostics, `BacktestRunner`, execution-mode normalization, `ConfigManager`, `ControlPlaneService`, and Telegram-backed `OperatorService` controls. `build_live_runtime_support_engine()` disables every family in a private copy. |
 | `strategy.setup_families` | `LEGACY_COMPATIBILITY` + `BACKTEST_RESEARCH` | Read by `StrategyEngine`, `LebprimStrategy`, adapters/registry, backtests, diagnostics, and config/operator services. Not the source of truth for `LebPrimeLiveService`. |
 | `strategy.lebprim_*` | `LEGACY_COMPATIBILITY` + `BACKTEST_RESEARCH` | Read by `LebprimStrategy`, `ExecutionDecisionEngine`, `PendingOrderPolicy`, and replay/backtest pending semantics. These keys configure the compatibility `LEBPRIM_SCALP` strategy, not the live v3.4.0 Pine engine. |
 | `regime` | `BACKTEST_RESEARCH` / live support context | Read by legacy and Lebprim strategy context classification and normalized by `ConfigSchema`. Used by the non-trading support engine in live mode and by backtests. |
@@ -46,4 +46,8 @@ No configuration key or normalized alias was removed. Static tracing still finds
 
 `position_sizing` is classified `KEEP`: when enabled, `TradingBot` uses `DynamicPositionSizer` in the surviving generic fallback execution path and updates it after closes. It is not authoritative for LebPrime v3.4.0, but it is not dead.
 
-Phase 6 may remove individual aliases only after runtime access instrumentation and an explicit stored-config migration. Until then, legacy aliases remain `UNKNOWN`, not safe deletion candidates.
+## Phase 6 final decision
+
+No configuration key or normalized alias passed the removal gate. `strategy.setup_controls`, `strategy.setup_families`, and `strategy.lebprim_*` have direct generic engine, live-support, diagnostics, research, replay, pending-policy, configuration, or Telegram/operator readers. `runtime.mode`, `broker.mt5`, `integrations.telegram`, top-level `strategies`, and generic symbol/timeframe views are still normalized for stored-config compatibility. They remain `COMPATIBILITY`, not dead dashboard settings.
+
+Future removal requires runtime access instrumentation plus an explicit migration for stored configs, worker payloads, imports/exports, and external scripts.

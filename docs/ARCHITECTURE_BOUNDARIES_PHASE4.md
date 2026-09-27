@@ -40,7 +40,7 @@ The combined contract is intentionally specific to the current LebPrime service.
 
 `MT5BrokerGateway` is a delegation-only adapter around `MT5Connector`. It does not normalize, rebuild, reinterpret, retry, or serialize broker operations. Request construction, filling-mode choice, stop adjustment, margin calls, `order_check`, `order_send`, demo/account data, and history remain in the proven connector.
 
-`LebPrimeLiveService` accepts `broker_gateway_factory`. Phase 5 retained the previous `connector_factory` parameter because compatibility callers and fakes still construct the service with it, but removed the repository-unreferenced `connectors` attribute alias; canonical cached state is `broker_gateways`. Main uses `broker_gateway_factory`; the service no longer imports or names `MT5Connector`.
+`LebPrimeLiveService` accepts `broker_gateway_factory`; canonical cached state is `broker_gateways`. Phase 6 migrated internal fake/test callers and removed the test-only `connector_factory` parameter. Main uses `broker_gateway_factory`; the service no longer imports or names `MT5Connector`.
 
 ## 5. LebPrime dependency direction
 

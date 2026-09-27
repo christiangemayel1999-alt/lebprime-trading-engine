@@ -18,7 +18,7 @@ Phase 5 consolidated only where the Phase 4 contracts preserve the same calls an
 | `LivePositionLifecycleManager` | `NEEDS ADAPTER FIRST` | Owns generic positions while LebPrime owns its broker lifecycle. A shared lifecycle event contract and attribution rules are required before merging. |
 | `TradeJournalService` | `KEEP SEPARATE` | Cross-domain durable event sink with retry/outbox behavior. It should not be merged into a strategy repository. |
 | `LebPrimeLiveRepository` | `KEEP SEPARATE` | Strategy-specific lifecycle/write and dashboard projection owner. It consumes the shared journal but is not a replacement for it. |
-| Deprecated dashboard APIs | `REMOVE LATER` | Migrate documented clients and update `PROJECT_CONTEXT.md`; retain until external compatibility is explicitly retired. |
+| Deprecated dashboard APIs | `REMOVE LATER — COMPLETED IN PHASE 6` | Caller tracing found no supported HTTP clients; documentation/tests were migrated and the aliases were removed. |
 | Legacy config aliases | `UNKNOWN` | Instrument actual access from persisted configs, workers, scripts, and imports before classifying individual aliases for removal. |
 
 ## Completed safe consolidations
@@ -26,7 +26,7 @@ Phase 5 consolidated only where the Phase 4 contracts preserve the same calls an
 - `LiveContextProvider` remains the sole context path in the live runtime. The only remaining `self.strategy` method calls generate/select/evaluate candidates in the surviving generic fallback.
 - `LiveMT5Feed` now depends on `MarketDataGateway`; its runtime object and `fetch_rates()` call are unchanged.
 - The unused `LebPrimeLiveService.connectors` attribute alias was removed. `broker_gateways` is canonical.
-- `connector_factory` was retained because compatibility tests and older construction semantics still use it.
+- `connector_factory` was retained during Phase 5; Phase 6 migrated the internal tests to `broker_gateway_factory` and removed the alias after finding no runtime or documented external caller.
 - LebPrime trade/performance projections were confirmed canonical in `LebPrimeLiveRepository`; no second metric implementation was introduced.
 
 The MT5 gateway is safe as an introduced boundary but is not authorization for merging `MT5Broker` with the LebPrime flow. Its methods delegate directly, yet the two higher-level flows assemble different inputs and results.

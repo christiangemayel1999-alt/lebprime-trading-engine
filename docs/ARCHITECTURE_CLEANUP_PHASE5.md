@@ -25,7 +25,7 @@ Those methods belong to the surviving generic fallback/shadow path. Removing `bu
 
 ## LebPrime constructor compatibility
 
-`broker_gateway_factory` is canonical. The `connector_factory` parameter remains deprecated compatibility because the current compatibility suite constructs the service with it extensively. The unused `self.connector_factory` storage is retained with that contract; removing the parameter or storage should be one coordinated migration. The `connectors` attribute alias had no repository caller and was removed.
+`broker_gateway_factory` is canonical. Phase 6 migrated the internal compatibility suite and removed the test-only `connector_factory` parameter/storage. The `connectors` attribute alias had already been removed in Phase 5.
 
 ## Direct MT5Connector classification
 
@@ -64,7 +64,7 @@ No alias passed the removal gate. Research/backtest paths still consume generic 
 - `RiskManager`, `RiskEngine`, and `LebPrimeRiskService` remain separate. Their scopes differ and no behavior-equivalence evidence supports a merge.
 - `DynamicPositionSizer` is `KEEP`: it is optional and non-authoritative for LebPrime, but active when enabled in the generic fallback path.
 - `MT5Connector`, `MT5Broker`, and `MT5BrokerGateway` remain separate. LebPrime pending-order construction must not be moved through `MT5Broker` without field-, enum-, retry-, idempotency-, and lifecycle-parity evidence.
-- `PositionManager` is `DEPRECATED`: it has no production/research caller and only an architecture contract test. Phase 6 may remove it together with that explicit contract after confirming it is not planned public API.
+- `PositionManager` was removed in Phase 6 together with its architecture-only test after final tracing found no supported caller or public contract.
 
 ## Phase 6 readiness
 
@@ -72,7 +72,7 @@ No alias passed the removal gate. Research/backtest paths still consume generic 
 |---|---|---|
 | `build_live_runtime_support_engine` | `KEEP` | Required by generic fallback and shadow/full-engine calls. |
 | `UnifiedStrategyContextAdapter` | `KEEP` | Canonical live context boundary. |
-| `connector_factory` compatibility alias | `DEPRECATED` | Extensively used by compatibility tests; migrate callers before removal. |
+| `connector_factory` compatibility alias | `READY TO REMOVE` | Completed in Phase 6 after migrating internal tests. |
 | `connectors` compatibility alias | `READY TO REMOVE` | Removed in Phase 5 after zero repository callers were found. |
 | `MT5BrokerGateway` | `KEEP` | Canonical delegation boundary for LebPrime. |
 | `MT5Broker` | `KEEP` | Active generic/manual adapter; request semantics differ. |
@@ -81,8 +81,8 @@ No alias passed the removal gate. Research/backtest paths still consume generic 
 | `RiskEngine` | `KEEP` | Active structured generic facade. |
 | `LebPrimeRiskService` | `KEEP` | Narrow live dependency boundary. |
 | `DynamicPositionSizer` | `KEEP` | Called by enabled generic fallback execution and close tracking. |
-| `PositionManager` | `DEPRECATED` | No non-test caller; Phase 6 removal candidate after public-contract decision. |
-| Deprecated dashboard APIs | `DEPRECATED` | No production UI callers, but still documented/contracted. |
+| `PositionManager` | `READY TO REMOVE` | Completed in Phase 6 with its architecture-only test. |
+| Deprecated dashboard APIs | `READY TO REMOVE` | Completed in Phase 6 after current documentation and stale contracts were updated. |
 | Legacy config aliases | `UNKNOWN` | External/stored-config use cannot be disproved statically. |
 | Duplicate dashboard read helpers | `KEEP` | Generic status and LebPrime broker projections are semantically distinct; no duplicate LebPrime calculator remains. |
 

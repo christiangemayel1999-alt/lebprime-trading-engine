@@ -89,7 +89,7 @@ The dashboard and Telegram are outside the decision-to-broker authority chain. S
 | `trading_bot/execution/` | Canonical decisions/exposure and generic/manual broker adapter | replay broker, pending policy, canonical plan | manual service | Keep active modules; isolated stubs were removed. |
 | `trading_bot/risk/` | `RiskEngine`, management profiles, optional dynamic sizer | `RiskEngine` in backtest/replay | — | Keep. |
 | `trading_bot/positions/live_lifecycle.py` | Generic live reconciliation/management | Contract tests | — | Keep. |
-| `trading_bot/positions/manager.py` | No current production caller | — | Architecture contract tests | Keep pending a broader position-model decision. |
+| `trading_bot/positions/manager.py` | — | — | — | Removed in Phase 6 after tracing proved no supported caller or public contract. |
 | `services/lebprime_live/` | Canonical LebPrime production service/repository/symbol/timeframe path | Historical rows are explicitly non-executable | dashboard constructs a read-only service instance | Keep. |
 | `services/backtest_runner.py` | — | Canonical backtest orchestration | Worker jobs | Keep. |
 | `services/backtest_replay.py` | — | Replay clock, data, evaluator, account, recorder, and session | Backtest runner | Keep. |
@@ -103,7 +103,7 @@ The dashboard and Telegram are outside the decision-to-broker authority chain. S
 
 The Research UI queues `POST /api/jobs/backtest`. `JobService` persists the job and the worker invokes `BacktestRunner`. The runner builds a mode-appropriate engine through `strategy_factory.build_strategy_engine()`, uses `ReplaySession` and `ReplayBroker` for deterministic execution, and stores run bundles plus playback frames/events through `BacktestStorage` and `DatabaseService`.
 
-The canonical list/detail API is `GET /api/backtest/runs` and `GET /api/backtest/run/{run_id}`. The deprecated `GET /api/backtests` wrapper delegates to the same list projection because it is still documented externally.
+The canonical list/detail API is `GET /api/backtest/runs` and `GET /api/backtest/run/{run_id}`. The deprecated singular `GET /api/backtests` listing was removed in Phase 6. Replay and stream routes intentionally remain under `/api/backtests/{run_id}/...`.
 
 ## Replay path
 
@@ -119,13 +119,11 @@ Dashboard routes call `IndicatorLabService`, which coordinates dataset and campa
 
 ## Compatibility components retained
 
-- Deprecated generic strategy/family/risk/execution/session/symbol routes because `PROJECT_CONTEXT.md` documents them.
-- Deprecated old LebPrime status route because a contract test still requires it.
-- Deprecated `/api/backtests` because it remains a documented compatibility endpoint.
 - Generic trade fields in `/api/status` because Logs/Health and compatibility consumers still use portions of the status payload.
 - `StrategyEngine`, `LebprimStrategy`, adapters, and configuration aliases because backtest/research and the live support engine still instantiate them.
 - Generic `ExecutionService`, `MT5Broker`, and `LivePositionLifecycleManager` because manual/generic runtime paths still call them.
-- The `connector_factory` constructor name on `LebPrimeLiveService` because the compatibility suite and older construction contract still use it. The unreferenced `connectors` attribute alias was removed; canonical state is `broker_gateways`.
+
+Phase 6 removed the uncalled deprecated strategy/family/risk/execution/session/symbol routes, the old LebPrime status alias, the duplicate backtest listing, `PositionManager`, and the test-only `connector_factory` constructor alias. `broker_gateway_factory` and `broker_gateways` are now the only LebPrime broker construction/cache names.
 
 ## Phase 5 read-side decision
 

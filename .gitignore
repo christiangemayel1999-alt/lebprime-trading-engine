@@ -30,6 +30,7 @@ logs/
 
 storage/
 state.json
+config.json.bak-*
 
 backtests/
 backtest_results/
