@@ -38,7 +38,7 @@ from services.trade_journal import TradeJournalService
 from services.state_manager import StateManager
 from services.telegram_notifier import TelegramNotifier
 from services.telegram_command_service import TelegramCommandService
-from strategy_factory import build_live_runtime_support_engine as build_strategy_engine
+from strategy_factory import build_live_runtime_support_engine
 from trading_bot.execution.decision_engine import BLOCK, ExecutionDecisionEngine
 from trading_bot.execution.canonical import CanonicalExecutionPlan, build_execution_request_from_plan
 from trading_bot.execution.exposure_policy import ExposurePolicy, ExposureSnapshot
@@ -147,7 +147,7 @@ class TradingBot:
         )
         self.connector = MT5Connector(self.config, self.logger)
         self.execution_service = ExecutionService(MT5Broker(self.connector))
-        self.strategy = build_strategy_engine(self.config, self.base_dir)
+        self.strategy = build_live_runtime_support_engine(self.config, self.base_dir)
         self.live_context = UnifiedStrategyContextAdapter(self.strategy)
         self._initialize_analytics_services()
         self.logger.structured(
@@ -392,7 +392,7 @@ class TradingBot:
                 refreshed = load_runtime_config(self.base_dir, require_mt5_credentials=False, apply_mode_env_override=False)
                 
                 # Try to build new strategy - this is where failures commonly occur
-                new_strategy = build_strategy_engine(refreshed, self.base_dir)
+                new_strategy = build_live_runtime_support_engine(refreshed, self.base_dir)
                 if new_strategy is None:
                     raise ValueError("Strategy engine build returned None (invalid configuration)")
                 new_live_context = UnifiedStrategyContextAdapter(new_strategy)
