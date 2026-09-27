@@ -75,6 +75,10 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
             "message": "Worker status service not configured",
         }
 
+    def backtest_runs_payload(limit: int) -> dict[str, Any]:
+        """Build the canonical persisted backtest run listing."""
+        return {"ok": True, "runs": dashboard_data.list_backtest_runs(limit=limit)}
+
     @router.get("/", response_class=HTMLResponse)
     async def index(request: Request, _: None = Depends(dashboard_auth.dependency)) -> HTMLResponse:
         config = config_manager.dashboard_view()
@@ -397,7 +401,9 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
 
     @router.get("/api/backtests", deprecated=True)
     async def get_backtests(limit: int = 20, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, "backtest": control_plane.get_section("backtest").get("backtest", {}), "runs": dashboard_data.list_backtest_runs(limit=limit)}
+        payload = backtest_runs_payload(limit)
+        payload["backtest"] = control_plane.get_section("backtest").get("backtest", {})
+        return payload
 
     @router.get("/api/logs")
     async def get_logs(
@@ -946,7 +952,7 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
 
     @router.get("/api/backtest/runs")
     async def list_backtest_runs(limit: int = 20, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, "runs": dashboard_data.list_backtest_runs(limit=limit)}
+        return backtest_runs_payload(limit)
 
     @router.get("/api/backtest/run/{run_id}")
     async def get_backtest_run(run_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
