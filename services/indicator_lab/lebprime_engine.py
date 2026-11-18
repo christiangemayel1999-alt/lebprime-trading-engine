@@ -11,6 +11,19 @@ TP1_R = 1.0
 TP2_R = 2.0
 SL_SWING_PIVOT_LEN = 2
 MAX_AFTER_ZONE_SWING_BARS = 60
+EXECUTION_LIVE = "Live broker"
+EXECUTION_PINE = "Pine indicator"
+LEG_RISK_WEIGHT = 0.5  # Entry 1 and Entry 2 each carry half of the configured risk, as in the live runtime.
+FOREX_CURRENCIES = {
+    "EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "SEK", "NOK", "DKK",
+    "SGD", "HKD", "ZAR", "MXN", "TRY", "PLN", "CNH", "HUF", "CZK",
+}
+
+
+def is_forex_symbol(ticker: str) -> bool:
+    """Approximate Pine's syminfo.type == "forex" from a broker ticker such as EURUSD or EURUSD.m."""
+    letters = "".join(ch for ch in str(ticker or "").upper() if ch.isalpha())
+    return len(letters) >= 6 and letters[:3] in FOREX_CURRENCIES and letters[3:6] in FOREX_CURRENCIES
 
 
 class LebPrimeEngine(IndicatorEngine):
@@ -196,6 +209,8 @@ class LebPrimeEngine(IndicatorEngine):
             return float(self.parameters["nas_buffer"])
         if "WTI" in ticker or "USOIL" in ticker:
             return float(self.parameters["wti_buffer"])
+        if is_forex_symbol(ticker):
+            return float(self.parameters["forex_jpy_buffer"] if "JPY" in ticker else self.parameters["forex_buffer"])
         return float(self.parameters["fallback_buffer"])
 
     def _first_swing_low_after_zone(self, source_bar_index: int, fallback: float) -> tuple[float, int | None, str | None]:
@@ -667,7 +682,211 @@ class LebPrimeEngine(IndicatorEngine):
         result["candidate_diagnostics"] = [dict(item) for item in self._candidate_diagnostics]
         return result
 
+    # ------------------------------------------------------------------
+    # Live broker execution model
+    #
+    # Mirrors what the MT5 runtime actually does with a LebPrime signal:
+    #   * Entry 1 / Entry 2 are resting LIMIT orders: any touch after the
+    #     LIMIT CREATED candle fills them (at the open if price gaps through).
+    #   * SL and TP2 are broker-side levels that trigger on a touch, including
+    #     on the candle that fills the entry.
+    #   * When SL and a target are both inside one candle, SL is assumed first.
+    #   * TP1 and the post-TP1 return to Entry 1 are acted on by the bot at
+    #     candle close, so those exits use the candle close price.
+    #   * Each entry carries half of the configured risk, so results are in R
+    #     of the whole signal (both entries stopped = -1R).
+    # ------------------------------------------------------------------
+
+    def _live_mode(self) -> bool:
+        return str(self.parameters.get("execution_model", EXECUTION_LIVE)) == EXECUTION_LIVE
+
+    @staticmethod
+    def _live_legs(zone: ZoneRecord) -> dict[str, dict]:
+        legs = zone.metadata.get("live_legs")
+        if not legs:
+            legs = {
+                "1": {"planned_price": float(zone.entry1 if zone.entry1 is not None else zone.entry_price), "filled": False, "fill_price": None, "fill_bar_index": None, "open_fraction": 0.0, "realized_r": 0.0, "canceled": False},
+                "2": {"planned_price": float(zone.entry2), "filled": False, "fill_price": None, "fill_bar_index": None, "open_fraction": 0.0, "realized_r": 0.0, "canceled": False},
+            }
+            # A zone restored mid-lifecycle keeps the fills it already has.
+            for leg_no, bar_index in (("1", zone.activated_bar_index), ("2", zone.entry2_activated_bar_index)):
+                if bar_index is not None:
+                    legs[leg_no].update({"filled": True, "fill_price": legs[leg_no]["planned_price"], "fill_bar_index": bar_index, "open_fraction": 1.0})
+            zone.metadata["live_legs"] = legs
+            zone.metadata["execution_model"] = EXECUTION_LIVE
+        return legs
+
+    @staticmethod
+    def _limit_fill_price(bar: Candle, demand: bool, planned: float) -> float:
+        if demand:
+            return bar.open if bar.open < planned else planned
+        return bar.open if bar.open > planned else planned
+
+    @staticmethod
+    def _stop_exit_price(bar: Candle, demand: bool, stop: float) -> float:
+        if demand:
+            return bar.open if bar.open < stop else stop
+        return bar.open if bar.open > stop else stop
+
+    @staticmethod
+    def _target_exit_price(bar: Candle, demand: bool, target: float) -> float:
+        if demand:
+            return bar.open if bar.open > target else target
+        return bar.open if bar.open < target else target
+
+    def _fill_live_leg(self, zone: ZoneRecord, leg_no: str, bar: Candle, demand: bool) -> float:
+        leg = self._live_legs(zone)[leg_no]
+        fill = self._limit_fill_price(bar, demand, float(leg["planned_price"]))
+        leg.update({"filled": True, "fill_price": fill, "fill_bar_index": bar.index, "open_fraction": 1.0})
+        if leg_no == "1":
+            zone.activated_bar_index = bar.index
+            zone.activated_time = bar.timestamp
+            zone.entry1_activated_bar_index = bar.index
+            zone.entry1_activated_time = bar.timestamp
+            zone.first_retest_bar_index = zone.first_retest_bar_index or bar.index
+            zone.first_retest_time = zone.first_retest_time or bar.timestamp
+            zone.retest_count = int(zone.retest_count or 0) + 1
+            zone.activation_reason = "limit_touched"
+            self._emit(zone, bar, "ENTRY1_ACTIVATED", price=fill)
+        else:
+            zone.entry2_activated_bar_index = bar.index
+            zone.entry2_activated_time = bar.timestamp
+            self._emit(zone, bar, "ENTRY2_ACTIVATED", price=fill)
+        return fill
+
+    def _close_live_legs(self, zone: ZoneRecord, exit_price: float, demand: bool, fraction: float = 1.0) -> None:
+        stop = float(zone.sl_price)
+        for leg in self._live_legs(zone).values():
+            if not leg["filled"] or leg["open_fraction"] <= 0.0:
+                continue
+            risk = abs(float(leg["planned_price"]) - stop)
+            if risk <= 0.0:
+                continue
+            portion = float(leg["open_fraction"]) * fraction
+            pnl = (exit_price - float(leg["fill_price"])) if demand else (float(leg["fill_price"]) - exit_price)
+            leg["realized_r"] = float(leg["realized_r"]) + LEG_RISK_WEIGHT * portion * pnl / risk
+            leg["open_fraction"] = float(leg["open_fraction"]) - portion
+
+    def _live_result_r(self, zone: ZoneRecord) -> float:
+        return sum(float(leg["realized_r"]) for leg in self._live_legs(zone).values())
+
+    def _finish_live(self, zone: ZoneRecord, bar: Candle, state: str, exit_price: float, event_price: float, reason: str) -> None:
+        demand = zone.side == "DEMAND"
+        self._close_live_legs(zone, exit_price, demand)
+        zone.terminal_state = state
+        zone.terminal_bar_index = bar.index
+        zone.terminal_time = bar.timestamp
+        zone.result_r = self._live_result_r(zone)
+        zone.result_price = exit_price
+        zone.exit_price = exit_price
+        zone.result_points = abs(exit_price - float(zone.entry_price))
+        zone.terminal_reason = reason
+        if state == "TP2_HIT":
+            zone.tp2_hit_bar_index = bar.index
+            zone.tp2_hit_time = bar.timestamp
+        elif state == "TP1_FINAL":
+            zone.tp1_final_bar_index = bar.index
+            zone.tp1_final_time = bar.timestamp
+        self._emit(zone, bar, state, price=event_price, reason=reason)
+
+    def _update_excursions(self, zone: ZoneRecord, bar: Candle, demand: bool) -> None:
+        risk = abs(float(zone.entry_price) - float(zone.sl_price)) if zone.entry_price is not None and zone.sl_price is not None else None
+        entry = float(zone.entry_price)
+        if demand:
+            zone.mfe_price = max(float(zone.mfe_price) if zone.mfe_price is not None else bar.high, bar.high)
+            zone.mae_price = min(float(zone.mae_price) if zone.mae_price is not None else bar.low, bar.low)
+            zone.mfe_points = max(0.0, float(zone.mfe_price) - entry)
+            zone.mae_points = max(0.0, entry - float(zone.mae_price))
+        else:
+            zone.mfe_price = min(float(zone.mfe_price) if zone.mfe_price is not None else bar.low, bar.low)
+            zone.mae_price = max(float(zone.mae_price) if zone.mae_price is not None else bar.high, bar.high)
+            zone.mfe_points = max(0.0, entry - float(zone.mfe_price))
+            zone.mae_points = max(0.0, float(zone.mae_price) - entry)
+        if risk:
+            zone.mfe_r = zone.mfe_points / risk
+            zone.mae_r = zone.mae_points / risk
+
+    def _manage_zone_live(self, zone: ZoneRecord, bar: Candle) -> None:
+        demand = zone.side == "DEMAND"
+        legs = self._live_legs(zone)
+        stop = float(zone.sl_price)
+        entry1 = float(legs["1"]["planned_price"])
+        entry2 = float(legs["2"]["planned_price"])
+        tp1 = float(zone.tp1_price if zone.tp1_price is not None else zone.tp_price)
+        tp2 = float(zone.tp2_price if zone.tp2_price is not None else zone.tp_price)
+
+        def touched(level: float, against: bool) -> bool:
+            # against=True: price moving against the trade (entries, stop); False: in favour (targets).
+            if demand:
+                return bar.low <= level if against else bar.high >= level
+            return bar.high >= level if against else bar.low <= level
+
+        if zone.activated_bar_index is None:
+            if bar.index <= int(zone.limit_created_bar_index):
+                return
+            if touched(entry1, True):
+                self._fill_live_leg(zone, "1", bar, demand)
+                if touched(entry2, True):
+                    self._fill_live_leg(zone, "2", bar, demand)
+                self._update_excursions(zone, bar, demand)
+                # The broker stop is live from the moment Entry 1 fills.
+                if touched(stop, True):
+                    exit_price = self._stop_exit_price(bar, demand, stop)
+                    self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "SL touched on the entry candle")
+                return
+            if self._pre_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
+                zone.terminal_state = "CANCELED"
+                zone.terminal_bar_index = bar.index
+                zone.terminal_time = bar.timestamp
+                zone.result_r = 0.0
+                zone.terminal_reason = "Zone invalidated before activation"
+                self._emit(zone, bar, "CANCELED", reason="Zone invalidated before activation")
+            return
+
+        if bar.index <= int(zone.activated_bar_index):
+            return
+        self._update_excursions(zone, bar, demand)
+
+        if zone.tp1_hit_bar_index is None:
+            if not legs["2"]["filled"] and not legs["2"]["canceled"] and touched(entry2, True):
+                self._fill_live_leg(zone, "2", bar, demand)
+            if touched(stop, True):
+                exit_price = self._stop_exit_price(bar, demand, stop)
+                self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "SL touched")
+            elif touched(tp2, False):
+                zone.tp1_hit_bar_index = bar.index
+                zone.tp1_hit_time = bar.timestamp
+                self._emit(zone, bar, "TP1_HIT", price=tp1)
+                exit_price = self._target_exit_price(bar, demand, tp2)
+                self._finish_live(zone, bar, "TP2_HIT", exit_price, tp2, "TP2")
+            elif touched(tp1, False):
+                zone.tp1_hit_bar_index = bar.index
+                zone.tp1_hit_time = bar.timestamp
+                if not legs["2"]["filled"]:
+                    legs["2"]["canceled"] = True
+                # The runtime closes half of every open position after the TP1 candle closes.
+                self._close_live_legs(zone, bar.close, demand, fraction=0.5)
+                zone.metadata["tp1_partial_price"] = bar.close
+                self._emit(zone, bar, "TP1_HIT", price=tp1)
+            return
+
+        if bar.index <= int(zone.tp1_hit_bar_index):
+            return
+        if touched(stop, True):
+            exit_price = self._stop_exit_price(bar, demand, stop)
+            self._finish_live(zone, bar, "TP1_FINAL", exit_price, tp1, "Remaining position stopped at SL after TP1")
+        elif touched(tp2, False):
+            exit_price = self._target_exit_price(bar, demand, tp2)
+            self._finish_live(zone, bar, "TP2_HIT", exit_price, tp2, "TP2")
+        elif touched(entry1, True):
+            self._finish_live(zone, bar, "TP1_FINAL", bar.close, tp1, "Price returned to Entry 1 after TP1; closed at candle close")
+
     def _manage_zones(self, bar: Candle) -> None:
+        if self._live_mode():
+            for zone in self._zones:
+                if not zone.terminal_state and zone.limit_created_bar_index is not None:
+                    self._manage_zone_live(zone, bar)
+            return
         for zone in self._zones:
             if zone.terminal_state:
                 continue

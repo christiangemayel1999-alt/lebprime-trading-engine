@@ -56,6 +56,9 @@ class IndicatorEngine:
         sl = sum(1 for zone in closed if zone.terminal_state == "SL_HIT")
         be = sum(1 for zone in closed if zone.terminal_state == "BE_EXIT")
         r_values = [float(zone.result_r or 0.0) for zone in closed]
+        # A win is a trade that made money. Under the live execution model a TP1_FINAL can
+        # close below Entry 1, so counting TP states as wins would overstate the win rate.
+        wins = sum(1 for value in r_values if value > 0)
         gross_won = sum(value for value in r_values if value > 0)
         gross_lost = abs(sum(value for value in r_values if value < 0))
         equity = 0.0
@@ -88,7 +91,9 @@ class IndicatorEngine:
             "pending": sum(1 for zone in self._zones if zone.limit_created_bar_index is not None and zone.activated_bar_index is None and not zone.terminal_state),
             "active": sum(1 for zone in self._zones if zone.activated_bar_index is not None and not zone.terminal_state),
             "resolved_trades": len(closed),
-            "win_rate": (tp / len(closed) * 100.0) if closed else 0.0,
+            "wins": wins,
+            "win_rate": (wins / len(closed) * 100.0) if closed else 0.0,
+            "tp_touch_rate": (tp / len(closed) * 100.0) if closed else 0.0,
             "net_r": sum(r_values),
             "gross_r_won": gross_won,
             "gross_r_lost": gross_lost,

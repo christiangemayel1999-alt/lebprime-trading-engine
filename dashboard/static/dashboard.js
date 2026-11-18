@@ -138,6 +138,20 @@
     const toggle = (id, label, value) => `<div class="form-check form-switch"><input class="form-check-input" id="${id}" type="checkbox" ${value ? "checked" : ""}><label class="form-check-label" for="${id}">${esc(label)}</label></div>`;
     const select = (id, label, options, selected) => `<label class="form-label w-100"><span class="small text-secondary">${esc(label)}</span><select class="form-select" id="${id}">${options.map((option) => `<option ${option === selected ? "selected" : ""}>${esc(option)}</option>`).join("")}</select></label>`;
     const asObject = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+    // LebPrime symbols connected on the MT5 broker account. key = logical symbol used in config and zone IDs.
+    const LEBPRIME_SYMBOLS = [
+        { key: "XAUUSD", broker: "XAUUSD", name: "GOLD vs USD", buffer: "gold_buffer", bufferDefault: 1, step: "0.1" },
+        { key: "US30", broker: "US30", name: "US Wall Street 30 Index", buffer: "us30_buffer", bufferDefault: 30, step: "1" },
+        { key: "NAS100", broker: "USTEC", name: "US Tech 100 Index", buffer: "nas_buffer", bufferDefault: 15, step: "1" },
+        { key: "XAGUSD", broker: "XAGUSD", name: "Silver vs USD", buffer: "silver_buffer", bufferDefault: 0.1, step: "0.01" },
+        { key: "WTI", broker: "WTI", name: "Spot WTI Light Crude Oil", buffer: "wti_buffer", bufferDefault: 0.15, step: "0.01" },
+        { key: "EURUSD", broker: "EURUSD", name: "Euro vs US Dollar", buffer: "forex_buffer", bufferDefault: 0.0005, step: "0.0001" },
+    ];
+    const LEBPRIME_BROKER_SYMBOLS = LEBPRIME_SYMBOLS.map((item) => item.broker);
+    const lebprimeSymbolLabel = (item) => (item.broker === item.key ? item.key : `${item.broker} (${item.key})`);
+    const lebprimeSpreadId = (item) => `lebprime-spread-${item.key.toLowerCase()}`;
+    const lebprimeBufferId = (item) => `lebprime-buffer-${item.key.toLowerCase()}`;
+    const lebprimeSymbolCheckboxes = (selected = new Set()) => LEBPRIME_SYMBOLS.map((item) => `<label class="form-check-label" title="${esc(item.name)}"><input class="form-check-input me-1" type="checkbox" data-lebprime-symbol="${item.key}" ${selected.has(item.key) ? "checked" : ""}>${esc(lebprimeSymbolLabel(item))}</label>`).join("");
     const asArray = (value) => (Array.isArray(value) ? value : []);
     const textOr = (value, fallback = "") => {
         if (value === null || value === undefined) return fallback;
@@ -2342,7 +2356,7 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
                 <div class="row g-3 mb-3">
                     <div class="col-md-2"><label class="form-label small text-secondary">Enabled</label><div><input type="checkbox" id="lebprime-live-enabled" ${lebprimeConfig.enabled ? "checked" : ""}></div></div>
                     <div class="col-md-2"><label class="form-label small text-secondary">Live / Dry</label><select class="form-select" id="lebprime-live-mode"><option value="DRY" ${lebprimeConfig.execution_mode !== "LIVE" ? "selected" : ""}>Dry</option><option value="LIVE" ${lebprimeConfig.execution_mode === "LIVE" ? "selected" : ""}>Live (demo only)</option></select></div>
-                    <div class="col-md-4"><label class="form-label small text-secondary">Symbols</label><div class="d-flex flex-wrap gap-3">${["XAUUSD", "US30", "NAS100"].map((symbol) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-symbol="${symbol}" ${selectedSymbols.has(symbol) ? "checked" : ""}>${symbol}</label>`).join("")}</div></div>
+                    <div class="col-md-4"><label class="form-label small text-secondary">Symbols</label><div class="d-flex flex-wrap gap-3">${lebprimeSymbolCheckboxes(selectedSymbols)}</div></div>
                     <div class="col-md-4"><label class="form-label small text-secondary">Timeframes</label><div class="d-flex flex-wrap gap-3">${["M1", "M3", "M5", "M15", "M30", "M45"].map((timeframe) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-timeframe="${timeframe}" ${selectedTimeframes.has(timeframe) ? "checked" : ""}>${timeframe}</label>`).join("")}</div></div>
                 </div>
                 <div class="row g-2 mb-3">
@@ -2450,12 +2464,8 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
             timeframes: asArray(draft.timeframes),
             bars_to_fetch: String(draft.bars_to_fetch ?? ""),
             max_spread_points: String(draft.max_spread_points ?? ""),
-            xau_spread_points: String(draft.max_spread_points_by_symbol?.XAUUSD ?? ""),
-            us30_spread_points: String(draft.max_spread_points_by_symbol?.US30 ?? ""),
-            nas100_spread_points: String(draft.max_spread_points_by_symbol?.NAS100 ?? ""),
-            gold_buffer: String(draft.parameters?.gold_buffer ?? ""),
-            us30_buffer: String(draft.parameters?.us30_buffer ?? ""),
-            nas_buffer: String(draft.parameters?.nas_buffer ?? ""),
+            spreads: LEBPRIME_SYMBOLS.map((item) => String(draft.max_spread_points_by_symbol?.[item.key] ?? "")),
+            buffers: LEBPRIME_SYMBOLS.map((item) => String(draft.parameters?.[item.buffer] ?? "")),
         });
     }
 
@@ -2471,15 +2481,11 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
             max_spread_points: val("lebprime-spread"),
             max_spread_points_by_symbol: {
                 ...baseline.max_spread_points_by_symbol,
-                XAUUSD: val("lebprime-spread-xau"),
-                US30: val("lebprime-spread-us30"),
-                NAS100: val("lebprime-spread-nas100"),
+                ...Object.fromEntries(LEBPRIME_SYMBOLS.map((item) => [item.key, val(lebprimeSpreadId(item))])),
             },
             parameters: {
                 ...baseline.parameters,
-                gold_buffer: val("lebprime-gold-buffer"),
-                us30_buffer: val("lebprime-us30-buffer"),
-                nas_buffer: val("lebprime-nas-buffer"),
+                ...Object.fromEntries(LEBPRIME_SYMBOLS.map((item) => [item.buffer, val(lebprimeBufferId(item))])),
             },
         };
     }
@@ -2513,12 +2519,8 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
         if (!Number.isInteger(bars) || bars <= 0) return "Bars To Fetch must be a positive whole number.";
         const numericFields = [
             ["Max Spread Points", draft.max_spread_points],
-            ["XAUUSD Max Spread Points", draft.max_spread_points_by_symbol.XAUUSD],
-            ["US30 Max Spread Points", draft.max_spread_points_by_symbol.US30],
-            ["NAS100 Max Spread Points", draft.max_spread_points_by_symbol.NAS100],
-            ["Gold Buffer", draft.parameters.gold_buffer],
-            ["US30 Buffer", draft.parameters.us30_buffer],
-            ["NAS100 Buffer", draft.parameters.nas_buffer],
+            ...LEBPRIME_SYMBOLS.map((item) => [`${item.broker} Max Spread Points`, draft.max_spread_points_by_symbol[item.key]]),
+            ...LEBPRIME_SYMBOLS.map((item) => [`${item.broker} SL Buffer`, draft.parameters[item.buffer]]),
         ];
         const invalid = numericFields.find(([, value]) => value === "" || !Number.isFinite(Number(value)) || Number(value) < 0);
         return invalid ? `${invalid[0]} must be zero or greater.` : "";
@@ -2537,18 +2539,18 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
                     <div class="row g-3 mb-3">
                         <div class="col-md-2"><label class="form-label small text-secondary" for="lebprime-live-enabled">Enabled</label><div><input type="checkbox" id="lebprime-live-enabled"></div></div>
                         <div class="col-md-2"><label class="form-label small text-secondary" for="lebprime-live-mode">Execution</label><select class="form-select" id="lebprime-live-mode"><option value="DRY">DRY</option><option value="LIVE">LIVE DEMO</option></select></div>
-                        <div class="col-md-4"><div class="form-label small text-secondary">Symbols</div><div class="d-flex flex-wrap gap-3">${["XAUUSD", "US30", "NAS100"].map((symbol) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-symbol="${symbol}">${symbol}</label>`).join("")}</div></div>
+                        <div class="col-md-4"><div class="form-label small text-secondary">Symbols</div><div class="d-flex flex-wrap gap-3">${lebprimeSymbolCheckboxes()}</div></div>
                         <div class="col-md-4"><div class="form-label small text-secondary">Timeframes</div><div class="d-flex flex-wrap gap-3">${["M1", "M3", "M5", "M15", "M30", "M45"].map((timeframe) => `<label class="form-check-label"><input class="form-check-input me-1" type="checkbox" data-lebprime-timeframe="${timeframe}">${timeframe}</label>`).join("")}</div></div>
                     </div>
                     <div class="row g-3 mb-3">
                         <div class="col-6 col-lg-2">${field("lebprime-bars", "Bars To Fetch", "", "number", "1")}</div>
                         <div class="col-6 col-lg-2">${field("lebprime-spread", "Max Spread Points", "", "number", "0.1")}</div>
-                        <div class="col-6 col-lg-2">${field("lebprime-spread-xau", "XAUUSD Spread Max", "", "number", "0.1")}</div>
-                        <div class="col-6 col-lg-2">${field("lebprime-spread-us30", "US30 Spread Max", "", "number", "0.1")}</div>
-                        <div class="col-6 col-lg-2">${field("lebprime-spread-nas100", "NAS100 Spread Max", "", "number", "0.1")}</div>
-                        <div class="col-6 col-lg-2">${field("lebprime-gold-buffer", "Gold Buffer", "", "number", "0.1")}</div>
-                        <div class="col-6 col-lg-2">${field("lebprime-us30-buffer", "US30 Buffer", "", "number", "0.1")}</div>
-                        <div class="col-6 col-lg-2">${field("lebprime-nas-buffer", "NAS100 Buffer", "", "number", "0.1")}</div>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        ${LEBPRIME_SYMBOLS.map((item) => `<div class="col-6 col-lg-2">${field(lebprimeSpreadId(item), `${item.broker} Spread Max`, "", "number", "0.1")}</div>`).join("")}
+                    </div>
+                    <div class="row g-3 mb-3">
+                        ${LEBPRIME_SYMBOLS.map((item) => `<div class="col-6 col-lg-2">${field(lebprimeBufferId(item), `${item.broker} SL Buffer`, "", "number", item.step)}</div>`).join("")}
                     </div>
                     <div class="d-flex align-items-center gap-3 mb-4"><button class="btn btn-primary" id="save-lebprime-live">Save LebPrime v3.4.0</button><span class="small text-secondary" id="lebprime-draft-state">Saved</span></div>
                 </div>
@@ -2585,12 +2587,10 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
         document.querySelectorAll("[data-lebprime-timeframe]").forEach((node) => { node.checked = draft.timeframes.includes(node.dataset.lebprimeTimeframe); });
         document.getElementById("lebprime-bars").value = draft.bars_to_fetch;
         document.getElementById("lebprime-spread").value = draft.max_spread_points;
-        document.getElementById("lebprime-spread-xau").value = draft.max_spread_points_by_symbol.XAUUSD ?? draft.max_spread_points;
-        document.getElementById("lebprime-spread-us30").value = draft.max_spread_points_by_symbol.US30 ?? draft.max_spread_points;
-        document.getElementById("lebprime-spread-nas100").value = draft.max_spread_points_by_symbol.NAS100 ?? draft.max_spread_points;
-        document.getElementById("lebprime-gold-buffer").value = num(draft.parameters.gold_buffer, 1);
-        document.getElementById("lebprime-us30-buffer").value = num(draft.parameters.us30_buffer, 30);
-        document.getElementById("lebprime-nas-buffer").value = num(draft.parameters.nas_buffer, 15);
+        LEBPRIME_SYMBOLS.forEach((item) => {
+            document.getElementById(lebprimeSpreadId(item)).value = draft.max_spread_points_by_symbol[item.key] ?? draft.max_spread_points;
+            document.getElementById(lebprimeBufferId(item)).value = num(draft.parameters[item.buffer], item.bufferDefault);
+        });
         updateLebprimeDraftState();
     }
 
@@ -2611,16 +2611,10 @@ ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode |
             timeframes: localDraft.timeframes,
             bars_to_fetch: Number(localDraft.bars_to_fetch),
             max_spread_points: Number(localDraft.max_spread_points),
-            max_spread_points_by_symbol: {
-                XAUUSD: Number(localDraft.max_spread_points_by_symbol.XAUUSD),
-                US30: Number(localDraft.max_spread_points_by_symbol.US30),
-                NAS100: Number(localDraft.max_spread_points_by_symbol.NAS100),
-            },
+            max_spread_points_by_symbol: Object.fromEntries(LEBPRIME_SYMBOLS.map((item) => [item.key, Number(localDraft.max_spread_points_by_symbol[item.key])])),
             parameters: {
                 ...baseline.parameters,
-                gold_buffer: Number(localDraft.parameters.gold_buffer),
-                us30_buffer: Number(localDraft.parameters.us30_buffer),
-                nas_buffer: Number(localDraft.parameters.nas_buffer),
+                ...Object.fromEntries(LEBPRIME_SYMBOLS.map((item) => [item.buffer, Number(localDraft.parameters[item.buffer])])),
             },
         };
         state.strategiesUi.saving = true;
@@ -4317,7 +4311,7 @@ const brokerEntries = asArray(status.broker_entries);
                         <h3 class="h6 text-uppercase text-secondary fw-semibold">Datasets</h3>
                         <div class="row g-2 mb-3">
                             <div class="col-12">${field("il-ds-name", "Name", draft.dataset.name ?? "XAUUSD_M1_2026_08_01_2026_09_14")}</div>
-                            <div class="col-6">${field("il-ds-symbol", "Symbol", draft.dataset.symbol ?? "XAUUSD")}</div>
+                            <div class="col-6">${select("il-ds-symbol", "Symbol", LEBPRIME_BROKER_SYMBOLS, draft.dataset.symbol ?? "XAUUSD")}</div>
                             <div class="col-6">${select("il-ds-timeframe", "Timeframe", ["M1", "M3", "M5", "M15", "M30", "H1"], draft.dataset.timeframe ?? "M1")}</div>
                             <div class="col-6">${field("il-ds-start", "Start", draft.dataset.start_date ?? "", "date")}</div>
                             <div class="col-6">${field("il-ds-end", "End", draft.dataset.end_date ?? "", "date")}</div>

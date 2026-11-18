@@ -15,7 +15,7 @@ import pandas as pd
 from services.indicator_lab.lebprime_engine import LebPrimeEngine
 from services.indicator_lab.models import Candle, ZoneEvent, ZoneRecord
 from services.lebprime_live.repository import LebPrimeLiveRepository
-from services.lebprime_live.symbols import SYMBOLS, SymbolMapping, resolve_symbol
+from services.lebprime_live.symbols import DEFAULT_SYMBOLS, SYMBOLS, SymbolMapping, resolve_symbol
 from services.lebprime_live.timeframes import TIMEFRAMES, aggregate_m45, normalize_lebprime_timeframe
 
 
@@ -123,7 +123,7 @@ class LebPrimeLiveService:
         return parameters
 
     def _selected_symbols(self) -> list[str]:
-        configured = self._strategy_config().get("symbols", list(SYMBOLS))
+        configured = self._strategy_config().get("symbols", list(DEFAULT_SYMBOLS))
         return [resolve_symbol(item).logical_symbol for item in configured]
 
     def _selected_timeframes(self) -> list[str]:

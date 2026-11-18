@@ -38,3 +38,26 @@ LIVE mode requires MT5 `account_info.trade_mode` to equal
 `ACCOUNT_NOT_CONFIRMED_DEMO`. Entry1 and Entry2 are GTC LIMIT orders, each sized
 by the existing risk manager with `0.5` risk adjustment so the pair does not
 double total configured risk.
+
+## Execution model (Indicator Lab and live engine)
+
+`execution_model` selects how the engine settles a signal:
+
+- `Live broker` (default) mirrors the MT5 runtime: Entry 1 and Entry 2 are resting
+  LIMIT orders that fill on any touch after the LIMIT CREATED candle (at the open on a
+  gap); SL and TP2 trigger on a touch, including on the fill candle; when SL and a target
+  share a candle, SL is assumed first; the TP1 half-close and the post-TP1 return to
+  Entry 1 exit at the candle close, as the bot acts on closed candles. Each entry carries
+  half of the configured risk, so a full stop is -1R. Win rate counts trades with
+  `result_r > 0`; `tp_touch_rate` keeps the old TP-touch figure.
+- `Pine indicator` reproduces the TradingView v3.4.0/v3.4.1 scoring (body-close SL,
+  TP priority, fixed +1R/+2R results) for chart comparisons.
+
+Spread and commission are not deducted yet.
+
+## Broker symbols
+
+Selectable logical -> MT5 symbols: XAUUSD -> XAUUSD, US30 -> US30, NAS100 -> USTEC,
+XAGUSD -> XAGUSD, WTI -> WTI, EURUSD -> EURUSD. Without a `symbols` list in config the
+runtime still defaults to XAUUSD, US30 and NAS100. EURUSD uses the Pine forex SL buffer
+(0.0005). Indicator Lab datasets drop the still-forming last candle when frozen.

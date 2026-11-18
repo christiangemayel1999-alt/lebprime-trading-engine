@@ -31,8 +31,11 @@ def test_final_strategy_page_contains_required_controls_and_metrics() -> None:
     source = (ROOT / "dashboard" / "static" / "dashboard.js").read_text(encoding="utf-8")
     editor = source.split("function mountLebprimeStrategyEditor()", 1)[1].split("function syncLebprimeStrategyEditor()", 1)[0]
 
-    for label in ("lebprime_v3_4_0", "Enabled", "DRY", "LIVE DEMO", "XAUUSD", "US30", "NAS100"):
+    for label in ("lebprime_v3_4_0", "Enabled", "DRY", "LIVE DEMO", "lebprimeSymbolCheckboxes()"):
         assert label in editor
+    symbol_list = source.split("const LEBPRIME_SYMBOLS = [", 1)[1].split("];", 1)[0]
+    for broker_symbol in ("EURUSD", "XAUUSD", "US30", "USTEC", "WTI", "XAGUSD"):
+        assert f'broker: "{broker_symbol}"' in symbol_list
     for timeframe in ("M1", "M3", "M5", "M15", "M30", "M45"):
         assert timeframe in editor
     for metric in ("Families", "Pending Orders", "Broker Orders", "Open Positions", "Duplicate Suppressed"):

@@ -429,13 +429,15 @@ class ConfigManager:
             lebprime_mode = str(lebprime_cfg.get("execution_mode", "DRY")).upper()
             if lebprime_mode not in {"DRY", "LIVE"}:
                 raise ValueError("lebprime_v3_4_0.execution_mode must be DRY or LIVE")
-            lebprime_symbols = lebprime_cfg.get("symbols", ["XAUUSD", "US30", "NAS100"])
+            from services.lebprime_live.symbols import ACCEPTED_SYMBOL_NAMES, DEFAULT_SYMBOLS, SYMBOLS as LEBPRIME_SYMBOLS
+
+            lebprime_symbols = lebprime_cfg.get("symbols", list(DEFAULT_SYMBOLS))
             lebprime_timeframes = lebprime_cfg.get("timeframes", ["M1", "M3", "M5", "M15", "M30", "M45"])
             if not isinstance(lebprime_symbols, list) or not lebprime_symbols:
                 raise ValueError("lebprime_v3_4_0.symbols must contain at least one logical symbol")
             if not isinstance(lebprime_timeframes, list) or not lebprime_timeframes:
                 raise ValueError("lebprime_v3_4_0.timeframes must contain at least one timeframe")
-            invalid_symbols = sorted({str(item).upper() for item in lebprime_symbols} - {"XAUUSD", "US30", "NAS100"})
+            invalid_symbols = sorted({str(item).upper() for item in lebprime_symbols} - set(LEBPRIME_SYMBOLS))
             invalid_timeframes = sorted({str(item).upper() for item in lebprime_timeframes} - {"M1", "M3", "M5", "M15", "M30", "M45"})
             if invalid_symbols:
                 raise ValueError(f"Unsupported lebprime_v3_4_0 symbols: {', '.join(invalid_symbols)}")
@@ -446,7 +448,7 @@ class ConfigManager:
             spread_limits = lebprime_cfg.get("max_spread_points_by_symbol", {})
             if not isinstance(spread_limits, dict):
                 raise ValueError("lebprime_v3_4_0.max_spread_points_by_symbol must be an object")
-            invalid_spread_symbols = sorted({str(key).upper() for key in spread_limits} - {"XAUUSD", "US30", "NAS100", "USTEC"})
+            invalid_spread_symbols = sorted({str(key).upper() for key in spread_limits} - ACCEPTED_SYMBOL_NAMES)
             if invalid_spread_symbols:
                 raise ValueError(f"Unsupported LebPrime spread symbols: {', '.join(invalid_spread_symbols)}")
             for symbol, value in spread_limits.items():

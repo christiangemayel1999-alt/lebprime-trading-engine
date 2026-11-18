@@ -225,7 +225,7 @@ def test_lebprime_v34_width_clamp_clean_departure_and_hidden_candidate():
 
 
 def test_lebprime_v34_entry2_tp1_tp2_and_sl_body_close_rules():
-    params = default_parameters("LEBPRIME")
+    params = {**default_parameters("LEBPRIME"), "execution_model": "Pine indicator"}
     engine = LebPrimeEngine(params)
     demand = ZoneRecord(
         engine_zone_id="demand-v34",

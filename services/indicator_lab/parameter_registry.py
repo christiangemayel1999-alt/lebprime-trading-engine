@@ -39,6 +39,7 @@ LEBPRIME_PARAMETERS: list[dict[str, Any]] = [
     {"name": "show_historic", "pine_name": "i_showHistoric", "label": "Show historic invalidated zones", "type": "bool", "default": True, "group": "Zone Lifecycle"},
     {"name": "max_zones", "pine_name": "i_maxZones", "label": "Maximum live zones per side", "type": "int", "default": 30, "min": 1, "max": 100, "step": 1, "group": "Zone Lifecycle"},
     {"name": "max_historic_zones", "pine_name": "i_maxHistoricZones", "label": "Maximum historic terminal zones per side", "type": "int", "default": 15, "min": 0, "max": 20, "step": 1, "group": "Zone Lifecycle"},
+    {"name": "execution_model", "pine_name": "", "label": "Trade execution model", "type": "enum", "default": "Live broker", "values": ["Live broker", "Pine indicator"], "group": "TP / SL"},
     {"name": "show_tpsl", "pine_name": "i_showTPSL", "label": "Show TP1 / TP2 / SL", "type": "bool", "default": True, "group": "TP / SL"},
     {"name": "gold_buffer", "pine_name": "i_goldBuffer", "label": "Gold / XAUUSD SL buffer", "type": "float", "default": 1.0, "min": 0.0, "max": None, "step": 0.1, "group": "SL Buffers - Built-in"},
     {"name": "silver_buffer", "pine_name": "i_silverBuffer", "label": "Silver / XAGUSD SL buffer", "type": "float", "default": 0.10, "min": 0.0, "max": None, "step": 0.01, "group": "SL Buffers - Built-in"},

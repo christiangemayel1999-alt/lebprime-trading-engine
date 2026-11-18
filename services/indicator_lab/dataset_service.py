@@ -19,6 +19,17 @@ from utils import ensure_directory, utc_now, validate_ohlc_dataframe
 DATASET_SOURCE_MT5 = "MT5"
 DATASET_SOURCE_CSV = "CSV"
 DATASET_STATES = {"CREATING", "READY", "FAILED"}
+TIMEFRAME_MINUTES = {"M1": 1, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60, "H4": 240, "D1": 1440}
+
+
+def drop_unclosed_bars(frame: pd.DataFrame, timeframe: str, now: datetime) -> pd.DataFrame:
+    """Remove candles that had not closed yet at ``now`` (MT5 returns the forming candle too)."""
+    minutes = TIMEFRAME_MINUTES.get(str(timeframe).upper())
+    if not minutes or frame.empty:
+        return frame
+    opened = pd.to_datetime(frame["timestamp_utc"], utc=True)
+    closes = opened + pd.Timedelta(minutes=minutes)
+    return frame.loc[closes <= pd.Timestamp(now)].reset_index(drop=True)
 
 
 class IndicatorDatasetService:
@@ -159,7 +170,9 @@ class IndicatorDatasetService:
             frame = loader._load_mt5_bars(connector, symbol, timeframe, start_dt, end_dt, min_rows=1)
             if frame.empty:
                 raise ValueError("MT5 returned no bars for requested range")
-            frozen = self.normalize_frame(frame)
+            frozen = drop_unclosed_bars(self.normalize_frame(frame), timeframe, utc_now())
+            if frozen.empty:
+                raise ValueError("MT5 returned no closed bars for requested range")
             valid, reason = validate_ohlc_dataframe(frozen.rename(columns={"timestamp_utc": "time"}), min_rows=1)
             if not valid:
                 raise ValueError(reason)
