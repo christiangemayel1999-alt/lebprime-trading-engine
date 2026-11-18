@@ -258,6 +258,8 @@ def resolve_execution_mode(
 def apply_execution_mode_to_config(
     config: dict[str, Any],
     requested_mode: str | None = None,
+    *,
+    apply_legacy_strategy_controls: bool = True,
 ) -> tuple[dict[str, Any], ResolvedExecutionMode]:
     cfg = config or {}
     cfg.setdefault("bot", {})
@@ -270,11 +272,12 @@ def apply_execution_mode_to_config(
     cfg.setdefault("backtest", {})
 
     resolved = resolve_execution_mode(cfg, requested_mode=requested_mode)
-    cfg["bot"]["execution_mode"] = resolved.selected_mode
-    if resolved.config_patch:
+    if apply_legacy_strategy_controls or "execution_mode" in cfg["bot"]:
+        cfg["bot"]["execution_mode"] = resolved.selected_mode
+    if resolved.config_patch and apply_legacy_strategy_controls:
         _deep_merge(cfg, deepcopy(resolved.config_patch))
 
-    if resolved.selected_mode != CUSTOM:
+    if resolved.selected_mode != CUSTOM and apply_legacy_strategy_controls:
         enabled_keys = set(resolved.enabled_family_keys)
         for key in FAMILY_KEY_TO_NAME:
             family_cfg = strategy_cfg["setup_families"].setdefault(key, {})

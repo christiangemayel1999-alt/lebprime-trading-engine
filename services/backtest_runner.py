@@ -795,7 +795,12 @@ class BacktestRunner:
         self._validate_backtest_request(request)
         
         start_dt, end_dt = self._parse_date_range(request["start_date"], request.get("end_date"))
-        requested_engine_mode = str(request.get("engine_mode") or self.config.get("bot", {}).get("execution_mode") or "")
+        requested_engine_mode = str(
+            request.get("engine_mode")
+            or self.config.get("bot", {}).get("execution_mode")
+            or self.config.get("backtest", {}).get("historical_engine_mode")
+            or ""
+        )
         run_config = deepcopy(self.config)
         run_config, resolved_mode = apply_execution_mode_to_config(run_config, requested_engine_mode)
         config_overrides = dict(request.get("config_overrides") or {})

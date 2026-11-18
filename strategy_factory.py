@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,17 @@ from trading_bot.strategy.engine import UnifiedStrategyEngine
 
 LEGACY_ENGINE_TYPE = "legacy_strategy_engine"
 UNIFIED_ENGINE_TYPE = "unified_strategy_engine"
+LIVE_SUPPORT_ENGINE_TYPE = "live_runtime_support_engine"
+IGNORED_LEGACY_LIVE_CONTROL_KEYS = (
+    "bot.execution_mode",
+    "bot.rollout_phase",
+    "strategy.lebprim_mode",
+    "strategy.setup_controls.<legacy_strategy>.enabled",
+    "strategy.setup_controls.<legacy_strategy>.live_allowed",
+    "strategy.setup_families.<legacy_strategy>.enabled",
+    "strategy.setup_families.<legacy_strategy>.live_allowed",
+    "backtest.selected_strategies",
+)
 
 
 class StrategyEngineBase(ABC):
@@ -50,6 +62,26 @@ def build_strategy_engine(config: dict[str, Any], base_dir: str | Path | None = 
     _apply_engine_type_summary(resolved_config, UNIFIED_ENGINE_TYPE)
     engine = UnifiedStrategyEngine(resolved_config, base_dir=base_dir)
     engine.engine_type = UNIFIED_ENGINE_TYPE  # Set as instance attribute instead of setattr
+    return engine
+
+
+def build_live_runtime_support_engine(config: dict[str, Any], base_dir: str | Path | None = None) -> StrategyEngineBase:
+    """Build a non-trading compatibility engine for the LebPrime live runtime.
+
+    The main loop still uses session classification supplied by the unified engine,
+    but all legacy setup families are disabled in this private config copy. Backtest
+    and historical callers continue to use ``build_strategy_engine`` unchanged.
+    """
+    support_config = deepcopy(config)
+    strategy_config = support_config.setdefault("strategy", {})
+    for section_name in ("setup_controls", "setup_families"):
+        section = strategy_config.setdefault(section_name, {})
+        for setup in section.values():
+            if isinstance(setup, dict):
+                setup["enabled"] = False
+                setup["live_allowed"] = False
+    engine = UnifiedStrategyEngine(support_config, base_dir=base_dir)
+    engine.engine_type = LIVE_SUPPORT_ENGINE_TYPE
     return engine
 
 

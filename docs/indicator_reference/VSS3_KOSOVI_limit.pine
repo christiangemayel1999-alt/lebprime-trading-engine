@@ -1,0 +1,2008 @@
+//@version=5
+const bool DEBUG = false
+const int maxBoxesCount = 500
+const float overlapThresholdPercentage = 0.0
+int maxDistanceToLastBar = 1250 // Affects Running Time
+// Lightweight raw-zone preparation plus a smaller hidden trade-state buffer.
+// This keeps Replay context stable without exceeding TradingView's 40-second limit.
+const int zoneStateWarmupBars = 5000
+const int tradeStateWarmupBars = 2000
+const int maxSDZones = 30
+const int minZoneSize = 10
+const int RETEST_COOLDOWN   = 5
+const int minDistanceBetweenZones = 5
+const float maxZoneSizeATR = 1.5
+const float minFlippedOrderDistancePercent = 0.10
+
+indicator(title = 'VSS3 KOSOVI limit ', shorttitle = "VSS3 KOSOVI limit", overlay = true, max_boxes_count = maxBoxesCount, max_labels_count = maxBoxesCount, max_lines_count = maxBoxesCount, max_bars_back = 2000, dynamic_requests = true)
+
+// ==============================================================================
+// FIXED TP / SL VALUES - hidden from inputs
+// ==============================================================================
+slMethod = "Previous Box Swing"
+goldSL = 1.0
+us30SL = 30.0
+nasdaqSL = 15.0
+wtiSL = 0.15
+tpRR = 1.0
+
+// TP / SL lines are hidden by default now.
+showTpSlLines = false
+tpSlLineBars = 50
+
+// Close-stop swing is calculated automatically from the first IDM/liquidity swing AFTER the LIMIT box.
+swingPivotLen = 2
+maxAfterBoxSwingBars = 60
+
+maxDistanceString   = "High"
+sdEndMethod = "Close"
+combineSDs = DEBUG ? input.bool(true, "Combine Zones", group = "General Configuration", display = display.none) : true
+momentumBodyMult = DEBUG ? input.float(0.5, "Momentum Body Mult", step = 0.1, group = "General Configuration") : 0.5
+momentumCount = DEBUG ? input.int(4,"Momentum Count", group = "General Configuration") : 4
+momentumSpan = DEBUG ? input.int(4, "Momentum Span", group = "General Configuration") : 4
+//zoneCount = input.string("High", 'Zone Count', options = ["High", "Medium", "Low", "One"], tooltip = "Number of S&D Zones to be rendered. Higher options will result in older S&Ds shown.",  group = "General Configuration", display = display.none)
+zoneCount = "High"
+retestsEnabled  = true
+breaksEnabled   = false
+showInvalidated = false
+bullSDZoneColor = #0899818C
+bearSDZoneColor = #f236468C
+
+timeframe1Enabled = true
+timeframe1 = ""
+timeframe2Enabled = false
+timeframe2 = "15"
+timeframe3Enabled = false
+timeframe3 = "30"
+
+textColor = input.color(#ffffffcc, "Text Color", group = "Style", display = display.none)
+buyEntryTextColor = input.color(color.green, "Buy Entry Text Color", group = "Style", display = display.none)
+sellEntryTextColor = input.color(color.red, "Sell Entry Text Color", group = "Style", display = display.none)
+visualTextSizeInput = input.string("Tiny", "Visual Text Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="Style", tooltip = "Controls the label and text size of BUY/SELL LIMIT, CLOSE STOP, TP, and trade-management visuals.", display = display.none)
+visualTextSize = visualTextSizeInput == "Tiny" ? size.tiny : visualTextSizeInput == "Small" ? size.small : visualTextSizeInput == "Normal" ? size.normal : visualTextSizeInput == "Large" ? size.large : size.huge
+visualFontFamily = font.family_monospace
+activatedTextSize = size.tiny
+activatedFontFamily = font.family_default
+stopVisualColor = input.color(#E040FB, "Stop Color", group = "Style")
+sellStopVisualColor = stopVisualColor
+labelsAtSameLevel   = DEBUG ? input.bool(true, "[DBG] Place Labels At Same Level", group = "Style") : true
+labelsAtSameLevelBreak = false
+
+// ==============================================================================
+// SIGNAL SETTINGS
+// ==============================================================================
+showHistoricalSignals = true
+maxSignalsToShow      = 100
+minDistancePercent    = 0.15
+applyMinDistanceToZones = true
+showCloseStopVisual   = true
+closeStopLineBars     = 25
+
+// Clean visual layout - hidden constants.
+visualLabelOffsetBars = 2
+zoneFillTransparency = 70
+zoneBorderTransparency = 5
+buyVisualColor = #00C853
+sellVisualColor = #FF5252
+beVisualColor = #2962FF
+activatedVisualColor = #F57C00
+
+// Hidden BE visual settings. Change from code only.
+showBEVisualLine = true
+beTriggerR = 0.85
+
+hideActivatedZones = input.bool(false, "Hide Activated Zones", group = "Style")
+hideActivatedAfterMinutes = input.int(60, "Hide Activated After Minutes", minval = 1, group = "Style", display = display.none)
+hideActivatedDelayMs = hideActivatedAfterMinutes * 60 * 1000
+
+
+// ==============================================================================
+// TRADE MANAGEMENT VISUAL
+// ==============================================================================
+// Trade Management labels hidden from inputs and disabled for public/invite users.
+showManagementVisual = false
+showEntryFilledLabels = false
+showMoveSLLabels = false
+showClose50Labels = false
+spreadBuffer = 0.0
+
+// ==============================================================================
+// BASIC VALUES
+// ==============================================================================
+atr = ta.atr(20)
+averageBodySize = ta.sma(math.abs(close - open), 20)
+
+// ==============================================================================
+// AFTER-BOX IDM / LIQUIDITY SWING STORAGE - hidden
+// ==============================================================================
+pivotHighValue = ta.pivothigh(high, swingPivotLen, swingPivotLen)
+pivotLowValue  = ta.pivotlow(low, swingPivotLen, swingPivotLen)
+
+var array<int> swingHighTimes = array.new<int>()
+var array<float> swingHighValues = array.new<float>()
+var array<int> swingLowTimes = array.new<int>()
+var array<float> swingLowValues = array.new<float>()
+
+if not na(pivotHighValue)
+    array.push(swingHighTimes, time[swingPivotLen])
+    array.push(swingHighValues, pivotHighValue)
+    if array.size(swingHighTimes) > 300
+        array.shift(swingHighTimes)
+        array.shift(swingHighValues)
+
+if not na(pivotLowValue)
+    array.push(swingLowTimes, time[swingPivotLen])
+    array.push(swingLowValues, pivotLowValue)
+    if array.size(swingLowTimes) > 300
+        array.shift(swingLowTimes)
+        array.shift(swingLowValues)
+
+getFirstSwingHighAfterBox(_boxStartTime, _fallback) =>
+    float result = _fallback
+    int maxAfterMs = timeframe.in_seconds() * maxAfterBoxSwingBars * 1000
+    if array.size(swingHighTimes) > 0
+        for x = 0 to array.size(swingHighTimes) - 1
+            swingTime = array.get(swingHighTimes, x)
+            swingVal = array.get(swingHighValues, x)
+            if swingTime > _boxStartTime and (swingTime - _boxStartTime) <= maxAfterMs
+                result := swingVal
+                break
+    result
+
+getFirstSwingLowAfterBox(_boxStartTime, _fallback) =>
+    float result = _fallback
+    int maxAfterMs = timeframe.in_seconds() * maxAfterBoxSwingBars * 1000
+    if array.size(swingLowTimes) > 0
+        for x = 0 to array.size(swingLowTimes) - 1
+            swingTime = array.get(swingLowTimes, x)
+            swingVal = array.get(swingLowValues, x)
+            if swingTime > _boxStartTime and (swingTime - _boxStartTime) <= maxAfterMs
+                result := swingVal
+                break
+    result
+
+// Close-stop source:
+// SELL close stop = first confirmed IDM/liquidity swing high AFTER the SUPPLY box + hidden room.
+// BUY close stop  = first confirmed IDM/liquidity swing low AFTER the DEMAND box - hidden room.
+// Fallback only: if no after-box pivot exists, use the box edge with the same room.
+
+maxDistanceToLastBar := maxDistanceString == "Low" ? 150 : maxDistanceString == "Normal" ? 500 : 1250
+
+demandZones = zoneCount == "One" ? 1 : zoneCount == "Low" ? 3 : zoneCount == "Medium" ? 5 : 30
+supplyZones = zoneCount == "One" ? 1 : zoneCount == "Low" ? 3 : zoneCount == "Medium" ? 5 : 30
+
+// ==============================================================================
+// TYPES
+// ==============================================================================
+type sdZoneInfo
+    float top
+    float bottom
+    string sdType
+    int startTime
+    int breakTime
+    int guid
+    float sourceSwingHigh = na
+    float sourceSwingLow = na
+    string timeframeStr
+    bool disabled = false
+    string combinedTimeframesStr = na
+    bool combined = false
+    // A failed original zone can become one opposite zone only.
+    bool isFlipped = false
+    int parentGuid = na
+    int createdTime = na
+    int flipTime = na
+    // Visual-only snapshot created after a real LIMIT is printed.
+    // It never participates in zone discovery, merging, entries, TP, SL, or alerts.
+    bool lockedTradeHistory = false
+
+type sdZone
+    sdZoneInfo info
+    bool isRendered = false
+    box sdBox = na
+    line sdBoxLineTop = na
+    line sdBoxLineMiddle = na
+    line sdBoxLineBottom = na
+    box sdBoxText = na
+    label entryTextLabel = na
+
+type retestLabelContainer
+    int guid
+    array<label> labels
+
+createSDZone (sdZoneInfo sdZoneInfoF) =>
+    sdZone newSDZone = sdZone.new(sdZoneInfoF)
+    newSDZone
+
+safeDeleteSDZone (sdZone sdZoneF) =>
+    sdZoneF.isRendered := false
+    box.delete(sdZoneF.sdBox)
+    box.delete(sdZoneF.sdBoxText)
+    line.delete(sdZoneF.sdBoxLineTop)
+    line.delete(sdZoneF.sdBoxLineMiddle)
+    line.delete(sdZoneF.sdBoxLineBottom)
+    label.delete(sdZoneF.entryTextLabel)
+
+type timeframeInfo
+    int index = na
+    string timeframeStr = na
+    bool isEnabled = false
+    sdZoneInfo[] demandZonesList = na
+    sdZoneInfo[] supplyZonesList = na
+
+newTimeframeInfo (index, timeframeStr, isEnabled) =>
+    newTFInfo = timeframeInfo.new()
+    newTFInfo.index := index
+    newTFInfo.isEnabled := isEnabled
+    newTFInfo.timeframeStr := timeframeStr
+    newTFInfo
+
+// ==============================================================================
+// GLOBAL ARRAYS / MAPS
+// ==============================================================================
+var timeframeInfo[] timeframeInfos = array.from(newTimeframeInfo(1, timeframe1, timeframe1Enabled), newTimeframeInfo(2, timeframe2, timeframe2Enabled), newTimeframeInfo(3, timeframe3, timeframe3Enabled))
+var demandZonesList = array.new<sdZoneInfo>(0)
+var supplyZonesList = array.new<sdZoneInfo>(0)
+var breakLabels = map.new<int, label>()
+var retestLabels = map.new<int, retestLabelContainer>()
+var allSDZonesList = array.new<sdZone>(0)
+var lockedTradeZoneVisuals = array.new<sdZone>(0)
+var array<label> signalLabels = array.new<label>()
+
+var map<int, bool> signaledSellZones = map.new<int, bool>()
+var map<int, bool> signaledBuyZones  = map.new<int, bool>()
+var map<int, bool> activatedSellZones = map.new<int, bool>()
+var map<int, bool> activatedBuyZones  = map.new<int, bool>()
+var map<int, int> activatedSellTimes = map.new<int, int>()
+var map<int, int> activatedBuyTimes  = map.new<int, int>()
+var map<int, float> limitTPVisualLevels = map.new<int, float>()
+var map<int, bool> blockedByFlippedSpacing = map.new<int, bool>()
+
+// Original zones that already failed and were replaced by one opposite zone.
+// The marker prevents duplicate conversion while the original remains frozen historically.
+var map<int, bool> convertedOriginalZones = map.new<int, bool>()
+var flippedZonesList = array.new<sdZoneInfo>(0)
+
+// Dynamic visual objects that should follow the right edge of the box.
+var array<int> limitLabelGuids = array.new<int>()
+var array<label> limitLabelRefs = array.new<label>()
+var array<int> stopVisualGuids = array.new<int>()
+var array<line> stopLineRefs = array.new<line>()
+var array<label> stopLabelRefs = array.new<label>()
+var array<int> activatedLabelGuids = array.new<int>()
+var array<label> activatedLabelRefs = array.new<label>()
+
+// BE visual objects only. These do not change entry / zone / alert logic.
+var array<int> beVisualGuids = array.new<int>()
+var array<line> beLineRefs = array.new<line>()
+var array<label> beLabelRefs = array.new<label>()
+
+isLockedTradeZoneGuid(int _guid) =>
+    bool found = false
+    if lockedTradeZoneVisuals.size() > 0
+        for lz = 0 to lockedTradeZoneVisuals.size() - 1
+            lockedCandidate = lockedTradeZoneVisuals.get(lz)
+            if lockedCandidate.info.guid == _guid
+                found := true
+                break
+    found
+
+lockTradeZoneVisual(sdZoneInfo _info) =>
+    if not isLockedTradeZoneGuid(_info.guid)
+        lockedInfo = sdZoneInfo.copy(_info)
+        lockedInfo.disabled := false
+        lockedInfo.lockedTradeHistory := true
+        lockedTradeZoneVisuals.unshift(createSDZone(lockedInfo))
+        if lockedTradeZoneVisuals.size() > maxSignalsToShow
+            oldestLockedVisual = lockedTradeZoneVisuals.pop()
+            safeDeleteSDZone(oldestLockedVisual)
+
+syncLockedTradeZoneBreakTime(sdZoneInfo _info) =>
+    if not na(_info.breakTime) and lockedTradeZoneVisuals.size() > 0
+        for lz = 0 to lockedTradeZoneVisuals.size() - 1
+            lockedVisual = lockedTradeZoneVisuals.get(lz)
+            if lockedVisual.info.guid == _info.guid
+                lockedVisual.info.breakTime := math.max(nz(lockedVisual.info.breakTime, _info.breakTime), _info.breakTime)
+                lockedTradeZoneVisuals.set(lz, lockedVisual)
+                break
+
+hideVisualsForGuid(_guid) =>
+    if array.size(limitLabelGuids) > 0
+        for hx = array.size(limitLabelGuids) - 1 to 0
+            if array.get(limitLabelGuids, hx) == _guid
+                label.delete(array.get(limitLabelRefs, hx))
+                array.remove(limitLabelGuids, hx)
+                array.remove(limitLabelRefs, hx)
+
+    if array.size(stopVisualGuids) > 0
+        for sx = array.size(stopVisualGuids) - 1 to 0
+            if array.get(stopVisualGuids, sx) == _guid
+                line.delete(array.get(stopLineRefs, sx))
+                label.delete(array.get(stopLabelRefs, sx))
+                array.remove(stopVisualGuids, sx)
+                array.remove(stopLineRefs, sx)
+                array.remove(stopLabelRefs, sx)
+
+    if array.size(activatedLabelGuids) > 0
+        for ax = array.size(activatedLabelGuids) - 1 to 0
+            if array.get(activatedLabelGuids, ax) == _guid
+                label.delete(array.get(activatedLabelRefs, ax))
+                array.remove(activatedLabelGuids, ax)
+                array.remove(activatedLabelRefs, ax)
+
+    if array.size(beVisualGuids) > 0
+        for bx = array.size(beVisualGuids) - 1 to 0
+            if array.get(beVisualGuids, bx) == _guid
+                line.delete(array.get(beLineRefs, bx))
+                label.delete(array.get(beLabelRefs, bx))
+                array.remove(beVisualGuids, bx)
+                array.remove(beLineRefs, bx)
+                array.remove(beLabelRefs, bx)
+
+var int oldestBarTime = na
+if na(oldestBarTime) and bar_index >= math.max(0, last_bar_index - maxDistanceToLastBar)
+    oldestBarTime := time
+
+// ==============================================================================
+// HELPERS
+// ==============================================================================
+moveLine(_line, _x, _y, _x2) =>
+    line.set_xy1(_line, _x,  _y)
+    line.set_xy2(_line, _x2, _y)
+
+moveBox (_box, _topLeftX, _topLeftY, _bottomRightX, _bottomRightY) =>
+    box.set_lefttop(_box, _topLeftX, _topLeftY)
+    box.set_rightbottom(_box, _bottomRightX, _bottomRightY)
+
+isTimeframeLower (timeframe1F, timeframe2F) =>
+    timeframe.in_seconds(timeframe1F) < timeframe.in_seconds(timeframe2F)
+
+getMinTimeframe (timeframe1F, timeframe2F) =>
+    if isTimeframeLower(timeframe1F, timeframe2F)
+        timeframe1F
+    else
+        timeframe2F
+
+getMaxTimeframe (timeframe1F, timeframe2F) =>
+    if isTimeframeLower(timeframe1F, timeframe2F)
+        timeframe2F
+    else
+        timeframe1F
+
+formatTimeframeString (formatTimeframe) =>
+    timeframeF = formatTimeframe == "" ? timeframe.period : formatTimeframe
+    if str.contains(timeframeF, "D") or str.contains(timeframeF, "W") or str.contains(timeframeF, "S") or str.contains(timeframeF, "M")
+        timeframeF
+    else
+        seconds = timeframe.in_seconds(timeframeF)
+        if seconds >= 3600
+            hourCount = int(seconds / 3600)
+            str.tostring(hourCount) + " Hour" + (hourCount > 1 ? "s" : "")
+        else
+            timeframeF + " Min"
+
+colorWithTransparency (colorF, transparencyX) =>
+    color.new(colorF, color.t(colorF) * transparencyX)
+
+createSDBox (boxColor, transparencyX = 1.0, xlocType = xloc.bar_time) =>
+    box.new(na, na, na, na, xloc = xlocType, extend = extend.none, bgcolor = color.new(boxColor, zoneFillTransparency), border_color = color.new(boxColor, zoneBorderTransparency), border_width = 1)
+
+sellStopConfirmedByBodyClose(_stopLevel) =>
+    candleBodyTop = math.max(open, close)
+    candleBodyBottom = math.min(open, close)
+    candleBodySize = candleBodyTop - candleBodyBottom
+    candleBodyAboveStop = math.max(0.0, candleBodyTop - math.max(candleBodyBottom, _stopLevel))
+    close > _stopLevel and candleBodySize > 0 and candleBodyAboveStop >= candleBodySize * 0.5
+
+buyStopConfirmedByBodyClose(_stopLevel) =>
+    candleBodyTop = math.max(open, close)
+    candleBodyBottom = math.min(open, close)
+    candleBodySize = candleBodyTop - candleBodyBottom
+    candleBodyBelowStop = math.max(0.0, math.min(candleBodyTop, _stopLevel) - candleBodyBottom)
+    close < _stopLevel and candleBodySize > 0 and candleBodyBelowStop >= candleBodySize * 0.5
+
+renderSDZone (sdZone sd) =>
+    sdZoneInfo info = sd.info
+    sd.isRendered := true
+    sdColor = sd.info.sdType == "Demand" ? bullSDZoneColor : bearSDZoneColor
+    isSellSignalZone = nz(signaledSellZones.get(info.guid), false)
+    isBuySignalZone  = nz(signaledBuyZones.get(info.guid), false)
+    sellActivatedTime = activatedSellTimes.get(info.guid)
+    buyActivatedTime  = activatedBuyTimes.get(info.guid)
+    activatedTime = not na(sellActivatedTime) ? sellActivatedTime : buyActivatedTime
+
+    // The box, LIMIT text and STOP line share one right edge. The whole visual
+    // group freezes permanently on the exact ACTIVATED candle.
+    currentBarRightTime = time + timeframe.in_seconds() * 1000
+    int visualEndTime = not na(activatedTime) ? activatedTime : (na(info.breakTime) ? currentBarRightTime : info.breakTime)
+    int zoneSize = math.max(1, visualEndTime - info.startTime)
+
+    render = true
+    if not info.isFlipped and zoneSize < timeframe.in_seconds(info.timeframeStr) * minZoneSize * 1000
+        render := false
+    if not info.lockedTradeHistory and info.startTime < nz(oldestBarTime, time)
+        render := false
+    // Flip protection can cancel a pending order, but it must never erase the
+    // immutable history of a zone that already printed a real LIMIT.
+    if not info.lockedTradeHistory and nz(blockedByFlippedSpacing.get(info.guid), false)
+        render := false
+
+    isActivatedZoneExpired = not info.lockedTradeHistory and hideActivatedZones and not na(activatedTime) and (time - activatedTime >= hideActivatedDelayMs)
+
+    if isActivatedZoneExpired
+        hideVisualsForGuid(info.guid)
+        render := false
+
+    // Hide weak / fake-looking zones until price moves cleanly away from them.
+    // If the zone already printed a LIMIT signal, keep it visible.
+    if applyMinDistanceToZones and not (isSellSignalZone or isBuySignalZone)
+        zoneDistancePercent = info.sdType == "Supply" ? math.abs(close - info.bottom) / close * 100 : math.abs(close - info.top) / close * 100
+        supplyReadyToShow = info.sdType != "Supply" or (high < info.bottom and close < info.bottom and zoneDistancePercent >= minDistancePercent)
+        demandReadyToShow = info.sdType != "Demand" or (low > info.top and close > info.top and zoneDistancePercent >= minDistancePercent)
+        if not supplyReadyToShow or not demandReadyToShow
+            render := false
+
+    // Never draw a dead zone that produced no tradable LIMIT. A zone that
+    // already issued a real order remains visible as trade history.
+    canRenderBrokenTradeHistory = isSellSignalZone or isBuySignalZone
+    if render and (showInvalidated or na(sd.info.breakTime) or canRenderBrokenTradeHistory)
+        sd.sdBox := createSDBox(sdColor)
+        if sd.info.combined
+            sd.sdBox.set_bgcolor(color.new(sdColor, 66))
+
+        float middlePoint = (info.top + info.bottom) / 2
+        moveBox(sd.sdBox, info.startTime, info.top, visualEndTime, info.bottom)
+
+        if isSellSignalZone or isBuySignalZone
+            sd.entryTextLabel := na
+
+        visualTextOffsetMs = timeframe.in_seconds() * visualLabelOffsetBars * 1000
+
+        // Filled LIMIT tag stays on the right edge of the box.
+        if array.size(limitLabelGuids) > 0
+            for vx = 0 to array.size(limitLabelGuids) - 1
+                if array.get(limitLabelGuids, vx) == info.guid
+                    followLimitLabel = array.get(limitLabelRefs, vx)
+                    label.set_style(followLimitLabel, label.style_label_left)
+                    label.set_x(followLimitLabel, visualEndTime)
+                    label.set_y(followLimitLabel, middlePoint)
+
+        // STOP line ends exactly with the box; its text uses the same offset.
+        if array.size(stopVisualGuids) > 0
+            for sx = 0 to array.size(stopVisualGuids) - 1
+                if array.get(stopVisualGuids, sx) == info.guid
+                    followStopLine = array.get(stopLineRefs, sx)
+                    followStopLabel = array.get(stopLabelRefs, sx)
+                    stopY = line.get_y1(followStopLine)
+                    line.set_x1(followStopLine, info.startTime)
+                    line.set_x2(followStopLine, visualEndTime)
+                    label.set_style(followStopLabel, label.style_label_left)
+                    label.set_x(followStopLabel, visualEndTime)
+                    label.set_y(followStopLabel, stopY)
+
+        // While the LIMIT is still pending, keep its TP attached to the same
+        // right edge as the zone and STOP. Recreate it automatically if needed.
+        pendingZoneTPLevel = limitTPVisualLevels.get(info.guid)
+        if showBEVisualLine and na(activatedTime) and not na(pendingZoneTPLevel)
+            pendingTPVisualFound = false
+            if array.size(beVisualGuids) > 0
+                for tx = 0 to array.size(beVisualGuids) - 1
+                    if array.get(beVisualGuids, tx) == info.guid
+                        followTPLine = array.get(beLineRefs, tx)
+                        followTPLabel = array.get(beLabelRefs, tx)
+                        line.set_x1(followTPLine, info.startTime)
+                        line.set_x2(followTPLine, visualEndTime)
+                        line.set_y1(followTPLine, pendingZoneTPLevel)
+                        line.set_y2(followTPLine, pendingZoneTPLevel)
+                        label.set_style(followTPLabel, label.style_label_left)
+                        label.set_x(followTPLabel, visualEndTime)
+                        label.set_y(followTPLabel, pendingZoneTPLevel)
+                        pendingTPVisualFound := true
+
+            if not pendingTPVisualFound
+                recreatedTPLine = line.new(info.startTime, pendingZoneTPLevel, visualEndTime, pendingZoneTPLevel, xloc=xloc.bar_time, color=beVisualColor, width=1, style=line.style_dashed)
+                recreatedTPLabel = label.new(visualEndTime, pendingZoneTPLevel, "TP\n" + str.tostring(pendingZoneTPLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=beVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                beVisualGuids.push(info.guid)
+                beLineRefs.push(recreatedTPLine)
+                beLabelRefs.push(recreatedTPLabel)
+
+areaOfSD (sdZoneInfo SDInfoF) =>
+    float XA1 = SDInfoF.startTime
+    float XA2 = na(SDInfoF.breakTime) ? time + 1 : SDInfoF.breakTime
+    float YA1 = SDInfoF.top
+    float YA2 = SDInfoF.bottom
+    float edge1 = math.sqrt((XA2 - XA1) * (XA2 - XA1) + (YA2 - YA2) * (YA2 - YA2))
+    float edge2 = math.sqrt((XA2 - XA2) * (XA2 - XA2) + (YA2 - YA1) * (YA2 - YA1))
+    float totalArea = edge1 * edge2
+    totalArea
+
+doSDsTouch (sdZoneInfo SDInfo1, sdZoneInfo SDInfo2) =>
+    float XA1 = SDInfo1.startTime
+    float XA2 = na(SDInfo1.breakTime) ? (time + 1) : SDInfo1.breakTime
+    float YA1 = SDInfo1.top + atr / 100
+    float YA2 = SDInfo1.bottom - atr / 100
+
+    float XB1 = SDInfo2.startTime
+    float XB2 = na(SDInfo2.breakTime) ? (time + 1) : SDInfo2.breakTime
+    float YB1 = SDInfo2.top + atr / 100
+    float YB2 = SDInfo2.bottom - atr / 100
+    float intersectionArea = math.max(0, math.min(XA2, XB2) - math.max(XA1, XB1)) * math.max(0, math.min(YA1, YB1) - math.max(YA2, YB2))
+    float unionArea = areaOfSD(SDInfo1) + areaOfSD(SDInfo2) - intersectionArea
+    float overlapPercentage = (intersectionArea / unionArea) * 100.0
+    overlapPercentage > overlapThresholdPercentage
+
+isSDValid (sdZoneInfo SDInfo) =>
+    valid = true
+    if SDInfo.disabled
+        valid := false
+    valid
+
+clampSDZone (sdZoneInfo sdZoneF) =>
+    sdZoneSize = sdZoneF.top - sdZoneF.bottom
+    if sdZoneSize > atr * maxZoneSizeATR
+        diff = sdZoneSize - (atr * maxZoneSizeATR)
+        sdZoneF.top -= diff / 2
+        sdZoneF.bottom += diff / 2
+
+combineSDsFunc () =>
+    if allSDZonesList.size() > 0
+        lastCombinations = 999
+        while lastCombinations > 0
+            lastCombinations := 0
+            for i = 0 to allSDZonesList.size() - 1
+                curSD1 = allSDZonesList.get(i)
+                for j = 0 to allSDZonesList.size() - 1
+                    curSD2 = allSDZonesList.get(j)
+                    if i == j
+                        continue
+                    if not isSDValid(curSD1.info) or not isSDValid(curSD2.info)
+                        continue
+                    // A flipped zone must keep the exact boundaries of its failed parent.
+                    if curSD1.info.isFlipped or curSD2.info.isFlipped
+                        continue
+                    if curSD1.info.sdType != curSD2.info.sdType
+                        continue
+                    if doSDsTouch(curSD1.info, curSD2.info)
+                        curSD1.info.disabled := true
+                        curSD2.info.disabled := true
+
+                        sdZone newSD = createSDZone(sdZoneInfo.new(math.max(curSD1.info.top, curSD2.info.top), math.min(curSD1.info.bottom, curSD2.info.bottom), curSD1.info.sdType))
+                        newSD.info.startTime := math.min(curSD1.info.startTime, curSD2.info.startTime)
+                        newSD.info.breakTime := math.max(nz(curSD1.info.breakTime), nz(curSD2.info.breakTime))
+                        newSD.info.breakTime := newSD.info.breakTime == 0 ? na : newSD.info.breakTime
+                        newSD.info.guid := newSD.info.startTime
+                        newSD.info.timeframeStr := curSD1.info.timeframeStr
+                        // For combined zones, keep the previous swing from the merged zones.
+                        newSD.info.sourceSwingHigh := math.max(nz(curSD1.info.sourceSwingHigh, curSD1.info.top), nz(curSD2.info.sourceSwingHigh, curSD2.info.top))
+                        newSD.info.sourceSwingLow := math.min(nz(curSD1.info.sourceSwingLow, curSD1.info.bottom), nz(curSD2.info.sourceSwingLow, curSD2.info.bottom))
+                        newSD.info.createdTime := math.max(nz(curSD1.info.createdTime, curSD1.info.startTime), nz(curSD2.info.createdTime, curSD2.info.startTime))
+                        clampSDZone(newSD.info)
+                        newSD.info.combined := true
+                        if timeframe.in_seconds(curSD1.info.timeframeStr) != timeframe.in_seconds(curSD2.info.timeframeStr)
+                            newSD.info.combinedTimeframesStr := (na(curSD1.info.combinedTimeframesStr) ? formatTimeframeString(curSD1.info.timeframeStr) : curSD1.info.combinedTimeframesStr) + " & " + (na(curSD2.info.combinedTimeframesStr) ? formatTimeframeString(curSD2.info.timeframeStr) : curSD2.info.combinedTimeframesStr)
+                        allSDZonesList.unshift(newSD)
+                        lastCombinations += 1
+
+reqSeq (timeframeStr) =>
+    if timeframe.in_seconds(timeframeStr) == timeframe.in_seconds()
+        [demandZonesList, supplyZonesList]
+    else
+        [demandZonesListF, supplyZonesListF] = request.security(syminfo.tickerid, timeframeStr, [demandZonesList, supplyZonesList])
+        [demandZonesListF, supplyZonesListF]
+
+getTFData (timeframeInfo timeframeInfoF, timeframeStr) =>
+    if timeframeInfoF.isEnabled
+        [demandZonesListF, supplyZonesListF] = reqSeq(timeframeStr)
+        [demandZonesListF, supplyZonesListF]
+    else
+        [na, na]
+
+handleTimeframeInfo (timeframeInfo timeframeInfoF, demandZonesListF, supplyZonesListF) =>
+    if timeframeInfoF.isEnabled
+        timeframeInfoF.demandZonesList := demandZonesListF
+        timeframeInfoF.supplyZonesList := supplyZonesListF
+
+handleSDZonesFinal (bool _renderVisuals) =>
+    if DEBUG
+        log.info("Demand Count " + str.tostring(demandZonesList.size()))
+        log.info("Supply Count " + str.tostring(supplyZonesList.size()))
+        log.info("All " + str.tostring(allSDZonesList.size()))
+        log.info("Max " + str.tostring(demandZones))
+
+    if allSDZonesList.size() > 0
+        for i = 0 to allSDZonesList.size() - 1
+            safeDeleteSDZone(allSDZonesList.get(i))
+    allSDZonesList.clear()
+
+    for i = 0 to timeframeInfos.size() - 1
+        curTimeframe = timeframeInfos.get(i)
+        if not curTimeframe.isEnabled
+            continue
+        if curTimeframe.demandZonesList.size() > 0
+            for j = 0 to math.min(curTimeframe.demandZonesList.size() - 1, demandZones - 1)
+                sdZoneInfoF = curTimeframe.demandZonesList.get(j)
+                sdZoneInfoF.timeframeStr := curTimeframe.timeframeStr
+                allSDZonesList.unshift(createSDZone(sdZoneInfo.copy(sdZoneInfoF)))
+
+        if curTimeframe.supplyZonesList.size() > 0
+            for j = 0 to math.min(curTimeframe.supplyZonesList.size() - 1, supplyZones - 1)
+                sdZoneInfoF = curTimeframe.supplyZonesList.get(j)
+                sdZoneInfoF.timeframeStr := curTimeframe.timeframeStr
+                allSDZonesList.unshift(createSDZone(sdZoneInfo.copy(sdZoneInfoF)))
+
+    // Flipped zones are already stored in chart coordinates and must not be
+    // requested again through request.security().
+    if flippedZonesList.size() > 0
+        for j = 0 to flippedZonesList.size() - 1
+            flippedInfo = flippedZonesList.get(j)
+            allSDZonesList.unshift(createSDZone(sdZoneInfo.copy(flippedInfo)))
+
+    if combineSDs
+        combineSDsFunc()
+
+    // Update only the natural invalidation time of an already locked trade.
+    // Its original entry-zone boundaries stay immutable.
+    if lockedTradeZoneVisuals.size() > 0 and allSDZonesList.size() > 0
+        for i = 0 to allSDZonesList.size() - 1
+            sourceZoneForLockSync = allSDZonesList.get(i)
+            syncLockedTradeZoneBreakTime(sourceZoneForLockSync.info)
+
+    // State is rebuilt inside the bounded hidden buffer. Drawing remains
+    // limited to the dynamic display window to keep the indicator responsive.
+    if _renderVisuals
+        if allSDZonesList.size() > 0
+            for i = 0 to allSDZonesList.size() - 1
+                curSD = allSDZonesList.get(i)
+                lockedVersionExists = isLockedTradeZoneGuid(curSD.info.guid)
+                if isSDValid(curSD.info) and not lockedVersionExists
+                    renderSDZone(curSD)
+
+        // Locked trade visuals are redrawn separately and never enter the zone,
+        // merge, Flip, signal, entry, TP, SL, or alert calculations.
+        if lockedTradeZoneVisuals.size() > 0
+            for i = 0 to lockedTradeZoneVisuals.size() - 1
+                lockedVisualForRender = lockedTradeZoneVisuals.get(i)
+                safeDeleteSDZone(lockedVisualForRender)
+                renderSDZone(lockedVisualForRender)
+                lockedTradeZoneVisuals.set(i, lockedVisualForRender)
+
+// ==============================================================================
+// SUPPLY & DEMAND ENGINE
+// ==============================================================================
+bodySize = math.abs(close - open)
+
+getMomentumCandleCount (lastBars, reqMult) =>
+    bearishCnt = 0
+    bullishCnt = 0
+    for i = 0 to lastBars - 1
+        if bodySize[i] >= averageBodySize * reqMult
+            if close[i] > open[i]
+                bullishCnt += 1
+            else
+                bearishCnt += 1
+    [bullishCnt, bearishCnt]
+
+[bullishMomentum, bearishMomentum] = getMomentumCandleCount(momentumSpan, momentumBodyMult)
+
+var int lastDemandZone = 0
+var int lastSupplyZone = 0
+
+// Raw-zone preparation is inexpensive, so it receives a larger hidden warm-up.
+// Only a zone that actually prints LIMIT is archived permanently.
+if bar_index > last_bar_index - zoneStateWarmupBars
+    if bullishMomentum >= momentumCount and bar_index - lastDemandZone > minDistanceBetweenZones
+        lastDemandZone := bar_index
+
+        // This is the exact candle that created the DEMAND / BUY LIMIT box.
+        demandZoneHigh = high[momentumSpan + 1]
+        demandZoneLow  = low[momentumSpan + 1]
+
+        newSDZone = sdZoneInfo.new(demandZoneHigh, demandZoneLow, "Demand", time[momentumSpan + 1], na, time[momentumSpan + 1])
+
+        // BUY close stop will be recalculated at signal time from first IDM/liquidity after this box.
+        // Fallback is the DEMAND box bottom.
+        newSDZone.sourceSwingHigh := demandZoneHigh
+        newSDZone.sourceSwingLow := demandZoneLow
+        newSDZone.createdTime := time
+
+        clampSDZone(newSDZone)
+        demandZonesList.unshift(newSDZone)
+        if demandZonesList.size() > maxSDZones
+            demandZonesList.pop()
+
+    if bearishMomentum >= momentumCount and bar_index - lastSupplyZone > minDistanceBetweenZones
+        lastSupplyZone := bar_index
+
+        // This is the exact candle that created the SUPPLY / SELL LIMIT box.
+        supplyZoneHigh = high[momentumSpan + 1]
+        supplyZoneLow  = low[momentumSpan + 1]
+
+        newSDZone = sdZoneInfo.new(supplyZoneHigh, supplyZoneLow, "Supply", time[momentumSpan + 1], na, time[momentumSpan + 1])
+
+        // SELL close stop will be recalculated at signal time from first IDM/liquidity after this box.
+        // Fallback is the SUPPLY box top.
+        newSDZone.sourceSwingHigh := supplyZoneHigh
+        newSDZone.sourceSwingLow := supplyZoneLow
+        newSDZone.createdTime := time
+
+        clampSDZone(newSDZone)
+        supplyZonesList.unshift(newSDZone)
+        if supplyZonesList.size() > maxSDZones
+            supplyZonesList.pop()
+
+    // Invalidation
+    if demandZonesList.size() > 0
+        for i = demandZonesList.size() - 1 to 0
+            currentSD = demandZonesList.get(i)
+            if na(currentSD.breakTime)
+                if (sdEndMethod == "Wick" ? low : math.min(open, close)) < currentSD.bottom
+                    currentSD.breakTime := time
+
+    if supplyZonesList.size() > 0
+        for i = supplyZonesList.size() - 1 to 0
+            currentSD = supplyZonesList.get(i)
+            if na(currentSD.breakTime)
+                if (sdEndMethod == "Wick" ? high : math.max(open, close)) > currentSD.top
+                    currentSD.breakTime := time
+
+    // A flipped zone can be invalidated normally, but it is never converted again.
+    if flippedZonesList.size() > 0
+        for i = flippedZonesList.size() - 1 to 0
+            currentFlippedSD = flippedZonesList.get(i)
+            if na(currentFlippedSD.breakTime)
+                if currentFlippedSD.sdType == "Demand" and (sdEndMethod == "Wick" ? low : math.min(open, close)) < currentFlippedSD.bottom
+                    currentFlippedSD.breakTime := time
+                else if currentFlippedSD.sdType == "Supply" and (sdEndMethod == "Wick" ? high : math.max(open, close)) > currentFlippedSD.top
+                    currentFlippedSD.breakTime := time
+
+[demandZonesListTimeframe1, supplyZonesListTimeframe1] = getTFData(timeframeInfos.get(0), timeframe1)
+[demandZonesListTimeframe2, supplyZonesListTimeframe2] = getTFData(timeframeInfos.get(1), timeframe2)
+[demandZonesListTimeframe3, supplyZonesListTimeframe3] = getTFData(timeframeInfos.get(2), timeframe3)
+
+var lastRetestIndexSupply = 0
+var lastRetestIndexDemand = 0
+
+float renderRetestLabelBuyside = na
+int renderRetestLabelBuysideGUID = na
+
+float renderRetestLabelSellside = na
+int renderRetestLabelSellsideGUID = na
+
+float renderBreakLabelBuyside = na
+int renderBreakLabelBuysideGUID = na
+
+float renderBreakLabelSellside = na
+int renderBreakLabelSellsideGUID = na
+
+var disabledDuplicateTF = false
+
+if not disabledDuplicateTF
+    disabledDuplicateTF := true
+    for i = 0 to timeframeInfos.size() - 1
+        for j = 0 to timeframeInfos.size() - 1
+            if i == j
+                continue
+            timeframeInfo1 = timeframeInfos.get(i)
+            timeframeInfo2 = timeframeInfos.get(j)
+            if timeframeInfo1.isEnabled and timeframeInfo2.isEnabled and timeframe.in_seconds(timeframeInfo1.timeframeStr) == timeframe.in_seconds(timeframeInfo2.timeframeStr)
+                timeframeInfo1.isEnabled := false
+
+if barstate.isconfirmed and bar_index > last_bar_index - tradeStateWarmupBars
+    handleTimeframeInfo(timeframeInfos.get(0), demandZonesListTimeframe1, supplyZonesListTimeframe1)
+    handleTimeframeInfo(timeframeInfos.get(1), demandZonesListTimeframe2, supplyZonesListTimeframe2)
+    handleTimeframeInfo(timeframeInfos.get(2), demandZonesListTimeframe3, supplyZonesListTimeframe3)
+    handleSDZonesFinal(bar_index > last_bar_index - maxDistanceToLastBar)
+
+    // Breaks
+    if allSDZonesList.size() > 0
+        for i = 0 to allSDZonesList.size() - 1
+            curZone = allSDZonesList.get(i)
+            if curZone.info.disabled
+                continue
+            if not showInvalidated and not na(curZone.info.breakTime)
+                continue
+            if na(curZone.info.breakTime)
+                continue
+            if time - curZone.info.startTime < minZoneSize * timeframe.in_seconds(curZone.info.timeframeStr) * 1000
+                continue
+            if time == curZone.info.breakTime
+                if curZone.info.sdType == "Supply"
+                    if curZone.info.breakTime - curZone.info.startTime > minZoneSize * timeframe.in_seconds() * 1000
+                        renderBreakLabelBuyside := curZone.info.bottom
+                        renderBreakLabelBuysideGUID := curZone.info.guid
+                else
+                    if curZone.info.breakTime - curZone.info.startTime > minZoneSize * timeframe.in_seconds() * 1000
+                        renderBreakLabelSellside := curZone.info.top
+                        renderBreakLabelSellsideGUID := curZone.info.guid
+
+// ==============================================================================
+// AUTO SL BUFFER BY SYMBOL
+// ==============================================================================
+float slBufferUsed = goldSL
+
+tickerName = str.upper(syminfo.ticker)
+
+if str.contains(tickerName, "US30") or str.contains(tickerName, "DJ")
+    slBufferUsed := us30SL
+else if str.contains(tickerName, "NAS") or str.contains(tickerName, "US100") or str.contains(tickerName, "USTECH")
+    slBufferUsed := nasdaqSL
+else if str.contains(tickerName, "WTI") or str.contains(tickerName, "USOIL")
+    slBufferUsed := wtiSL
+else
+    slBufferUsed := goldSL
+
+// Stop source is tied to the first IDM/liquidity swing directly AFTER the active box:
+// SELL uses the first swing high after the SUPPLY box + small hidden room.
+// BUY uses the first swing low after the DEMAND box - small hidden room.
+// If no after-box swing exists, it falls back to the box edge with the same room.
+
+// ==============================================================================
+// CUSTOM BUY / SELL TOUCHES + TRADE STATE
+// ==============================================================================
+var map<int, int> supplyTouches = map.new<int, int>()
+var map<int, int> demandTouches = map.new<int, int>()
+
+bool buySignal = false
+bool sellSignal = false
+
+var float buySL = na
+var float buyTP = na
+
+var float sellSL = na
+var float sellTP = na
+
+var bool sellActivated = false
+var bool buyActivated = false
+
+var float activeSellEntry = na
+var float activeBuyEntry  = na
+
+var line lastSLLine = na
+var line lastTPLine = na
+
+// Track every pending LIMIT separately, so ACTIVATED appears on the exact candle for each zone
+var map<int, float> activeSellEntries = map.new<int, float>()
+var map<int, float> activeBuyEntries  = map.new<int, float>()
+
+// Preserve the exact source box for each order. These values are used only if
+// the activated original trade reaches its close stop and must create one flip.
+var map<int, float> orderZoneTops = map.new<int, float>()
+var map<int, float> orderZoneBottoms = map.new<int, float>()
+var map<int, int> orderZoneStartTimes = map.new<int, int>()
+var map<int, string> orderZoneTimeframes = map.new<int, string>()
+var map<int, bool> orderIsFlipped = map.new<int, bool>()
+
+// Virtual close stop maps:
+// pending = limit sent but not activated yet
+// live    = activated trade waiting for close invalidation
+var map<int, float> pendingSellCloseStops = map.new<int, float>()
+var map<int, float> pendingBuyCloseStops  = map.new<int, float>()
+var map<int, float> liveSellCloseStops    = map.new<int, float>()
+var map<int, float> liveBuyCloseStops     = map.new<int, float>()
+
+var map<int, float> pendingSellTPs = map.new<int, float>()
+var map<int, float> pendingBuyTPs  = map.new<int, float>()
+var map<int, float> liveSellTPs    = map.new<int, float>()
+var map<int, float> liveBuyTPs     = map.new<int, float>()
+
+// Trade management visual state.
+// Entry1 / Entry2 use original chart numbers for display,
+// while entryReal values include Spread Buffer for realistic 0.5R / BE calculations.
+var map<int, float> pendingSellEntry1 = map.new<int, float>()
+var map<int, float> pendingSellEntry2 = map.new<int, float>()
+var map<int, float> pendingBuyEntry1  = map.new<int, float>()
+var map<int, float> pendingBuyEntry2  = map.new<int, float>()
+
+var map<int, float> liveSellEntry1 = map.new<int, float>()
+var map<int, float> liveSellEntry2 = map.new<int, float>()
+var map<int, float> liveSellEntry1Real = map.new<int, float>()
+var map<int, float> liveSellEntry2Real = map.new<int, float>()
+var map<int, float> liveSellHalfR = map.new<int, float>()
+
+var map<int, float> liveBuyEntry1 = map.new<int, float>()
+var map<int, float> liveBuyEntry2 = map.new<int, float>()
+var map<int, float> liveBuyEntry1Real = map.new<int, float>()
+var map<int, float> liveBuyEntry2Real = map.new<int, float>()
+var map<int, float> liveBuyHalfR = map.new<int, float>()
+
+// Separate hidden BE visual tracking. It does not affect the existing trade management logic.
+var map<int, float> liveSellBEVisualLevel = map.new<int, float>()
+var map<int, float> liveBuyBEVisualLevel  = map.new<int, float>()
+var map<int, int> liveSellBEVisualDone = map.new<int, int>()
+var map<int, int> liveBuyBEVisualDone  = map.new<int, int>()
+
+var map<int, int> liveSellEntry2Filled = map.new<int, int>()
+var map<int, int> liveBuyEntry2Filled  = map.new<int, int>()
+var map<int, int> liveSellBEDone = map.new<int, int>()
+var map<int, int> liveBuyBEDone  = map.new<int, int>()
+var map<int, int> liveSellPartialDone = map.new<int, int>()
+var map<int, int> liveBuyPartialDone  = map.new<int, int>()
+
+// Bar guards prevent management labels from firing on the same candle as activation.
+// Entry 2 partial logic must also wait for a later candle after Entry 2 was filled.
+var map<int, int> liveSellActivationBar = map.new<int, int>()
+var map<int, int> liveBuyActivationBar  = map.new<int, int>()
+var map<int, int> liveSellEntry2Bar = map.new<int, int>()
+var map<int, int> liveBuyEntry2Bar  = map.new<int, int>()
+
+// Exact flip protection rule:
+// measure the shortest price gap between the EDGES of both zones. Overlapping
+// zones have a 0% gap. A flipped zone protects 0.10% above and below itself.
+isInsideFlippedZoneProtection(_candidateTop, _candidateBottom, _flipTop, _flipBottom) =>
+    float edgeGapPercent = 0.0
+    if _candidateBottom > _flipTop
+        edgeGapPercent := (_candidateBottom - _flipTop) / _flipTop * 100
+    else if _candidateTop < _flipBottom
+        edgeGapPercent := (_flipBottom - _candidateTop) / _flipBottom * 100
+    edgeGapPercent < minFlippedOrderDistancePercent
+
+cancelPendingLimitForFlipProtection(_guid) =>
+    blockedByFlippedSpacing.put(_guid, true)
+    wasAlreadyPrinted = nz(signaledSellZones.get(_guid), false) or nz(signaledBuyZones.get(_guid), false)
+    if not wasAlreadyPrinted
+        hideVisualsForGuid(_guid)
+
+    activeSellEntries.remove(_guid)
+    activeBuyEntries.remove(_guid)
+    pendingSellCloseStops.remove(_guid)
+    pendingBuyCloseStops.remove(_guid)
+    pendingSellTPs.remove(_guid)
+    pendingBuyTPs.remove(_guid)
+    pendingSellEntry1.remove(_guid)
+    pendingSellEntry2.remove(_guid)
+    pendingBuyEntry1.remove(_guid)
+    pendingBuyEntry2.remove(_guid)
+    limitTPVisualLevels.remove(_guid)
+    liveSellBEVisualLevel.remove(_guid)
+    liveBuyBEVisualLevel.remove(_guid)
+    liveSellBEVisualDone.remove(_guid)
+    liveBuyBEVisualDone.remove(_guid)
+    orderZoneTops.remove(_guid)
+    orderZoneBottoms.remove(_guid)
+    orderZoneStartTimes.remove(_guid)
+    orderZoneTimeframes.remove(_guid)
+    orderIsFlipped.remove(_guid)
+
+// Once a flip is accepted, it has priority over nearby ordinary zones:
+// remove pending LIMITs that were printed before it and hide nearby unsignaled
+// zones. Live trades and the failed parent zone are never changed here.
+protectAcceptedFlippedZone(_flipTop, _flipBottom, _parentGuid) =>
+    if allSDZonesList.size() > 0
+        for pfz = 0 to allSDZonesList.size() - 1
+            nearbyZone = allSDZonesList.get(pfz)
+            nearbyGuid = nearbyZone.info.guid
+            nearbyIsParent = nearbyGuid == _parentGuid
+            nearbyIsPending = not na(activeSellEntries.get(nearbyGuid)) or not na(activeBuyEntries.get(nearbyGuid))
+            nearbyIsLive = not na(liveSellCloseStops.get(nearbyGuid)) or not na(liveBuyCloseStops.get(nearbyGuid))
+            nearbyWasSignaled = nz(signaledSellZones.get(nearbyGuid), false) or nz(signaledBuyZones.get(nearbyGuid), false)
+            nearbyCanBeSuppressed = nearbyIsPending or (not nearbyWasSignaled and not nearbyIsLive)
+            nearbyTouchesProtection = isInsideFlippedZoneProtection(nearbyZone.info.top, nearbyZone.info.bottom, _flipTop, _flipBottom)
+            if not nearbyIsParent and nearbyCanBeSuppressed and nearbyTouchesProtection
+                blockedByFlippedSpacing.put(nearbyGuid, true)
+                safeDeleteSDZone(nearbyZone)
+
+    if activeSellEntries.size() > 0
+        pendingSellKeysForFlip = activeSellEntries.keys()
+        if array.size(pendingSellKeysForFlip) > 0
+            for pfs = 0 to array.size(pendingSellKeysForFlip) - 1
+                pendingSellGuidForFlip = array.get(pendingSellKeysForFlip, pfs)
+                pendingSellTopForFlip = orderZoneTops.get(pendingSellGuidForFlip)
+                pendingSellBottomForFlip = orderZoneBottoms.get(pendingSellGuidForFlip)
+                if pendingSellGuidForFlip != _parentGuid and not na(pendingSellTopForFlip) and not na(pendingSellBottomForFlip) and isInsideFlippedZoneProtection(pendingSellTopForFlip, pendingSellBottomForFlip, _flipTop, _flipBottom)
+                    cancelPendingLimitForFlipProtection(pendingSellGuidForFlip)
+
+    if activeBuyEntries.size() > 0
+        pendingBuyKeysForFlip = activeBuyEntries.keys()
+        if array.size(pendingBuyKeysForFlip) > 0
+            for pfb = 0 to array.size(pendingBuyKeysForFlip) - 1
+                pendingBuyGuidForFlip = array.get(pendingBuyKeysForFlip, pfb)
+                pendingBuyTopForFlip = orderZoneTops.get(pendingBuyGuidForFlip)
+                pendingBuyBottomForFlip = orderZoneBottoms.get(pendingBuyGuidForFlip)
+                if pendingBuyGuidForFlip != _parentGuid and not na(pendingBuyTopForFlip) and not na(pendingBuyBottomForFlip) and isInsideFlippedZoneProtection(pendingBuyTopForFlip, pendingBuyBottomForFlip, _flipTop, _flipBottom)
+                    cancelPendingLimitForFlipProtection(pendingBuyGuidForFlip)
+
+
+
+// ==============================================================================
+// LIMIT SIGNALS
+// ==============================================================================
+if barstate.isconfirmed and bar_index > last_bar_index - tradeStateWarmupBars
+    buySignal := false
+    sellSignal := false
+
+    if allSDZonesList.size() > 0
+        for i = 0 to allSDZonesList.size() - 1
+            curZone = allSDZonesList.get(i)
+
+            if not isSDValid(curZone.info)
+                continue
+            if not showInvalidated and not na(curZone.info.breakTime)
+                continue
+            if not na(curZone.info.breakTime)
+                continue
+            if time - curZone.info.startTime < minZoneSize * timeframe.in_seconds(curZone.info.timeframeStr) * 1000
+                continue
+
+            zoneGUID = curZone.info.guid
+
+            // =====================================================
+            // SUPPLY = SELL
+            // =====================================================
+            if curZone.info.sdType == "Supply"
+                supplyCount = nz(supplyTouches.get(zoneGUID), 0)
+
+                sellEntry = curZone.info.bottom
+                distanceFromSupply = math.abs(close - curZone.info.bottom) / close * 100
+
+                // SELL LIMIT is allowed only when the CURRENT signal candle is completely BELOW the supply zone.
+                // If the current candle is inside / touching the zone, do not print now.
+                // But do NOT invalidate the zone forever; if price moves away later, the limit can still print.
+                priceCompletelyBelowSupply = high < curZone.info.bottom and close < curZone.info.bottom
+
+                // Any accepted flipped zone protects a 0.10% band on both sides,
+                // measured edge-to-edge between the full zone ranges.
+                sellFlippedSpacingAllowed = true
+                if flippedZonesList.size() > 0
+                    for sfp = 0 to flippedZonesList.size() - 1
+                        protectedFlipForSell = flippedZonesList.get(sfp)
+                        sellIsProtectedFlipOrParent = zoneGUID == protectedFlipForSell.guid or zoneGUID == protectedFlipForSell.parentGuid
+                        if not sellIsProtectedFlipOrParent
+                            sellZoneTouchesFlipProtection = isInsideFlippedZoneProtection(curZone.info.top, curZone.info.bottom, protectedFlipForSell.top, protectedFlipForSell.bottom)
+                            if sellZoneTouchesFlipProtection
+                                sellFlippedSpacingAllowed := false
+
+                sellReadyWithoutFlipSpacing = supplyCount < 1 and barstate.isconfirmed and priceCompletelyBelowSupply and distanceFromSupply >= minDistancePercent
+                if sellReadyWithoutFlipSpacing and not sellFlippedSpacingAllowed
+                    blockedByFlippedSpacing.put(zoneGUID, true)
+
+                if sellReadyWithoutFlipSpacing and sellFlippedSpacingAllowed
+                    sellLabelText = "SELL LIMIT\n(" + str.tostring(curZone.info.bottom, format.mintick) + " / " + str.tostring(curZone.info.top, format.mintick) + ")"
+                    sellLabelMiddle = (curZone.info.top + curZone.info.bottom) / 2
+                    sellLabelRightTime = time + timeframe.in_seconds() * 1000
+                    newSignal = label.new(
+                         sellLabelRightTime,
+                         sellLabelMiddle,
+                         text = sellLabelText,
+                         xloc = xloc.bar_time,
+                         style = label.style_label_left,
+                         color = sellVisualColor,
+                         textcolor = color.white,
+                         size = visualTextSize,
+                         textalign = text.align_center,
+                         text_font_family = font.family_default)
+
+                    signalLabels.push(newSignal)
+                    limitLabelGuids.push(zoneGUID)
+                    limitLabelRefs.push(newSignal)
+                    signaledSellZones.put(zoneGUID, true)
+                    lockTradeZoneVisual(curZone.info)
+
+                    if array.size(signalLabels) > maxSignalsToShow
+                        oldSignal = array.shift(signalLabels)
+                        if not showHistoricalSignals
+                            label.delete(oldSignal)
+
+                    supplyTouches.put(zoneGUID, supplyCount + 1)
+                    sellSignal := true
+
+                    // SELL TP/SL
+                    activeSellEntries.put(zoneGUID, sellEntry)
+                    orderZoneTops.put(zoneGUID, curZone.info.top)
+                    orderZoneBottoms.put(zoneGUID, curZone.info.bottom)
+                    orderZoneStartTimes.put(zoneGUID, curZone.info.startTime)
+                    orderZoneTimeframes.put(zoneGUID, curZone.info.timeframeStr)
+                    orderIsFlipped.put(zoneGUID, curZone.info.isFlipped)
+
+                    // SELL close stop = first IDM/liquidity swing high directly AFTER the SUPPLY box + small hidden room.
+                    sellAfterBoxSwingHigh = getFirstSwingHighAfterBox(curZone.info.startTime, curZone.info.top)
+                    sellSL := math.max(sellAfterBoxSwingHigh, curZone.info.top) + slBufferUsed
+                    sellRisk = sellSL - sellEntry
+                    sellTP := sellEntry - (sellRisk * tpRR)
+
+                    // Virtual close stop uses the same saved SELL stop level.
+                    // Later: if candle CLOSES above this level, we only clear the active close-stop state.
+                    sellCloseStopLevel = sellSL
+                    pendingSellCloseStops.put(zoneGUID, sellCloseStopLevel)
+                    pendingSellTPs.put(zoneGUID, sellTP)
+
+                    // Management is saved ONLY for this zone after SELL LIMIT is printed.
+                    pendingSellEntry1.put(zoneGUID, curZone.info.bottom)
+                    pendingSellEntry2.put(zoneGUID, curZone.info.top)
+
+                    if showCloseStopVisual
+                        sellStopLineEndTime = time
+                        sellStopLabelOffsetMs = timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                        sellStopLine = line.new(curZone.info.startTime, sellCloseStopLevel, sellStopLineEndTime, sellCloseStopLevel, xloc=xloc.bar_time, color=sellStopVisualColor, width=1, style=line.style_dashed)
+                        sellStopLabel = label.new(sellStopLineEndTime, sellCloseStopLevel, "SELL CLOSE STOP\n" + str.tostring(sellCloseStopLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=sellStopVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                        stopVisualGuids.push(zoneGUID)
+                        stopLineRefs.push(sellStopLine)
+                        stopLabelRefs.push(sellStopLabel)
+
+                    // Show the visible TP immediately with the SELL LIMIT,
+                    // without waiting for the order to become ACTIVATED.
+                    sellPendingTPVisualRisk = sellCloseStopLevel - sellEntry
+                    sellPendingTPVisualLevel = sellEntry - (sellPendingTPVisualRisk * beTriggerR)
+                    limitTPVisualLevels.put(zoneGUID, sellPendingTPVisualLevel)
+                    liveSellBEVisualLevel.put(zoneGUID, sellPendingTPVisualLevel)
+                    liveSellBEVisualDone.put(zoneGUID, 0)
+                    if showBEVisualLine
+                        sellPendingTPEndTime = time
+                        sellPendingTPLabelTime = sellPendingTPEndTime + timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                        sellPendingTPLine = line.new(curZone.info.startTime, sellPendingTPVisualLevel, sellPendingTPEndTime, sellPendingTPVisualLevel, xloc=xloc.bar_time, color=beVisualColor, width=1, style=line.style_dashed)
+                        sellPendingTPLabel = label.new(sellPendingTPEndTime, sellPendingTPVisualLevel, "TP\n" + str.tostring(sellPendingTPVisualLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=beVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                        beVisualGuids.push(zoneGUID)
+                        beLineRefs.push(sellPendingTPLine)
+                        beLabelRefs.push(sellPendingTPLabel)
+
+                    // TELEGRAM ALERT VALUES
+                    // Entry is now a range: Entry1-Entry2.
+                    // SL text explains candle-close condition on the current chart timeframe.
+                    sellEntryText = str.tostring(curZone.info.bottom, format.mintick) + "-" + str.tostring(curZone.info.top, format.mintick)
+                    tfAlertText = formatTimeframeString(timeframe.period)
+                    sellSLText = str.tostring(sellSL, format.mintick) + " (" + tfAlertText + " candle close above with 50% body)"
+
+                    alert('🔴 VSS3 SELL LIMIT\n📊 Symbol: ' + syminfo.ticker + '\n💰 Entry: ' + sellEntryText + '\n🛑 Stop Loss: ' + sellSLText + '\n🎯 Take Profit: ' + str.tostring(sellTP, format.mintick) + '\n\nDATA {"signal":"selllimit","id":"' + str.tostring(zoneGUID) + '","symbol":"' + syminfo.ticker + '","entry":"' + sellEntryText + '","entry1":"' + str.tostring(curZone.info.bottom, format.mintick) + '","entry2":"' + str.tostring(curZone.info.top, format.mintick) + '","sl":"' + sellSLText + '","sl_price":"' + str.tostring(sellSL, format.mintick) + '","sl_note":"' + tfAlertText + ' candle close above with 50% body","tp":"' + str.tostring(sellTP, format.mintick) + '","timeframe":"' + tfAlertText + '"}', alert.freq_once_per_bar_close)
+
+                    line.delete(lastSLLine)
+                    line.delete(lastTPLine)
+                    if showTpSlLines
+                        lastSLLine := line.new(bar_index, sellSL, bar_index + tpSlLineBars, sellSL, color=color.red, width=2)
+                        lastTPLine := line.new(bar_index, sellTP, bar_index + tpSlLineBars, sellTP, color=color.green, width=2)
+                    else
+                        lastSLLine := na
+                        lastTPLine := na
+
+            // =====================================================
+            // DEMAND = BUY
+            // =====================================================
+            if curZone.info.sdType == "Demand"
+                demandCount = nz(demandTouches.get(zoneGUID), 0)
+
+                buyEntry = curZone.info.top
+                distanceFromDemand = math.abs(close - curZone.info.top) / close * 100
+
+                // BUY LIMIT is allowed only when the CURRENT signal candle is completely ABOVE the demand zone.
+                // If the current candle is inside / touching the zone, do not print now.
+                // But do NOT invalidate the zone forever; if price moves away later, the limit can still print.
+                priceCompletelyAboveDemand = low > curZone.info.top and close > curZone.info.top
+
+                // Any accepted flipped zone protects a 0.10% band on both sides,
+                // measured edge-to-edge between the full zone ranges.
+                buyFlippedSpacingAllowed = true
+                if flippedZonesList.size() > 0
+                    for bfp = 0 to flippedZonesList.size() - 1
+                        protectedFlipForBuy = flippedZonesList.get(bfp)
+                        buyIsProtectedFlipOrParent = zoneGUID == protectedFlipForBuy.guid or zoneGUID == protectedFlipForBuy.parentGuid
+                        if not buyIsProtectedFlipOrParent
+                            buyZoneTouchesFlipProtection = isInsideFlippedZoneProtection(curZone.info.top, curZone.info.bottom, protectedFlipForBuy.top, protectedFlipForBuy.bottom)
+                            if buyZoneTouchesFlipProtection
+                                buyFlippedSpacingAllowed := false
+
+                buyReadyWithoutFlipSpacing = demandCount < 1 and barstate.isconfirmed and priceCompletelyAboveDemand and distanceFromDemand >= minDistancePercent
+                if buyReadyWithoutFlipSpacing and not buyFlippedSpacingAllowed
+                    blockedByFlippedSpacing.put(zoneGUID, true)
+
+                if buyReadyWithoutFlipSpacing and buyFlippedSpacingAllowed
+                    buyLabelText = "BUY LIMIT\n(" + str.tostring(curZone.info.top, format.mintick) + " / " + str.tostring(curZone.info.bottom, format.mintick) + ")"
+                    buyLabelMiddle = (curZone.info.top + curZone.info.bottom) / 2
+                    buyLabelRightTime = time + timeframe.in_seconds() * 1000
+                    newSignal = label.new(
+                         buyLabelRightTime,
+                         buyLabelMiddle,
+                         text = buyLabelText,
+                         xloc = xloc.bar_time,
+                         style = label.style_label_left,
+                         color = buyVisualColor,
+                         textcolor = color.white,
+                         size = visualTextSize,
+                         textalign = text.align_center,
+                         text_font_family = font.family_default)
+
+                    signalLabels.push(newSignal)
+                    limitLabelGuids.push(zoneGUID)
+                    limitLabelRefs.push(newSignal)
+                    signaledBuyZones.put(zoneGUID, true)
+                    lockTradeZoneVisual(curZone.info)
+
+                    if array.size(signalLabels) > maxSignalsToShow
+                        oldSignal = array.shift(signalLabels)
+                        if not showHistoricalSignals
+                            label.delete(oldSignal)
+
+                    demandTouches.put(zoneGUID, demandCount + 1)
+                    buySignal := true
+
+                    // BUY TP/SL
+                    activeBuyEntries.put(zoneGUID, buyEntry)
+                    orderZoneTops.put(zoneGUID, curZone.info.top)
+                    orderZoneBottoms.put(zoneGUID, curZone.info.bottom)
+                    orderZoneStartTimes.put(zoneGUID, curZone.info.startTime)
+                    orderZoneTimeframes.put(zoneGUID, curZone.info.timeframeStr)
+                    orderIsFlipped.put(zoneGUID, curZone.info.isFlipped)
+
+                    // BUY close stop = first IDM/liquidity swing low directly AFTER the DEMAND box - small hidden room.
+                    buyAfterBoxSwingLow = getFirstSwingLowAfterBox(curZone.info.startTime, curZone.info.bottom)
+                    buySL := math.min(buyAfterBoxSwingLow, curZone.info.bottom) - slBufferUsed
+                    buyRisk = buyEntry - buySL
+                    buyTP := buyEntry + (buyRisk * tpRR)
+
+                    // Virtual close stop uses the same saved BUY stop level.
+                    // Later: if candle CLOSES below this level, we only clear the active close-stop state.
+                    buyCloseStopLevel = buySL
+                    pendingBuyCloseStops.put(zoneGUID, buyCloseStopLevel)
+                    pendingBuyTPs.put(zoneGUID, buyTP)
+
+                    // Management is saved ONLY for this zone after BUY LIMIT is printed.
+                    pendingBuyEntry1.put(zoneGUID, curZone.info.top)
+                    pendingBuyEntry2.put(zoneGUID, curZone.info.bottom)
+
+                    if showCloseStopVisual
+                        buyStopLineEndTime = time
+                        buyStopLabelOffsetMs = timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                        buyStopLine = line.new(curZone.info.startTime, buyCloseStopLevel, buyStopLineEndTime, buyCloseStopLevel, xloc=xloc.bar_time, color=stopVisualColor, width=1, style=line.style_dashed)
+                        buyStopLabel = label.new(buyStopLineEndTime, buyCloseStopLevel, "BUY CLOSE STOP\n" + str.tostring(buyCloseStopLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=stopVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                        stopVisualGuids.push(zoneGUID)
+                        stopLineRefs.push(buyStopLine)
+                        stopLabelRefs.push(buyStopLabel)
+
+                    // Show the visible TP immediately with the BUY LIMIT,
+                    // without waiting for the order to become ACTIVATED.
+                    buyPendingTPVisualRisk = buyEntry - buyCloseStopLevel
+                    buyPendingTPVisualLevel = buyEntry + (buyPendingTPVisualRisk * beTriggerR)
+                    limitTPVisualLevels.put(zoneGUID, buyPendingTPVisualLevel)
+                    liveBuyBEVisualLevel.put(zoneGUID, buyPendingTPVisualLevel)
+                    liveBuyBEVisualDone.put(zoneGUID, 0)
+                    if showBEVisualLine
+                        buyPendingTPEndTime = time
+                        buyPendingTPLabelTime = buyPendingTPEndTime + timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                        buyPendingTPLine = line.new(curZone.info.startTime, buyPendingTPVisualLevel, buyPendingTPEndTime, buyPendingTPVisualLevel, xloc=xloc.bar_time, color=beVisualColor, width=1, style=line.style_dashed)
+                        buyPendingTPLabel = label.new(buyPendingTPEndTime, buyPendingTPVisualLevel, "TP\n" + str.tostring(buyPendingTPVisualLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=beVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                        beVisualGuids.push(zoneGUID)
+                        beLineRefs.push(buyPendingTPLine)
+                        beLabelRefs.push(buyPendingTPLabel)
+
+                    // TELEGRAM ALERT VALUES
+                    // Entry is now a range: Entry1-Entry2.
+                    // SL text explains candle-close condition on the current chart timeframe.
+                    buyEntryText = str.tostring(curZone.info.top, format.mintick) + "-" + str.tostring(curZone.info.bottom, format.mintick)
+                    tfAlertText = formatTimeframeString(timeframe.period)
+                    buySLText = str.tostring(buySL, format.mintick) + " (" + tfAlertText + " candle close under with 50% body)"
+
+                    alert('🟢 VSS3 BUY LIMIT\n📊 Symbol: ' + syminfo.ticker + '\n💰 Entry: ' + buyEntryText + '\n🛑 Stop Loss: ' + buySLText + '\n🎯 Take Profit: ' + str.tostring(buyTP, format.mintick) + '\n\nDATA {"signal":"buylimit","id":"' + str.tostring(zoneGUID) + '","symbol":"' + syminfo.ticker + '","entry":"' + buyEntryText + '","entry1":"' + str.tostring(curZone.info.top, format.mintick) + '","entry2":"' + str.tostring(curZone.info.bottom, format.mintick) + '","sl":"' + buySLText + '","sl_price":"' + str.tostring(buySL, format.mintick) + '","sl_note":"' + tfAlertText + ' candle close under with 50% body","tp":"' + str.tostring(buyTP, format.mintick) + '","timeframe":"' + tfAlertText + '"}', alert.freq_once_per_bar_close)
+
+                    line.delete(lastSLLine)
+                    line.delete(lastTPLine)
+                    if showTpSlLines
+                        lastSLLine := line.new(bar_index, buySL, bar_index + tpSlLineBars, buySL, color=color.red, width=2)
+                        lastTPLine := line.new(bar_index, buyTP, bar_index + tpSlLineBars, buyTP, color=color.green, width=2)
+                    else
+                        lastSLLine := na
+                        lastTPLine := na
+
+// ==============================================================================
+// LIMIT ACTIVATION LABELS
+// ==============================================================================
+if barstate.isconfirmed and activeSellEntries.size() > 0
+    sellKeys = activeSellEntries.keys()
+    if array.size(sellKeys) > 0
+        for a = 0 to array.size(sellKeys) - 1
+            sellGuid = array.get(sellKeys, a)
+            sellEntryToCheck = activeSellEntries.get(sellGuid)
+
+            if high >= sellEntryToCheck and low <= sellEntryToCheck
+                activatedSellZones.put(sellGuid, true)
+                activatedSellTimes.put(sellGuid, time)
+
+                sellActivatedLabel = label.new(
+                     time,
+                     sellEntryToCheck,
+                     text = "ACTIVATED",
+                     xloc = xloc.bar_time,
+                     style = label.style_label_center,
+                     color = activatedVisualColor,
+                     textcolor = color.white,
+                     size = activatedTextSize,
+                     textalign = text.align_center,
+                     text_font_family = activatedFontFamily)
+                activatedLabelGuids.push(sellGuid)
+                activatedLabelRefs.push(sellActivatedLabel)
+
+                sellCloseStopLevel = pendingSellCloseStops.get(sellGuid)
+                tfAlertText = formatTimeframeString(timeframe.period)
+                sellActivatedSLText = not na(sellCloseStopLevel) ? str.tostring(sellCloseStopLevel, format.mintick) + " (" + tfAlertText + " candle close above with 50% body)" : "N/A"
+                sellActivatedSLPrice = not na(sellCloseStopLevel) ? str.tostring(sellCloseStopLevel, format.mintick) : ""
+
+                alert('🟠 VSS3 ACTIVATED\n📊 Symbol: ' + syminfo.ticker + '\n📌 Type: SELL LIMIT ACTIVATED\n💰 Entry: ' + str.tostring(sellEntryToCheck, format.mintick) + '\n🛑 Stop Loss: ' + sellActivatedSLText + '\n\nDATA {"signal":"activatedsell","id":"' + str.tostring(sellGuid) + '","symbol":"' + syminfo.ticker + '","side":"SELL","activated_entry":"' + str.tostring(sellEntryToCheck, format.mintick) + '","sl":"' + sellActivatedSLText + '","sl_price":"' + sellActivatedSLPrice + '","timeframe":"' + tfAlertText + '"}', alert.freq_once_per_bar)
+
+                if not na(sellCloseStopLevel)
+                    liveSellCloseStops.put(sellGuid, sellCloseStopLevel)
+                    pendingSellCloseStops.remove(sellGuid)
+
+                sellTPLevel = pendingSellTPs.get(sellGuid)
+                if not na(sellTPLevel)
+                    liveSellTPs.put(sellGuid, sellTPLevel)
+                    pendingSellTPs.remove(sellGuid)
+
+                sellEntry1 = pendingSellEntry1.get(sellGuid)
+                sellEntry2 = pendingSellEntry2.get(sellGuid)
+                if not na(sellEntry1) and not na(sellEntry2) and not na(sellCloseStopLevel)
+                    sellEntry1Real = sellEntry1 - spreadBuffer
+                    sellEntry2Real = sellEntry2 - spreadBuffer
+                    sellRiskReal = sellCloseStopLevel - sellEntry1Real
+                    sellHalfRLevel = sellEntry1Real - (sellRiskReal * 0.5)
+
+                    liveSellEntry1.put(sellGuid, sellEntry1)
+                    liveSellEntry2.put(sellGuid, sellEntry2)
+                    liveSellEntry1Real.put(sellGuid, sellEntry1Real)
+                    liveSellEntry2Real.put(sellGuid, sellEntry2Real)
+                    liveSellHalfR.put(sellGuid, sellHalfRLevel)
+
+                    // Hidden TP visual level: 1R from ACTIVATED entry, based on close-stop distance.
+                    sellBEVisualRisk = sellCloseStopLevel - sellEntryToCheck
+                    sellBEVisualLevel = sellEntryToCheck - (sellBEVisualRisk * beTriggerR)
+                    liveSellBEVisualLevel.put(sellGuid, sellBEVisualLevel)
+                    liveSellBEVisualDone.put(sellGuid, 0)
+
+                    liveSellBEDone.put(sellGuid, 0)
+                    liveSellPartialDone.put(sellGuid, 0)
+                    liveSellActivationBar.put(sellGuid, bar_index)
+
+                    // If the activation candle already reaches RAW Entry 2 on chart, mark it as filled.
+                    // Partial/close-50 is still blocked until a later candle returns to Entry 1.
+                    sellEntry2FilledOnActivation = high >= sellEntry2
+                    liveSellEntry2Filled.put(sellGuid, sellEntry2FilledOnActivation ? 1 : 0)
+                    liveSellEntry2Bar.put(sellGuid, sellEntry2FilledOnActivation ? bar_index : na)
+
+                    pendingSellEntry1.remove(sellGuid)
+                    pendingSellEntry2.remove(sellGuid)
+
+                    if showManagementVisual and showEntryFilledLabels
+                        label.new(bar_index, sellEntry1, "ENTRY 1 FILLED", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                        if sellEntry2FilledOnActivation
+                            label.new(bar_index, sellEntry2, "ENTRY 2 FILLED", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+
+
+                activeSellEntries.remove(sellGuid)
+
+if barstate.isconfirmed and activeBuyEntries.size() > 0
+    buyKeys = activeBuyEntries.keys()
+    if array.size(buyKeys) > 0
+        for a = 0 to array.size(buyKeys) - 1
+            buyGuid = array.get(buyKeys, a)
+            buyEntryToCheck = activeBuyEntries.get(buyGuid)
+
+            if high >= buyEntryToCheck and low <= buyEntryToCheck
+                activatedBuyZones.put(buyGuid, true)
+                activatedBuyTimes.put(buyGuid, time)
+
+                buyActivatedLabel = label.new(
+                     time,
+                     buyEntryToCheck,
+                     text = "ACTIVATED",
+                     xloc = xloc.bar_time,
+                     style = label.style_label_center,
+                     color = activatedVisualColor,
+                     textcolor = color.white,
+                     size = activatedTextSize,
+                     textalign = text.align_center,
+                     text_font_family = activatedFontFamily)
+                activatedLabelGuids.push(buyGuid)
+                activatedLabelRefs.push(buyActivatedLabel)
+
+                buyCloseStopLevel = pendingBuyCloseStops.get(buyGuid)
+                tfAlertText = formatTimeframeString(timeframe.period)
+                buyActivatedSLText = not na(buyCloseStopLevel) ? str.tostring(buyCloseStopLevel, format.mintick) + " (" + tfAlertText + " candle close under with 50% body)" : "N/A"
+                buyActivatedSLPrice = not na(buyCloseStopLevel) ? str.tostring(buyCloseStopLevel, format.mintick) : ""
+
+                alert('🟠 VSS3 ACTIVATED\n📊 Symbol: ' + syminfo.ticker + '\n📌 Type: BUY LIMIT ACTIVATED\n💰 Entry: ' + str.tostring(buyEntryToCheck, format.mintick) + '\n🛑 Stop Loss: ' + buyActivatedSLText + '\n\nDATA {"signal":"activatedbuy","id":"' + str.tostring(buyGuid) + '","symbol":"' + syminfo.ticker + '","side":"BUY","activated_entry":"' + str.tostring(buyEntryToCheck, format.mintick) + '","sl":"' + buyActivatedSLText + '","sl_price":"' + buyActivatedSLPrice + '","timeframe":"' + tfAlertText + '"}', alert.freq_once_per_bar)
+
+                if not na(buyCloseStopLevel)
+                    liveBuyCloseStops.put(buyGuid, buyCloseStopLevel)
+                    pendingBuyCloseStops.remove(buyGuid)
+
+                buyTPLevel = pendingBuyTPs.get(buyGuid)
+                if not na(buyTPLevel)
+                    liveBuyTPs.put(buyGuid, buyTPLevel)
+                    pendingBuyTPs.remove(buyGuid)
+
+                buyEntry1 = pendingBuyEntry1.get(buyGuid)
+                buyEntry2 = pendingBuyEntry2.get(buyGuid)
+                if not na(buyEntry1) and not na(buyEntry2) and not na(buyCloseStopLevel)
+                    buyEntry1Real = buyEntry1 + spreadBuffer
+                    buyEntry2Real = buyEntry2 + spreadBuffer
+                    buyRiskReal = buyEntry1Real - buyCloseStopLevel
+                    buyHalfRLevel = buyEntry1Real + (buyRiskReal * 0.5)
+
+                    liveBuyEntry1.put(buyGuid, buyEntry1)
+                    liveBuyEntry2.put(buyGuid, buyEntry2)
+                    liveBuyEntry1Real.put(buyGuid, buyEntry1Real)
+                    liveBuyEntry2Real.put(buyGuid, buyEntry2Real)
+                    liveBuyHalfR.put(buyGuid, buyHalfRLevel)
+
+                    // Hidden TP visual level: 1R from ACTIVATED entry, based on close-stop distance.
+                    buyBEVisualRisk = buyEntryToCheck - buyCloseStopLevel
+                    buyBEVisualLevel = buyEntryToCheck + (buyBEVisualRisk * beTriggerR)
+                    liveBuyBEVisualLevel.put(buyGuid, buyBEVisualLevel)
+                    liveBuyBEVisualDone.put(buyGuid, 0)
+
+                    liveBuyBEDone.put(buyGuid, 0)
+                    liveBuyPartialDone.put(buyGuid, 0)
+                    liveBuyActivationBar.put(buyGuid, bar_index)
+
+                    // If the activation candle already reaches RAW Entry 2 on chart, mark it as filled.
+                    // Partial/close-50 is still blocked until a later candle returns to Entry 1.
+                    buyEntry2FilledOnActivation = low <= buyEntry2
+                    liveBuyEntry2Filled.put(buyGuid, buyEntry2FilledOnActivation ? 1 : 0)
+                    liveBuyEntry2Bar.put(buyGuid, buyEntry2FilledOnActivation ? bar_index : na)
+
+                    pendingBuyEntry1.remove(buyGuid)
+                    pendingBuyEntry2.remove(buyGuid)
+
+                    if showManagementVisual and showEntryFilledLabels
+                        label.new(bar_index, buyEntry1, "ENTRY 1 FILLED", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                        if buyEntry2FilledOnActivation
+                            label.new(bar_index, buyEntry2, "ENTRY 2 FILLED", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+
+
+                activeBuyEntries.remove(buyGuid)
+
+// ==============================================================================
+// TRADE MANAGEMENT VISUAL - SPREAD ADJUSTED
+// ==============================================================================
+// SELL:
+// - Entry1 real = Entry1 - Spread Buffer
+// - Entry2 real = Entry2 - Spread Buffer
+// - Entry touch detection stays on RAW chart entries
+// - If only Entry1 fills and price reaches 0.5R: show MOVE SL TO ENTRY.
+// - If Entry2 fills and price returns to Entry1: show CLOSE 50% / SL TO ENTRY 2.
+//
+// BUY:
+// - Entry1 real = Entry1 + Spread Buffer
+// - Entry2 real = Entry2 + Spread Buffer
+// - Entry touch detection stays on RAW chart entries
+// - If only Entry1 fills and price reaches 0.5R: show MOVE SL TO ENTRY.
+// - If Entry2 fills and price returns to Entry1: show CLOSE 50% / SL TO ENTRY 2.
+
+if barstate.isconfirmed
+    if liveSellEntry1.size() > 0
+        sellMgmtKeys = liveSellEntry1.keys()
+        if array.size(sellMgmtKeys) > 0
+            for m = 0 to array.size(sellMgmtKeys) - 1
+                sellMgmtGuid = array.get(sellMgmtKeys, m)
+                sellEntry1 = liveSellEntry1.get(sellMgmtGuid)
+                sellEntry2 = liveSellEntry2.get(sellMgmtGuid)
+                sellEntry1Real = liveSellEntry1Real.get(sellMgmtGuid)
+                sellEntry2Real = liveSellEntry2Real.get(sellMgmtGuid)
+                sellHalfRLevel = liveSellHalfR.get(sellMgmtGuid)
+
+                sellEntry2IsFilled = nz(liveSellEntry2Filled.get(sellMgmtGuid), 0)
+                sellBEDone = nz(liveSellBEDone.get(sellMgmtGuid), 0)
+                sellPartialDone = nz(liveSellPartialDone.get(sellMgmtGuid), 0)
+                sellActivationBar = nz(liveSellActivationBar.get(sellMgmtGuid), bar_index)
+                sellEntry2FilledBar = liveSellEntry2Bar.get(sellMgmtGuid)
+
+                // No BE / partial management on the activation candle. Entry 2 can still be marked as filled on activation.
+                isRealSellSignalZone = nz(signaledSellZones.get(sellMgmtGuid), false)
+                canManageSell = isRealSellSignalZone and bar_index > sellActivationBar
+
+                if canManageSell and sellEntry2IsFilled == 0 and high >= sellEntry2
+                    if showEntryFilledLabels
+                        label.new(bar_index, sellEntry2, "ENTRY 2 FILLED", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                    liveSellEntry2Filled.put(sellMgmtGuid, 1)
+                    liveSellEntry2Bar.put(sellMgmtGuid, bar_index)
+                    sellEntry2IsFilled := 1
+                    sellEntry2FilledBar := bar_index
+
+                // Entry 1 only case: internal silent BE tracking only. No Telegram / TradingView alert.
+                if canManageSell and sellEntry2IsFilled == 0 and sellBEDone == 0 and low <= sellHalfRLevel
+                    if showMoveSLLabels
+                        label.new(bar_index, sellHalfRLevel, "MOVE SL\nTO ENTRY", style=label.style_label_up, color=color.new(color.blue, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                    liveSellBEDone.put(sellMgmtGuid, 1)
+
+                // Entry 1 + Entry 2 case: after RAW Entry 2 is filled, wait for a later candle to return to RAW Entry 1.
+                if canManageSell and sellEntry2IsFilled == 1 and sellPartialDone == 0 and not na(sellEntry2FilledBar) and bar_index > sellEntry2FilledBar and low <= sellEntry1
+                    if showClose50Labels
+                        label.new(bar_index, sellEntry1, "CLOSE 50%\nSL TO ENTRY 2", style=label.style_label_up, color=color.new(color.purple, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                    liveSellPartialDone.put(sellMgmtGuid, 1)
+
+    if liveBuyEntry1.size() > 0
+        buyMgmtKeys = liveBuyEntry1.keys()
+        if array.size(buyMgmtKeys) > 0
+            for m = 0 to array.size(buyMgmtKeys) - 1
+                buyMgmtGuid = array.get(buyMgmtKeys, m)
+                buyEntry1 = liveBuyEntry1.get(buyMgmtGuid)
+                buyEntry2 = liveBuyEntry2.get(buyMgmtGuid)
+                buyEntry1Real = liveBuyEntry1Real.get(buyMgmtGuid)
+                buyEntry2Real = liveBuyEntry2Real.get(buyMgmtGuid)
+                buyHalfRLevel = liveBuyHalfR.get(buyMgmtGuid)
+
+                buyEntry2IsFilled = nz(liveBuyEntry2Filled.get(buyMgmtGuid), 0)
+                buyBEDone = nz(liveBuyBEDone.get(buyMgmtGuid), 0)
+                buyPartialDone = nz(liveBuyPartialDone.get(buyMgmtGuid), 0)
+                buyActivationBar = nz(liveBuyActivationBar.get(buyMgmtGuid), bar_index)
+                buyEntry2FilledBar = liveBuyEntry2Bar.get(buyMgmtGuid)
+
+                // No BE / partial management on the activation candle. Entry 2 can still be marked as filled on activation.
+                isRealBuySignalZone = nz(signaledBuyZones.get(buyMgmtGuid), false)
+                canManageBuy = isRealBuySignalZone and bar_index > buyActivationBar
+
+                if canManageBuy and buyEntry2IsFilled == 0 and low <= buyEntry2
+                    if showEntryFilledLabels
+                        label.new(bar_index, buyEntry2, "ENTRY 2 FILLED", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                    liveBuyEntry2Filled.put(buyMgmtGuid, 1)
+                    liveBuyEntry2Bar.put(buyMgmtGuid, bar_index)
+                    buyEntry2IsFilled := 1
+                    buyEntry2FilledBar := bar_index
+
+                // Entry 1 only case: internal silent BE tracking only. No Telegram / TradingView alert.
+                if canManageBuy and buyEntry2IsFilled == 0 and buyBEDone == 0 and high >= buyHalfRLevel
+                    if showMoveSLLabels
+                        label.new(bar_index, buyHalfRLevel, "MOVE SL\nTO ENTRY", style=label.style_label_down, color=color.new(color.blue, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                    liveBuyBEDone.put(buyMgmtGuid, 1)
+
+                // Entry 1 + Entry 2 case: after RAW Entry 2 is filled, wait for a later candle to return to RAW Entry 1.
+                if canManageBuy and buyEntry2IsFilled == 1 and buyPartialDone == 0 and not na(buyEntry2FilledBar) and bar_index > buyEntry2FilledBar and high >= buyEntry1
+                    if showClose50Labels
+                        label.new(bar_index, buyEntry1, "CLOSE 50%\nSL TO ENTRY 2", style=label.style_label_down, color=color.new(color.purple, 0), textcolor=color.white, size=visualTextSize, text_font_family=visualFontFamily)
+                    liveBuyPartialDone.put(buyMgmtGuid, 1)
+
+// ==============================================================================
+// TRADE RESULT TRACKING FOR MT5 CLOSE ALERTS
+// ==============================================================================
+// TP touch removes the active trade from internal tracking silently.
+// SL is handled silently when the candle CLOSES beyond the close-stop level
+// with at least 50% of its BODY beyond that level. Wicks are ignored.
+// On the ACTIVATION candle only, a confirmed 50%-body SL has priority over TP.
+// On later candles, TP keeps priority when TP and SL both appear together.
+
+// ==============================================================================
+// LIVE TP VISUAL EXTENSION
+// ==============================================================================
+// While a trade is active and its visible TP has not been touched, the TP line
+// and text follow the current candle. It freezes on the first TP touch, or on
+// the confirmed candle where result tracking closes the trade at TP / BE / SL.
+if array.size(beVisualGuids) > 0
+    tpVisualOffsetMs = timeframe.in_seconds() * visualLabelOffsetBars * 1000
+    for tpVisualIndex = 0 to array.size(beVisualGuids) - 1
+        tpVisualGuid = array.get(beVisualGuids, tpVisualIndex)
+        tpTradeIsPending = not na(pendingSellCloseStops.get(tpVisualGuid)) or not na(pendingBuyCloseStops.get(tpVisualGuid))
+        tpTradeIsLive = not na(liveSellCloseStops.get(tpVisualGuid)) or not na(liveBuyCloseStops.get(tpVisualGuid))
+        tpTradeIsActive = tpTradeIsPending or tpTradeIsLive
+        tpSellActivationTime = activatedSellTimes.get(tpVisualGuid)
+        tpBuyActivationTime = activatedBuyTimes.get(tpVisualGuid)
+        tpActivationTime = not na(tpSellActivationTime) ? tpSellActivationTime : tpBuyActivationTime
+        sellTPVisualLevel = liveSellBEVisualLevel.get(tpVisualGuid)
+        buyTPVisualLevel = liveBuyBEVisualLevel.get(tpVisualGuid)
+        sellTPVisualAlreadyHit = not na(sellTPVisualLevel) and nz(liveSellBEVisualDone.get(tpVisualGuid), 0) == 1
+        buyTPVisualAlreadyHit = not na(buyTPVisualLevel) and nz(liveBuyBEVisualDone.get(tpVisualGuid), 0) == 1
+        tpVisualAlreadyHit = sellTPVisualAlreadyHit or buyTPVisualAlreadyHit
+
+        if tpTradeIsActive and not tpVisualAlreadyHit
+            tpVisualLine = array.get(beLineRefs, tpVisualIndex)
+            tpVisualLabel = array.get(beLabelRefs, tpVisualIndex)
+
+            // Extend only while the LIMIT is pending. On the activation candle,
+            // freeze the TP line permanently at that candle.
+            if tpTradeIsPending
+                tpVisualRightTime = time + timeframe.in_seconds() * 1000
+                line.set_x2(tpVisualLine, tpVisualRightTime)
+                label.set_x(tpVisualLabel, tpVisualRightTime)
+            else if tpTradeIsLive and not na(tpActivationTime) and time == tpActivationTime
+                line.set_x2(tpVisualLine, tpActivationTime)
+                label.set_x(tpVisualLabel, tpActivationTime)
+
+            // A pending LIMIT cannot complete its TP before activation.
+            sellTPVisualReached = tpTradeIsLive and not na(sellTPVisualLevel) and low <= sellTPVisualLevel
+            buyTPVisualReached = tpTradeIsLive and not na(buyTPVisualLevel) and high >= buyTPVisualLevel
+            if sellTPVisualReached
+                liveSellBEVisualDone.put(tpVisualGuid, 1)
+            if buyTPVisualReached
+                liveBuyBEVisualDone.put(tpVisualGuid, 1)
+
+// ==============================================================================
+// SELL result tracking
+if liveSellCloseStops.size() > 0 and barstate.isconfirmed
+    sellStopKeys = liveSellCloseStops.keys()
+    if array.size(sellStopKeys) > 0
+        for s = 0 to array.size(sellStopKeys) - 1
+            sellStopGuid = array.get(sellStopKeys, s)
+            sellStopLevel = liveSellCloseStops.get(sellStopGuid)
+            sellTPLevel = liveSellTPs.get(sellStopGuid)
+
+            sellHitTP = not na(sellTPLevel) and low <= sellTPLevel
+            sellHitSL = sellStopConfirmedByBodyClose(sellStopLevel)
+            sellBEDoneNow = nz(liveSellBEDone.get(sellStopGuid), 0)
+            sellEntry2FilledNow = nz(liveSellEntry2Filled.get(sellStopGuid), 0)
+            sellEntry1Now = liveSellEntry1.get(sellStopGuid)
+            sellHitBEStop = sellBEDoneNow == 1 and sellEntry2FilledNow == 0 and not na(sellEntry1Now) and high >= sellEntry1Now
+            sellActivationBarForResult = liveSellActivationBar.get(sellStopGuid)
+            sellSLHasActivationPriority = not na(sellActivationBarForResult) and bar_index == sellActivationBarForResult and sellHitSL
+            sellTPWithPriority = sellHitTP and not sellSLHasActivationPriority
+            sellBEWithPriority = sellHitBEStop and not sellSLHasActivationPriority
+
+            if sellTPWithPriority
+                liveSellCloseStops.remove(sellStopGuid)
+                liveSellTPs.remove(sellStopGuid)
+                liveSellEntry1.remove(sellStopGuid)
+                liveSellEntry2.remove(sellStopGuid)
+                liveSellEntry1Real.remove(sellStopGuid)
+                liveSellEntry2Real.remove(sellStopGuid)
+                liveSellHalfR.remove(sellStopGuid)
+                liveSellBEVisualLevel.remove(sellStopGuid)
+                liveSellBEVisualDone.remove(sellStopGuid)
+                liveSellEntry2Filled.remove(sellStopGuid)
+                liveSellBEDone.remove(sellStopGuid)
+                liveSellPartialDone.remove(sellStopGuid)
+                liveSellActivationBar.remove(sellStopGuid)
+                liveSellEntry2Bar.remove(sellStopGuid)
+                orderZoneTops.remove(sellStopGuid)
+                orderZoneBottoms.remove(sellStopGuid)
+                orderZoneStartTimes.remove(sellStopGuid)
+                orderZoneTimeframes.remove(sellStopGuid)
+                orderIsFlipped.remove(sellStopGuid)
+            else if sellBEWithPriority
+                // After MOVE SL TO ENTRY, if price returns to entry, close tracking silently.
+                // No Telegram message is sent.
+                liveSellCloseStops.remove(sellStopGuid)
+                liveSellTPs.remove(sellStopGuid)
+                liveSellEntry1.remove(sellStopGuid)
+                liveSellEntry2.remove(sellStopGuid)
+                liveSellEntry1Real.remove(sellStopGuid)
+                liveSellEntry2Real.remove(sellStopGuid)
+                liveSellHalfR.remove(sellStopGuid)
+                liveSellBEVisualLevel.remove(sellStopGuid)
+                liveSellBEVisualDone.remove(sellStopGuid)
+                liveSellEntry2Filled.remove(sellStopGuid)
+                liveSellBEDone.remove(sellStopGuid)
+                liveSellPartialDone.remove(sellStopGuid)
+                liveSellActivationBar.remove(sellStopGuid)
+                liveSellEntry2Bar.remove(sellStopGuid)
+                orderZoneTops.remove(sellStopGuid)
+                orderZoneBottoms.remove(sellStopGuid)
+                orderZoneStartTimes.remove(sellStopGuid)
+                orderZoneTimeframes.remove(sellStopGuid)
+                orderIsFlipped.remove(sellStopGuid)
+            else if sellHitSL
+                closeTfText = formatTimeframeString(timeframe.period)
+
+                // Opportunity 2: a failed original SUPPLY becomes one DEMAND.
+                // A zone carrying isFlipped=true is never converted again.
+                sellOrderWasFlipped = nz(orderIsFlipped.get(sellStopGuid), false)
+                sellAlreadyManagedForProfit = nz(liveSellPartialDone.get(sellStopGuid), 0) == 1
+                if not sellOrderWasFlipped and not sellAlreadyManagedForProfit
+                    failedSellTop = orderZoneTops.get(sellStopGuid)
+                    failedSellBottom = orderZoneBottoms.get(sellStopGuid)
+                    failedSellStartTime = orderZoneStartTimes.get(sellStopGuid)
+                    failedSellTimeframe = orderZoneTimeframes.get(sellStopGuid)
+
+                    // The first accepted flip keeps priority. A later flip is
+                    // rejected only when its full zone enters an older flip's
+                    // protected 0.10% edge-to-edge band.
+                    flippedBuyZoneAllowed = true
+                    if not na(failedSellTop) and not na(failedSellBottom) and flippedZonesList.size() > 0
+                        for fbp = 0 to flippedZonesList.size() - 1
+                            olderProtectedFlipForBuy = flippedZonesList.get(fbp)
+                            if isInsideFlippedZoneProtection(failedSellTop, failedSellBottom, olderProtectedFlipForBuy.top, olderProtectedFlipForBuy.bottom)
+                                flippedBuyZoneAllowed := false
+
+                    if not na(failedSellTop) and not na(failedSellBottom) and not na(failedSellStartTime) and flippedBuyZoneAllowed
+                        flippedDemand = sdZoneInfo.new(failedSellTop, failedSellBottom, "Demand", time, na, -math.abs(sellStopGuid))
+                        flippedDemand.sourceSwingHigh := failedSellTop
+                        flippedDemand.sourceSwingLow := failedSellBottom
+                        flippedDemand.timeframeStr := failedSellTimeframe
+                        flippedDemand.isFlipped := true
+                        flippedDemand.parentGuid := sellStopGuid
+                        flippedDemand.createdTime := time
+                        flippedDemand.flipTime := time
+                        flippedZonesList.unshift(flippedDemand)
+                        if flippedZonesList.size() > maxSDZones
+                            flippedZonesList.pop()
+                        convertedOriginalZones.put(sellStopGuid, true)
+
+                        // The accepted flip removes any ordinary pending LIMIT
+                        // already inside its band and blocks later nearby zones.
+                        protectAcceptedFlippedZone(flippedDemand.top, flippedDemand.bottom, sellStopGuid)
+
+                        // Place the opposite BUY LIMIT immediately on the same
+                        // confirmed candle that stopped the original SELL.
+                        flippedDemandGuid = flippedDemand.guid
+                        flippedBuyEntry = flippedDemand.top
+                        flippedBuyLabelText = "BUY LIMIT\n(" + str.tostring(flippedDemand.top, format.mintick) + " / " + str.tostring(flippedDemand.bottom, format.mintick) + ")"
+                        flippedBuyLabelMiddle = (flippedDemand.top + flippedDemand.bottom) / 2
+                        flippedBuyLabel = label.new(
+                             time,
+                             flippedBuyLabelMiddle,
+                             text = flippedBuyLabelText,
+                             xloc = xloc.bar_time,
+                             style = label.style_label_left,
+                             color = buyVisualColor,
+                             textcolor = color.white,
+                             size = visualTextSize,
+                             textalign = text.align_center,
+                             text_font_family = font.family_default)
+
+                        signalLabels.push(flippedBuyLabel)
+                        limitLabelGuids.push(flippedDemandGuid)
+                        limitLabelRefs.push(flippedBuyLabel)
+                        signaledBuyZones.put(flippedDemandGuid, true)
+                        lockTradeZoneVisual(flippedDemand)
+                        demandTouches.put(flippedDemandGuid, 1)
+
+                        if array.size(signalLabels) > maxSignalsToShow
+                            oldFlippedBuySignal = array.shift(signalLabels)
+                            if not showHistoricalSignals
+                                label.delete(oldFlippedBuySignal)
+
+                        activeBuyEntries.put(flippedDemandGuid, flippedBuyEntry)
+                        orderZoneTops.put(flippedDemandGuid, flippedDemand.top)
+                        orderZoneBottoms.put(flippedDemandGuid, flippedDemand.bottom)
+                        orderZoneStartTimes.put(flippedDemandGuid, flippedDemand.startTime)
+                        orderZoneTimeframes.put(flippedDemandGuid, flippedDemand.timeframeStr)
+                        orderIsFlipped.put(flippedDemandGuid, true)
+
+                        flippedBuySwingLow = getFirstSwingLowAfterBox(flippedDemand.startTime, flippedDemand.bottom)
+                        flippedBuySL = math.min(flippedBuySwingLow, flippedDemand.bottom) - slBufferUsed
+                        flippedBuyRisk = flippedBuyEntry - flippedBuySL
+                        flippedBuyTP = flippedBuyEntry + (flippedBuyRisk * tpRR)
+                        pendingBuyCloseStops.put(flippedDemandGuid, flippedBuySL)
+                        pendingBuyTPs.put(flippedDemandGuid, flippedBuyTP)
+                        pendingBuyEntry1.put(flippedDemandGuid, flippedDemand.top)
+                        pendingBuyEntry2.put(flippedDemandGuid, flippedDemand.bottom)
+
+                        if showCloseStopVisual
+                            flippedBuyStopLabelOffsetMs = timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                            flippedBuyStopLine = line.new(flippedDemand.startTime, flippedBuySL, time, flippedBuySL, xloc=xloc.bar_time, color=stopVisualColor, width=1, style=line.style_dashed)
+                            flippedBuyStopLabel = label.new(time, flippedBuySL, "BUY CLOSE STOP\n" + str.tostring(flippedBuySL, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=stopVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                            stopVisualGuids.push(flippedDemandGuid)
+                            stopLineRefs.push(flippedBuyStopLine)
+                            stopLabelRefs.push(flippedBuyStopLabel)
+
+                        // Show the visible TP immediately with the flipped BUY LIMIT.
+                        flippedBuyTPVisualRisk = flippedBuyEntry - flippedBuySL
+                        flippedBuyTPVisualLevel = flippedBuyEntry + (flippedBuyTPVisualRisk * beTriggerR)
+                        limitTPVisualLevels.put(flippedDemandGuid, flippedBuyTPVisualLevel)
+                        liveBuyBEVisualLevel.put(flippedDemandGuid, flippedBuyTPVisualLevel)
+                        liveBuyBEVisualDone.put(flippedDemandGuid, 0)
+                        if showBEVisualLine
+                            flippedBuyTPEndTime = time
+                            flippedBuyTPLabelTime = flippedBuyTPEndTime + timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                            flippedBuyTPLine = line.new(flippedDemand.startTime, flippedBuyTPVisualLevel, flippedBuyTPEndTime, flippedBuyTPVisualLevel, xloc=xloc.bar_time, color=beVisualColor, width=1, style=line.style_dashed)
+                            flippedBuyTPLabel = label.new(flippedBuyTPEndTime, flippedBuyTPVisualLevel, "TP\n" + str.tostring(flippedBuyTPVisualLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=beVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                            beVisualGuids.push(flippedDemandGuid)
+                            beLineRefs.push(flippedBuyTPLine)
+                            beLabelRefs.push(flippedBuyTPLabel)
+
+                        // Render the flipped box on the same closing execution,
+                        // without waiting for the next chart candle.
+                        flippedDemandVisualZone = createSDZone(sdZoneInfo.copy(flippedDemand))
+                        allSDZonesList.unshift(flippedDemandVisualZone)
+                        renderSDZone(flippedDemandVisualZone)
+
+                        flippedBuyTfText = formatTimeframeString(timeframe.period)
+                        flippedBuyEntryText = str.tostring(flippedDemand.top, format.mintick) + "-" + str.tostring(flippedDemand.bottom, format.mintick)
+                        flippedBuySLText = str.tostring(flippedBuySL, format.mintick) + " (" + flippedBuyTfText + " candle close under with 50% body)"
+                        alert('🟢 VSS3 BUY LIMIT\n📊 Symbol: ' + syminfo.ticker + '\n💰 Entry: ' + flippedBuyEntryText + '\n🛑 Stop Loss: ' + flippedBuySLText + '\n🎯 Take Profit: ' + str.tostring(flippedBuyTP, format.mintick) + '\n\nDATA {"signal":"buylimit","id":"' + str.tostring(flippedDemandGuid) + '","symbol":"' + syminfo.ticker + '","entry":"' + flippedBuyEntryText + '","entry1":"' + str.tostring(flippedDemand.top, format.mintick) + '","entry2":"' + str.tostring(flippedDemand.bottom, format.mintick) + '","sl":"' + flippedBuySLText + '","sl_price":"' + str.tostring(flippedBuySL, format.mintick) + '","sl_note":"' + flippedBuyTfText + ' candle close under with 50% body","tp":"' + str.tostring(flippedBuyTP, format.mintick) + '","timeframe":"' + flippedBuyTfText + '"}', alert.freq_once_per_bar_close)
+
+                liveSellCloseStops.remove(sellStopGuid)
+                liveSellTPs.remove(sellStopGuid)
+                liveSellEntry1.remove(sellStopGuid)
+                liveSellEntry2.remove(sellStopGuid)
+                liveSellEntry1Real.remove(sellStopGuid)
+                liveSellEntry2Real.remove(sellStopGuid)
+                liveSellHalfR.remove(sellStopGuid)
+                liveSellBEVisualLevel.remove(sellStopGuid)
+                liveSellBEVisualDone.remove(sellStopGuid)
+                liveSellEntry2Filled.remove(sellStopGuid)
+                liveSellBEDone.remove(sellStopGuid)
+                liveSellPartialDone.remove(sellStopGuid)
+                liveSellActivationBar.remove(sellStopGuid)
+                liveSellEntry2Bar.remove(sellStopGuid)
+                orderZoneTops.remove(sellStopGuid)
+                orderZoneBottoms.remove(sellStopGuid)
+                orderZoneStartTimes.remove(sellStopGuid)
+                orderZoneTimeframes.remove(sellStopGuid)
+                orderIsFlipped.remove(sellStopGuid)
+
+// BUY result tracking
+if liveBuyCloseStops.size() > 0 and barstate.isconfirmed
+    buyStopKeys = liveBuyCloseStops.keys()
+    if array.size(buyStopKeys) > 0
+        for b = 0 to array.size(buyStopKeys) - 1
+            buyStopGuid = array.get(buyStopKeys, b)
+            buyStopLevel = liveBuyCloseStops.get(buyStopGuid)
+            buyTPLevel = liveBuyTPs.get(buyStopGuid)
+
+            buyHitTP = not na(buyTPLevel) and high >= buyTPLevel
+            buyHitSL = buyStopConfirmedByBodyClose(buyStopLevel)
+            buyBEDoneNow = nz(liveBuyBEDone.get(buyStopGuid), 0)
+            buyEntry2FilledNow = nz(liveBuyEntry2Filled.get(buyStopGuid), 0)
+            buyEntry1Now = liveBuyEntry1.get(buyStopGuid)
+            buyHitBEStop = buyBEDoneNow == 1 and buyEntry2FilledNow == 0 and not na(buyEntry1Now) and low <= buyEntry1Now
+            buyActivationBarForResult = liveBuyActivationBar.get(buyStopGuid)
+            buySLHasActivationPriority = not na(buyActivationBarForResult) and bar_index == buyActivationBarForResult and buyHitSL
+            buyTPWithPriority = buyHitTP and not buySLHasActivationPriority
+            buyBEWithPriority = buyHitBEStop and not buySLHasActivationPriority
+
+            if buyTPWithPriority
+                liveBuyCloseStops.remove(buyStopGuid)
+                liveBuyTPs.remove(buyStopGuid)
+                liveBuyEntry1.remove(buyStopGuid)
+                liveBuyEntry2.remove(buyStopGuid)
+                liveBuyEntry1Real.remove(buyStopGuid)
+                liveBuyEntry2Real.remove(buyStopGuid)
+                liveBuyHalfR.remove(buyStopGuid)
+                liveBuyBEVisualLevel.remove(buyStopGuid)
+                liveBuyBEVisualDone.remove(buyStopGuid)
+                liveBuyEntry2Filled.remove(buyStopGuid)
+                liveBuyBEDone.remove(buyStopGuid)
+                liveBuyPartialDone.remove(buyStopGuid)
+                liveBuyActivationBar.remove(buyStopGuid)
+                liveBuyEntry2Bar.remove(buyStopGuid)
+                orderZoneTops.remove(buyStopGuid)
+                orderZoneBottoms.remove(buyStopGuid)
+                orderZoneStartTimes.remove(buyStopGuid)
+                orderZoneTimeframes.remove(buyStopGuid)
+                orderIsFlipped.remove(buyStopGuid)
+
+            else if buyBEWithPriority
+                // After MOVE SL TO ENTRY, if price returns to entry, close tracking silently.
+                // No Telegram message is sent.
+                liveBuyCloseStops.remove(buyStopGuid)
+                liveBuyTPs.remove(buyStopGuid)
+                liveBuyEntry1.remove(buyStopGuid)
+                liveBuyEntry2.remove(buyStopGuid)
+                liveBuyEntry1Real.remove(buyStopGuid)
+                liveBuyEntry2Real.remove(buyStopGuid)
+                liveBuyHalfR.remove(buyStopGuid)
+                liveBuyBEVisualLevel.remove(buyStopGuid)
+                liveBuyBEVisualDone.remove(buyStopGuid)
+                liveBuyEntry2Filled.remove(buyStopGuid)
+                liveBuyBEDone.remove(buyStopGuid)
+                liveBuyPartialDone.remove(buyStopGuid)
+                liveBuyActivationBar.remove(buyStopGuid)
+                liveBuyEntry2Bar.remove(buyStopGuid)
+                orderZoneTops.remove(buyStopGuid)
+                orderZoneBottoms.remove(buyStopGuid)
+                orderZoneStartTimes.remove(buyStopGuid)
+                orderZoneTimeframes.remove(buyStopGuid)
+                orderIsFlipped.remove(buyStopGuid)
+            else if buyHitSL
+                closeTfText = formatTimeframeString(timeframe.period)
+
+                // Opportunity 2: a failed original DEMAND becomes one SUPPLY.
+                // A zone carrying isFlipped=true is never converted again.
+                buyOrderWasFlipped = nz(orderIsFlipped.get(buyStopGuid), false)
+                buyAlreadyManagedForProfit = nz(liveBuyPartialDone.get(buyStopGuid), 0) == 1
+                if not buyOrderWasFlipped and not buyAlreadyManagedForProfit
+                    failedBuyTop = orderZoneTops.get(buyStopGuid)
+                    failedBuyBottom = orderZoneBottoms.get(buyStopGuid)
+                    failedBuyStartTime = orderZoneStartTimes.get(buyStopGuid)
+                    failedBuyTimeframe = orderZoneTimeframes.get(buyStopGuid)
+
+                    // The first accepted flip keeps priority. A later flip is
+                    // rejected only when its full zone enters an older flip's
+                    // protected 0.10% edge-to-edge band.
+                    flippedSellZoneAllowed = true
+                    if not na(failedBuyTop) and not na(failedBuyBottom) and flippedZonesList.size() > 0
+                        for fsp = 0 to flippedZonesList.size() - 1
+                            olderProtectedFlipForSell = flippedZonesList.get(fsp)
+                            if isInsideFlippedZoneProtection(failedBuyTop, failedBuyBottom, olderProtectedFlipForSell.top, olderProtectedFlipForSell.bottom)
+                                flippedSellZoneAllowed := false
+
+                    if not na(failedBuyTop) and not na(failedBuyBottom) and not na(failedBuyStartTime) and flippedSellZoneAllowed
+                        flippedSupply = sdZoneInfo.new(failedBuyTop, failedBuyBottom, "Supply", time, na, -math.abs(buyStopGuid))
+                        flippedSupply.sourceSwingHigh := failedBuyTop
+                        flippedSupply.sourceSwingLow := failedBuyBottom
+                        flippedSupply.timeframeStr := failedBuyTimeframe
+                        flippedSupply.isFlipped := true
+                        flippedSupply.parentGuid := buyStopGuid
+                        flippedSupply.createdTime := time
+                        flippedSupply.flipTime := time
+                        flippedZonesList.unshift(flippedSupply)
+                        if flippedZonesList.size() > maxSDZones
+                            flippedZonesList.pop()
+                        convertedOriginalZones.put(buyStopGuid, true)
+
+                        // The accepted flip removes any ordinary pending LIMIT
+                        // already inside its band and blocks later nearby zones.
+                        protectAcceptedFlippedZone(flippedSupply.top, flippedSupply.bottom, buyStopGuid)
+
+                        // Place the opposite SELL LIMIT immediately on the same
+                        // confirmed candle that stopped the original BUY.
+                        flippedSupplyGuid = flippedSupply.guid
+                        flippedSellEntry = flippedSupply.bottom
+                        flippedSellLabelText = "SELL LIMIT\n(" + str.tostring(flippedSupply.bottom, format.mintick) + " / " + str.tostring(flippedSupply.top, format.mintick) + ")"
+                        flippedSellLabelMiddle = (flippedSupply.top + flippedSupply.bottom) / 2
+                        flippedSellLabel = label.new(
+                             time,
+                             flippedSellLabelMiddle,
+                             text = flippedSellLabelText,
+                             xloc = xloc.bar_time,
+                             style = label.style_label_left,
+                             color = sellVisualColor,
+                             textcolor = color.white,
+                             size = visualTextSize,
+                             textalign = text.align_center,
+                             text_font_family = font.family_default)
+
+                        signalLabels.push(flippedSellLabel)
+                        limitLabelGuids.push(flippedSupplyGuid)
+                        limitLabelRefs.push(flippedSellLabel)
+                        signaledSellZones.put(flippedSupplyGuid, true)
+                        lockTradeZoneVisual(flippedSupply)
+                        supplyTouches.put(flippedSupplyGuid, 1)
+
+                        if array.size(signalLabels) > maxSignalsToShow
+                            oldFlippedSellSignal = array.shift(signalLabels)
+                            if not showHistoricalSignals
+                                label.delete(oldFlippedSellSignal)
+
+                        activeSellEntries.put(flippedSupplyGuid, flippedSellEntry)
+                        orderZoneTops.put(flippedSupplyGuid, flippedSupply.top)
+                        orderZoneBottoms.put(flippedSupplyGuid, flippedSupply.bottom)
+                        orderZoneStartTimes.put(flippedSupplyGuid, flippedSupply.startTime)
+                        orderZoneTimeframes.put(flippedSupplyGuid, flippedSupply.timeframeStr)
+                        orderIsFlipped.put(flippedSupplyGuid, true)
+
+                        flippedSellSwingHigh = getFirstSwingHighAfterBox(flippedSupply.startTime, flippedSupply.top)
+                        flippedSellSL = math.max(flippedSellSwingHigh, flippedSupply.top) + slBufferUsed
+                        flippedSellRisk = flippedSellSL - flippedSellEntry
+                        flippedSellTP = flippedSellEntry - (flippedSellRisk * tpRR)
+                        pendingSellCloseStops.put(flippedSupplyGuid, flippedSellSL)
+                        pendingSellTPs.put(flippedSupplyGuid, flippedSellTP)
+                        pendingSellEntry1.put(flippedSupplyGuid, flippedSupply.bottom)
+                        pendingSellEntry2.put(flippedSupplyGuid, flippedSupply.top)
+
+                        if showCloseStopVisual
+                            flippedSellStopLabelOffsetMs = timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                            flippedSellStopLine = line.new(flippedSupply.startTime, flippedSellSL, time, flippedSellSL, xloc=xloc.bar_time, color=sellStopVisualColor, width=1, style=line.style_dashed)
+                            flippedSellStopLabel = label.new(time, flippedSellSL, "SELL CLOSE STOP\n" + str.tostring(flippedSellSL, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=sellStopVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                            stopVisualGuids.push(flippedSupplyGuid)
+                            stopLineRefs.push(flippedSellStopLine)
+                            stopLabelRefs.push(flippedSellStopLabel)
+
+                        // Show the visible TP immediately with the flipped SELL LIMIT.
+                        flippedSellTPVisualRisk = flippedSellSL - flippedSellEntry
+                        flippedSellTPVisualLevel = flippedSellEntry - (flippedSellTPVisualRisk * beTriggerR)
+                        limitTPVisualLevels.put(flippedSupplyGuid, flippedSellTPVisualLevel)
+                        liveSellBEVisualLevel.put(flippedSupplyGuid, flippedSellTPVisualLevel)
+                        liveSellBEVisualDone.put(flippedSupplyGuid, 0)
+                        if showBEVisualLine
+                            flippedSellTPEndTime = time
+                            flippedSellTPLabelTime = flippedSellTPEndTime + timeframe.in_seconds() * visualLabelOffsetBars * 1000
+                            flippedSellTPLine = line.new(flippedSupply.startTime, flippedSellTPVisualLevel, flippedSellTPEndTime, flippedSellTPVisualLevel, xloc=xloc.bar_time, color=beVisualColor, width=1, style=line.style_dashed)
+                            flippedSellTPLabel = label.new(flippedSellTPEndTime, flippedSellTPVisualLevel, "TP\n" + str.tostring(flippedSellTPVisualLevel, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=beVisualColor, textcolor=color.white, size=visualTextSize, textalign=text.align_center, text_font_family=font.family_default)
+                            beVisualGuids.push(flippedSupplyGuid)
+                            beLineRefs.push(flippedSellTPLine)
+                            beLabelRefs.push(flippedSellTPLabel)
+
+                        // Render the flipped box on the same closing execution,
+                        // without waiting for the next chart candle.
+                        flippedSupplyVisualZone = createSDZone(sdZoneInfo.copy(flippedSupply))
+                        allSDZonesList.unshift(flippedSupplyVisualZone)
+                        renderSDZone(flippedSupplyVisualZone)
+
+                        flippedSellTfText = formatTimeframeString(timeframe.period)
+                        flippedSellEntryText = str.tostring(flippedSupply.bottom, format.mintick) + "-" + str.tostring(flippedSupply.top, format.mintick)
+                        flippedSellSLText = str.tostring(flippedSellSL, format.mintick) + " (" + flippedSellTfText + " candle close above with 50% body)"
+                        alert('🔴 VSS3 SELL LIMIT\n📊 Symbol: ' + syminfo.ticker + '\n💰 Entry: ' + flippedSellEntryText + '\n🛑 Stop Loss: ' + flippedSellSLText + '\n🎯 Take Profit: ' + str.tostring(flippedSellTP, format.mintick) + '\n\nDATA {"signal":"selllimit","id":"' + str.tostring(flippedSupplyGuid) + '","symbol":"' + syminfo.ticker + '","entry":"' + flippedSellEntryText + '","entry1":"' + str.tostring(flippedSupply.bottom, format.mintick) + '","entry2":"' + str.tostring(flippedSupply.top, format.mintick) + '","sl":"' + flippedSellSLText + '","sl_price":"' + str.tostring(flippedSellSL, format.mintick) + '","sl_note":"' + flippedSellTfText + ' candle close above with 50% body","tp":"' + str.tostring(flippedSellTP, format.mintick) + '","timeframe":"' + flippedSellTfText + '"}', alert.freq_once_per_bar_close)
+
+                liveBuyCloseStops.remove(buyStopGuid)
+                liveBuyTPs.remove(buyStopGuid)
+                liveBuyEntry1.remove(buyStopGuid)
+                liveBuyEntry2.remove(buyStopGuid)
+                liveBuyEntry1Real.remove(buyStopGuid)
+                liveBuyEntry2Real.remove(buyStopGuid)
+                liveBuyHalfR.remove(buyStopGuid)
+                liveBuyBEVisualLevel.remove(buyStopGuid)
+                liveBuyBEVisualDone.remove(buyStopGuid)
+                liveBuyEntry2Filled.remove(buyStopGuid)
+                liveBuyBEDone.remove(buyStopGuid)
+                liveBuyPartialDone.remove(buyStopGuid)
+                liveBuyActivationBar.remove(buyStopGuid)
+                liveBuyEntry2Bar.remove(buyStopGuid)
+                orderZoneTops.remove(buyStopGuid)
+                orderZoneBottoms.remove(buyStopGuid)
+                orderZoneStartTimes.remove(buyStopGuid)
+                orderZoneTimeframes.remove(buyStopGuid)
+                orderIsFlipped.remove(buyStopGuid)

@@ -60,29 +60,7 @@ class ConfigManager:
         return load_runtime_config(self.base_dir, require_mt5_credentials=False, apply_mode_env_override=False)
 
     def resolve_runtime_mode(self, control_state: dict[str, Any] | None = None) -> tuple[str, str]:
-        """Resolve the authoritative runtime mode with clear precedence.
-        
-        Precedence (highest to lowest):
-        1. Control state runtime mode (if provided and fresh) - dashboard/bot live selection
-        2. Config file mode - persisted last-known mode
-        3. Default fallback - "DRY_RUN"
-        
-        Returns:
-            Tuple of (resolved_mode, source) where source is one of:
-            - "control_state" (dashboard/live override)
-            - "config_file" (persisted configuration)
-            - "default" (fallback)
-        """
-        # Priority 1: Check control_state if provided (represents live operator intent)
-        if control_state and isinstance(control_state, dict):
-            runtime = control_state.get("runtime", {})
-            mode_from_control = runtime.get("mode")
-            if mode_from_control:
-                normalized = normalize_trading_mode(mode_from_control)
-                if normalized:
-                    return normalized, "control_state"
-        
-        # Priority 2: Check config.json (last persisted/default configuration)
+        """Resolve mode from config.json; control state is only a runtime mirror."""
         try:
             config = self.load_runtime()
             mode_from_config = config.get("bot", {}).get("trading_mode")
@@ -92,8 +70,6 @@ class ConfigManager:
                     return normalized, "config_file"
         except Exception:
             pass
-        
-        # Priority 3: Default fallback
         return normalize_trading_mode("DRY_RUN"), "default"
 
     def load_shadow(self) -> dict[str, Any]:
@@ -190,7 +166,7 @@ class ConfigManager:
     def dashboard_view(self) -> dict[str, Any]:
         """Return a dashboard-friendly config payload."""
         config = self.load_runtime()
-        config, resolved_mode = apply_execution_mode_to_config(config)
+        config, resolved_mode = apply_execution_mode_to_config(config, apply_legacy_strategy_controls=False)
         strategy_cfg = config.setdefault("strategy", {})
         setup_families = strategy_cfg.setdefault("setup_families", {})
         setup_controls = strategy_cfg.setdefault("setup_controls", {})
@@ -274,7 +250,7 @@ class ConfigManager:
     def resolved_runtime_snapshot(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return the authoritative resolved runtime policy snapshot."""
         cfg = copy.deepcopy(config or self.load_runtime())
-        cfg, resolved_mode = apply_execution_mode_to_config(cfg)
+        cfg, resolved_mode = apply_execution_mode_to_config(cfg, apply_legacy_strategy_controls=False)
         strategy_cfg = cfg.get("strategy", {}) if isinstance(cfg.get("strategy"), dict) else {}
         execution_cfg = cfg.get("execution", {}) if isinstance(cfg.get("execution"), dict) else {}
         risk_cfg = cfg.get("risk", {}) if isinstance(cfg.get("risk"), dict) else {}
@@ -360,12 +336,7 @@ class ConfigManager:
                     return source_value, source_name
             return None, "unknown"
 
-        mode_value, mode_source = _resolve([
-            ("process_runtime", process_mode),
-            ("persisted_control_state", control_mode),
-            ("root_config", root_mode),
-            ("storage_config", shadow_mode),
-        ])
+        mode_value, mode_source = normalize_trading_mode(root_mode), "root_config"
         db_value, db_source = _resolve([
             ("process_runtime", process_db_path),
             ("root_config", root_db_path),
@@ -387,7 +358,7 @@ class ConfigManager:
             "execution_enabled_mismatch": bool(shadow_config) and root_execution_enabled != shadow_execution_enabled,
         }
         return {
-            "precedence": ["process_runtime", "persisted_control_state", "root_config", "storage_config"],
+            "precedence": ["root_config"],
             "effective": {
                 "mode": mode_value,
                 "database_path": db_value,
@@ -437,7 +408,7 @@ class ConfigManager:
         config.setdefault("execution", {})
         config.setdefault("risk", {})
         config.setdefault("dashboard", {})
-        apply_execution_mode_to_config(config)
+        apply_execution_mode_to_config(config, apply_legacy_strategy_controls=False)
         config.setdefault("bot", {}).pop("execution_mode_summary", None)
         self._validate(config)
 
@@ -451,6 +422,35 @@ class ConfigManager:
         mt5_cfg = config.setdefault("mt5", {})
         sessions_cfg = config.setdefault("sessions", {})
         telegram_cfg = config.setdefault("telegram", {})
+        lebprime_cfg = config.get("lebprime_v3_4_0")
+        if lebprime_cfg is not None:
+            if not isinstance(lebprime_cfg, dict):
+                raise ValueError("lebprime_v3_4_0 must be an object")
+            lebprime_mode = str(lebprime_cfg.get("execution_mode", "DRY")).upper()
+            if lebprime_mode not in {"DRY", "LIVE"}:
+                raise ValueError("lebprime_v3_4_0.execution_mode must be DRY or LIVE")
+            lebprime_symbols = lebprime_cfg.get("symbols", ["XAUUSD", "US30", "NAS100"])
+            lebprime_timeframes = lebprime_cfg.get("timeframes", ["M1", "M3", "M5", "M15", "M30", "M45"])
+            if not isinstance(lebprime_symbols, list) or not lebprime_symbols:
+                raise ValueError("lebprime_v3_4_0.symbols must contain at least one logical symbol")
+            if not isinstance(lebprime_timeframes, list) or not lebprime_timeframes:
+                raise ValueError("lebprime_v3_4_0.timeframes must contain at least one timeframe")
+            invalid_symbols = sorted({str(item).upper() for item in lebprime_symbols} - {"XAUUSD", "US30", "NAS100"})
+            invalid_timeframes = sorted({str(item).upper() for item in lebprime_timeframes} - {"M1", "M3", "M5", "M15", "M30", "M45"})
+            if invalid_symbols:
+                raise ValueError(f"Unsupported lebprime_v3_4_0 symbols: {', '.join(invalid_symbols)}")
+            if invalid_timeframes:
+                raise ValueError(f"Unsupported lebprime_v3_4_0 timeframes: {', '.join(invalid_timeframes)}")
+            if lebprime_cfg.get("max_spread_points") not in (None, ""):
+                self._assert_positive(float(lebprime_cfg["max_spread_points"]), "lebprime_v3_4_0.max_spread_points")
+            spread_limits = lebprime_cfg.get("max_spread_points_by_symbol", {})
+            if not isinstance(spread_limits, dict):
+                raise ValueError("lebprime_v3_4_0.max_spread_points_by_symbol must be an object")
+            invalid_spread_symbols = sorted({str(key).upper() for key in spread_limits} - {"XAUUSD", "US30", "NAS100", "USTEC"})
+            if invalid_spread_symbols:
+                raise ValueError(f"Unsupported LebPrime spread symbols: {', '.join(invalid_spread_symbols)}")
+            for symbol, value in spread_limits.items():
+                self._assert_positive(float(value), f"lebprime_v3_4_0.max_spread_points_by_symbol.{symbol}")
 
         self._assert_between(float(strategy_cfg.get("min_score_to_trade", 0.0)), 0.0, 100.0, "strategy.min_score_to_trade")
         for group_name in ["live_thresholds", "dry_run_thresholds"]:

@@ -185,12 +185,13 @@ def ensure_worker_running(
         if latest.get("alive"):
             break
         time.sleep(0.25)
-    available = True
-    message = "Backtest worker launch requested"
+    available = bool(latest.get("alive"))
+    message = "Backtest worker is running" if available else "Backtest worker launch did not produce a fresh heartbeat"
     return {
         "worker_available": available,
         "launch_attempted": True,
-        "started": True,
+        "started": available,
         "status": latest,
         "message": message,
+        **({"warning": message} if not available else {}),
     }

@@ -15,9 +15,10 @@ from services.config_manager import ConfigManager
 from services.database import DatabaseService
 from services.job_service import JobService
 from services.oos_service import OOSService
-from services.worker_control import ensure_worker_running, write_worker_status
+from services.worker_control import ensure_worker_running, read_worker_status, write_worker_status
 from services.worker import WorkerService
 from trading_bot.core.job_state import JobState
+from utils import resolve_python_executable
 
 
 def _worker_base(tmp_path: Path) -> Path:
@@ -123,6 +124,23 @@ def test_worker_executes_backtest_job_to_completion(tmp_path: Path, monkeypatch)
     assert final_job["state"] == "COMPLETED"
     assert int(final_job["related_run_id"]) > 0
     assert final_job["result_json"]["summary"]["net_profit"] == 123.0
+
+
+def test_running_worker_keeps_fresh_heartbeat(tmp_path: Path) -> None:
+    base = _worker_base(tmp_path)
+    worker = WorkerService(base, poll_interval_seconds=0.01, heartbeat_stale_seconds=60)
+    assert worker.run_once() is None
+    status = read_worker_status(base, stale_seconds=60)
+    assert status["alive"] is True
+    assert status["state"] == "running"
+    assert status["pid"] == __import__("os").getpid()
+
+
+def test_python_resolver_prefers_proven_current_interpreter_over_launcher(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("utils.shutil.which", lambda name: "C:/Windows/py.exe" if name == "py" else None)
+    executable, reason = resolve_python_executable(tmp_path)
+    assert Path(executable).resolve() == Path(__import__("sys").executable).resolve()
+    assert reason == "current interpreter"
 
 
 def test_worker_marks_failed_job_on_exception(tmp_path: Path, monkeypatch) -> None:
