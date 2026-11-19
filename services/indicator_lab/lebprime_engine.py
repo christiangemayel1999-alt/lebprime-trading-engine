@@ -869,6 +869,43 @@ class LebPrimeEngine(IndicatorEngine):
     def _single_entry(self) -> bool:
         return self._confirm_entry() or str(self.parameters.get("entry2_mode", "Far edge")) == "Off"
 
+    def _apply_recovery(self, zone: ZoneRecord, bar: Candle, demand: bool, legs: dict, entry1: float, touched) -> None:
+        """Recovery rule: both entries filled and price climbs back to Entry 1.
+
+        "Close E1, E2 stop to E1": Entry 1 is closed at Entry 1 (about break-even) and Entry 2's stop moves
+        to Entry 1, locking its gain while it runs to the targets.
+        "Close both at E1": both entries are closed at Entry 1 (Entry 2 keeps its gain).
+        Checked after the stop on the same candle (stop assumed first).
+        """
+        mode = str(self.parameters.get("recover_mode", "Off"))
+        if mode == "Off" or zone.metadata.get("recovery_active"):
+            return
+        leg2 = legs["2"]
+        if not (legs["1"]["filled"] and leg2["filled"] and leg2["fill_bar_index"] is not None and bar.index > int(leg2["fill_bar_index"])):
+            return
+        if not touched(entry1, False):
+            return
+        if mode == "Close both at E1":
+            self._finish_live(zone, bar, "BE_EXIT", entry1, entry1, "Both entries closed at Entry 1 after recovery")
+            return
+        self._close_live_legs_only(zone, "1", entry1, demand)
+        zone.metadata["recovery_active"] = True
+        zone.metadata["recovery_bar"] = bar.index
+
+    def _close_live_legs_only(self, zone: ZoneRecord, leg_no: str, exit_price: float, demand: bool) -> None:
+        leg = self._live_legs(zone)[leg_no]
+        if not leg["filled"] or leg["open_fraction"] <= 0.0:
+            return
+        stop = float(zone.sl_price)
+        sizing_price = float(self._live_legs(zone)["1"]["planned_price"]) if str(self.parameters.get("leg_sizing", LEG_SIZING_OWN)) == LEG_SIZING_EQUAL else float(leg["planned_price"])
+        risk = abs(sizing_price - stop)
+        if risk <= 0.0:
+            return
+        pnl = (exit_price - float(leg["fill_price"])) if demand else (float(leg["fill_price"]) - exit_price)
+        weight = 1.0 if self._single_entry() else LEG_RISK_WEIGHT
+        leg["realized_r"] = float(leg["realized_r"]) + weight * float(leg["open_fraction"]) * pnl / risk
+        leg["open_fraction"] = 0.0
+
     def _close_stop_mode(self) -> bool:
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
 
@@ -971,6 +1008,11 @@ class LebPrimeEngine(IndicatorEngine):
         if zone.metadata.get("be_armed_after_bar") is not None and bar.index > int(zone.metadata["be_armed_after_bar"]):
             zone.metadata["be_armed"] = True
         self._update_excursions(zone, bar, demand)
+        # Recovery rule (after Entry 1 was closed at Entry 1): Entry 2's stop now sits at Entry 1.
+        if zone.metadata.get("recovery_active") and touched(entry1, True):
+            exit_price = self._stop_exit_price(bar, demand, entry1)
+            self._finish_live(zone, bar, "TP1_FINAL" if zone.tp1_hit_bar_index is not None else "BE_EXIT", exit_price, entry1, "Entry 2 stopped at Entry 1 after recovery")
+            return
         # Rule: break-even. Once a candle has reached be_trigger_r, the stop sits at Entry 1 from the next candle.
         if zone.metadata.get("be_armed") and touched(entry1, True):
             exit_price = self._stop_exit_price(bar, demand, entry1)
@@ -1010,6 +1052,8 @@ class LebPrimeEngine(IndicatorEngine):
             elif close_mode and self._stop_confirmed(bar, demand, stop):
                 # Pine rule: a candle closes with at least half its body beyond the SL; the bot exits at that close.
                 self._finish_live(zone, bar, "SL_HIT", bar.close, stop, "Candle closed beyond SL")
+            if zone.terminal_state is None and zone.tp1_hit_bar_index is None:
+                self._apply_recovery(zone, bar, demand, legs, entry1, touched)
             return
 
         if bar.index <= int(zone.tp1_hit_bar_index):

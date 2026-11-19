@@ -257,3 +257,27 @@ def test_equal_lot_sizing_measures_entry2_from_entry1_risk():
     legs["2"].update({"filled": True, "fill_price": 99.0, "open_fraction": 1.0})
     engine._close_live_legs(zone, 98.0, True)
     assert engine._live_result_r(zone) == pytest.approx(0.5 * (98.0 - 99.0) / 2.0)
+
+
+def test_recovery_closes_entry1_at_entry1_and_moves_entry2_stop():
+    zone = _demand_zone()  # E1 100, E2 99, SL 98, TP1 102, TP2 104
+    engine = _engine(stop_rule="Price touch", recover_mode="Close E1, E2 stop to E1", leg_sizing="Entry 1 distance (equal lots)")
+    bars = [
+        _bar(0, 102, 102.5, 101, 101.5),
+        _bar(1, 101.0, 101.2, 98.9, 99.2),   # both entries fill (E2 at 99)
+        _bar(2, 99.2, 100.3, 99.1, 100.1),   # back to Entry 1: E1 closed at 100, E2 stop -> 100
+        _bar(3, 100.1, 104.5, 100.05, 104.2),  # runs to TP2
+    ]
+    _run(engine, zone, bars)
+    assert zone.terminal_state == "TP2_HIT"
+    # E1 ~0R, E2 from 99 to 104 on Entry 1 risk (equal lots): 0.5 * 5/2
+    assert zone.result_r == pytest.approx(0.5 * 5.0 / 2.0)
+
+
+def test_recovery_close_both_at_entry1():
+    zone = _demand_zone()
+    engine = _engine(stop_rule="Price touch", recover_mode="Close both at E1", leg_sizing="Entry 1 distance (equal lots)")
+    bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.2, 98.9, 99.2), _bar(2, 99.2, 100.3, 99.1, 100.1)]
+    _run(engine, zone, bars)
+    assert zone.terminal_state == "BE_EXIT"
+    assert zone.result_r == pytest.approx(0.5 * 1.0 / 2.0)
