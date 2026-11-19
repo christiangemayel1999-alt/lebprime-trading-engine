@@ -1072,9 +1072,12 @@ class LebPrimeEngine(IndicatorEngine):
                 zone.tp1_hit_time = bar.timestamp
                 if not legs["2"]["filled"]:
                     legs["2"]["canceled"] = True
-                # The runtime closes half of every open position after the TP1 candle closes.
-                self._close_live_legs(zone, bar.close, demand, fraction=float(self.parameters.get("tp1_close_fraction", 0.5)))
-                zone.metadata["tp1_partial_price"] = bar.close
+                # Default: the runtime closes the TP1 share after the TP1 candle closes (at the close).
+                # "Broker orders": that share is its own position with TP at TP1, so it fills at TP1.
+                broker_tp1 = str(self.parameters.get("tp1_execution", "Bot at candle close")) == "Broker orders"
+                partial_price = self._target_exit_price(bar, demand, tp1) if broker_tp1 else bar.close
+                self._close_live_legs(zone, partial_price, demand, fraction=float(self.parameters.get("tp1_close_fraction", 0.5)))
+                zone.metadata["tp1_partial_price"] = partial_price
                 self._emit(zone, bar, "TP1_HIT", price=tp1)
             elif close_mode and self._stop_confirmed(bar, demand, stop):
                 # Pine rule: a candle closes with at least half its body beyond the SL; the bot exits at that close.
@@ -1093,6 +1096,9 @@ class LebPrimeEngine(IndicatorEngine):
         elif touched(tp2, False):
             exit_price = self._target_exit_price(bar, demand, tp2)
             self._finish_live(zone, bar, "TP2_HIT", exit_price, tp2, "TP2")
+        elif touched(entry1, True) and str(self.parameters.get("tp1_execution", "Bot at candle close")) == "Broker orders":
+            # After TP1 the runner's broker stop sits at Entry 1, so a return fills exactly there.
+            self._finish_live(zone, bar, "TP1_FINAL", self._stop_exit_price(bar, demand, entry1), tp1, "Runner stopped at Entry 1 after TP1")
         elif touched(entry1, True) or (close_mode and self._stop_confirmed(bar, demand, stop)):
             self._finish_live(zone, bar, "TP1_FINAL", bar.close, tp1, "Price returned to Entry 1 after TP1; closed at candle close")
 
