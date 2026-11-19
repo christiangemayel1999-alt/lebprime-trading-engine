@@ -281,3 +281,15 @@ def test_recovery_close_both_at_entry1():
     _run(engine, zone, bars)
     assert zone.terminal_state == "BE_EXIT"
     assert zone.result_r == pytest.approx(0.5 * 1.0 / 2.0)
+
+
+def test_beirut_window_blocks_fills_and_zone_edge_stop():
+    from services.indicator_lab.models import Candle as C
+
+    engine = _engine(block_beirut_window="15:00-17:00")
+    assert engine._in_blocked_beirut_window(C(0, "2026-11-19T13:30:00+00:00", 1, 1, 1, 1))  # 15:30 Beirut (winter)
+    assert not engine._in_blocked_beirut_window(C(0, "2026-11-19T15:30:00+00:00", 1, 1, 1, 1))  # 17:30 Beirut
+    assert engine._in_blocked_beirut_window(C(0, "2026-07-01T12:30:00+00:00", 1, 1, 1, 1))  # 15:30 Beirut (summer)
+    edge = _engine(sl_mode="Zone far edge")
+    stop, _ = edge._structural_stop(True, 100.0, 99.0, 0)
+    assert stop == pytest.approx(99.0 - edge._buffer())

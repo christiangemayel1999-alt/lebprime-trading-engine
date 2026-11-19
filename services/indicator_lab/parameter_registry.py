@@ -54,6 +54,8 @@ LEBPRIME_PARAMETERS: list[dict[str, Any]] = [
     {"name": "approach_cancel_atr", "pine_name": "", "label": "Cancel limit on a fast approach candle >= x ATR (0 = off)", "type": "float", "default": 0.0, "min": 0.0, "max": 10.0, "step": 0.25, "group": "Entry rules"},
     {"name": "be_trigger_r", "pine_name": "", "label": "Move stop to Entry 1 after x R (0 = off)", "type": "float", "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.25, "group": "Entry rules"},
     {"name": "recover_mode", "pine_name": "", "label": "When both entries filled and price returns to Entry 1", "type": "enum", "default": "Off", "values": ["Off", "Close E1, E2 stop to E1", "Close both at E1"], "group": "Entry rules"},
+    {"name": "sl_mode", "pine_name": "", "label": "Stop placement (Live model)", "type": "enum", "default": "Structural swing", "values": ["Structural swing", "Zone far edge"], "group": "TP / SL"},
+    {"name": "block_beirut_window", "pine_name": "", "label": "No new trades 15:00-17:00 Beirut time", "type": "enum", "default": "Off", "values": ["Off", "15:00-17:00"], "group": "Filters"},
     {"name": "leg_sizing", "pine_name": "", "label": "Entry 2 lot sizing", "type": "enum", "default": "Entry 1 distance (equal lots)", "values": ["Own stop distance", "Entry 1 distance (equal lots)"], "group": "TP / SL"},
     {"name": "show_tpsl", "pine_name": "i_showTPSL", "label": "Show TP1 / TP2 / SL", "type": "bool", "default": True, "group": "TP / SL"},
     {"name": "gold_buffer", "pine_name": "i_goldBuffer", "label": "Gold / XAUUSD SL buffer", "type": "float", "default": 1.0, "min": 0.0, "max": None, "step": 0.1, "group": "SL Buffers - Built-in"},

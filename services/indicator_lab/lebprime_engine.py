@@ -233,6 +233,10 @@ class LebPrimeEngine(IndicatorEngine):
 
     def _structural_stop(self, demand: bool, top: float, bottom: float, source_bar_index: int) -> tuple[float, dict]:
         buffer = self._buffer()
+        if self._live_mode() and str(self.parameters.get("sl_mode", "Structural swing")) == "Zone far edge":
+            # Tighter stop: just beyond the zone's far edge (plus the symbol buffer), ignoring older swings.
+            stop = bottom - buffer if demand else top + buffer
+            return stop, {"structural_swing_price": None, "structural_swing_bar_index": None, "structural_swing_time": None, "structural_swing_kind": "ZONE_EDGE"}
         if demand:
             swing, swing_bar, swing_time = self._first_swing_low_after_zone(source_bar_index, bottom)
             stop = min(swing, bottom) - buffer
@@ -838,6 +842,19 @@ class LebPrimeEngine(IndicatorEngine):
             return TP1_R, TP2_R
         return float(self.parameters.get("tp1_r", TP1_R)), float(self.parameters.get("tp2_r", TP2_R))
 
+    def _in_blocked_beirut_window(self, bar: Candle) -> bool:
+        """Optional no-trade window 15:00-17:00 Beirut time (Asia/Beirut, so summer time is handled)."""
+        if str(self.parameters.get("block_beirut_window", "Off")) != "15:00-17:00":
+            return False
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        try:
+            local = datetime.fromisoformat(bar.timestamp).astimezone(ZoneInfo("Asia/Beirut"))
+        except (ValueError, KeyError):
+            return False
+        return 15 <= local.hour < 17
+
     def _limit_filter_reason(self, demand: bool, top: float, bottom: float, source_index: int) -> str | None:
         """Optional filters applied when a LIMIT would be created (Live broker model only; all off by default)."""
         if not self._live_mode():
@@ -849,6 +866,8 @@ class LebPrimeEngine(IndicatorEngine):
             atr = snap.get("atr14")
             if atr and abs(entry - stop) / float(atr) > max_risk_atr:
                 return "risk_too_wide"
+        if self._in_blocked_beirut_window(self._bars[-1]):
+            return "blocked_time_window"
         trend = str(self.parameters.get("trend_filter", "None"))
         if trend != "None":
             dist = snap.get("ema200_dist_atr")
@@ -967,6 +986,14 @@ class LebPrimeEngine(IndicatorEngine):
                     zone.result_r = 0.0
                     zone.terminal_reason = "Zone broken before confirmation"
                     self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
+                return
+            if touched(entry1, True) and self._in_blocked_beirut_window(bar):
+                zone.terminal_state = "CANCELED"
+                zone.terminal_bar_index = bar.index
+                zone.terminal_time = bar.timestamp
+                zone.result_r = 0.0
+                zone.terminal_reason = "Touched inside the blocked 15:00-17:00 Beirut window"
+                self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
                 return
             if touched(entry1, True):
                 self._fill_live_leg(zone, "1", bar, demand)
