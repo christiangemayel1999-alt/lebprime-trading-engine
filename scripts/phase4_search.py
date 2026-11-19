@@ -69,7 +69,8 @@ _CACHE: dict[int, tuple[dict, pd.DataFrame]] = {}
 
 
 def _frame(dataset_id: int, until: str | None) -> tuple[dict, pd.DataFrame]:
-    key = dataset_id
+    """``until`` is "END" or "START..END" (ISO dates, START inclusive, END exclusive)."""
+    key = (dataset_id, until)
     if key not in _CACHE:
         from services.database import DatabaseService
         from services.indicator_lab.dataset_service import IndicatorDatasetService
@@ -79,7 +80,16 @@ def _frame(dataset_id: int, until: str | None) -> tuple[dict, pd.DataFrame]:
         service = IndicatorDatasetService(ROOT, DatabaseService(ROOT / config["storage"]["database_path"]), config)
         meta, frame = service.get_dataset(dataset_id), service.load_frame(dataset_id)
         if until:
-            frame = frame[frame["timestamp_utc"] < until].reset_index(drop=True)
+            start, _, end = until.rpartition("..")
+            # Keep 2000 warm-up candles before START so indicators and open zones are settled.
+            mask_end = frame["timestamp_utc"] < end
+            if start:
+                first = frame.index[frame["timestamp_utc"] >= start]
+                begin = max(0, int(first[0]) - 2000) if len(first) else len(frame)
+                frame = frame[mask_end].iloc[begin:]
+            else:
+                frame = frame[mask_end]
+            frame = frame.reset_index(drop=True)
         _CACHE[key] = (meta, frame)
     return _CACHE[key]
 
@@ -93,8 +103,11 @@ def score(job: tuple[int, dict, str | None]) -> dict:
     result = LebPrimeEngine({**default_parameters("LEBPRIME"), **overrides}, symbol=meta["symbol"], timeframe=meta["timeframe"]).run(frame)
     point = POINT.get(meta["symbol"], 0.0)
     nets, grosses, years = [], [], {}
+    window_start = until.rpartition("..")[0] if until else ""
     for zone in result["zones"]:
         if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT"}:
+            continue
+        if window_start and str(zone.limit_created_time) < window_start:
             continue
         risk = abs(float(zone.entry_price) - float(zone.sl_price))
         filled = sum(1 for leg in (zone.metadata.get("live_legs") or {}).values() if leg.get("filled")) or 1
@@ -121,7 +134,10 @@ def score(job: tuple[int, dict, str | None]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["sensitivity", "random"])
+    parser.add_argument("stage", choices=["sensitivity", "random", "evaluate"])
+    parser.add_argument("--window", help="evaluate: START..END, e.g. 2024-01-01..2025-01-01")
+    parser.add_argument("--top", type=int, default=20, help="evaluate: best N settings from stage_b_pooled.csv")
+    parser.add_argument("--settings", help="evaluate: JSON file with a list of settings instead of --top")
     parser.add_argument("--trials", type=int, default=300)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--datasets", type=int, nargs="+", required=True)
@@ -131,6 +147,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.stage == "random":
         return random_stage(args)
+    if args.stage == "evaluate":
+        return evaluate_stage(args)
     variants = [{}] + [{name: value} for name, values in GRID.items() for value in values]
     jobs = [(d, v, args.until) for d, v in itertools.product(args.datasets, variants)]
     print(f"{len(jobs)} runs ({len(variants)} variants x {len(args.datasets)} datasets)", flush=True)
@@ -194,6 +212,30 @@ def random_stage(args) -> int:
     pd.set_option("display.width", 250)
     pd.set_option("display.max_colwidth", 400)
     print(pooled.head(15).to_string())
+    return 0
+
+
+def evaluate_stage(args) -> int:
+    out = Path(args.out)
+    if args.settings:
+        settings = [json.dumps(item, sort_keys=True) for item in json.loads(Path(args.settings).read_text(encoding="utf-8"))]
+    else:
+        pooled = pd.read_csv(out / "stage_b_pooled.csv")
+        settings = ["{}"] + [o for o in pooled.overrides.head(args.top) if o != "{}"]
+    jobs = [(d, json.loads(o), args.window) for o in settings for d in args.datasets]
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        rows = list(pool.map(score, jobs, chunksize=2))
+    table = pd.DataFrame(rows)
+    tag = args.window.replace("..", "_to_")
+    table.to_csv(out / f"evaluate_{tag}.csv", index=False)
+    pooled = table.groupby("overrides", sort=False).agg(
+        trades=("trades", "sum"), net_r=("net_r", "sum"), win_rate=("win_rate", "mean"),
+        profitable_contexts=("net_r", lambda s: int((s > 0).sum())), worst_context_r=("net_r", "min"), max_dd_r=("max_dd_r", "max"),
+    )
+    pooled["avg_net_r"] = pooled.net_r / pooled.trades.clip(lower=1)
+    pooled.to_csv(out / f"evaluate_{tag}_pooled.csv")
+    pd.set_option("display.width", 250)
+    print(pooled.reset_index(drop=True).round(3).to_string())
     return 0
 
 
