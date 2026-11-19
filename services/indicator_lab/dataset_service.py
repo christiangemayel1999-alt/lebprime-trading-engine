@@ -19,7 +19,7 @@ from utils import ensure_directory, utc_now, validate_ohlc_dataframe
 DATASET_SOURCE_MT5 = "MT5"
 DATASET_SOURCE_CSV = "CSV"
 DATASET_STATES = {"CREATING", "READY", "FAILED"}
-TIMEFRAME_MINUTES = {"M1": 1, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60, "H4": 240, "D1": 1440}
+TIMEFRAME_MINUTES = {"M1": 1, "M2": 2, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60, "H4": 240, "D1": 1440}
 
 
 def drop_unclosed_bars(frame: pd.DataFrame, timeframe: str, now: datetime) -> pd.DataFrame:
@@ -170,7 +170,10 @@ class IndicatorDatasetService:
                 if not connector.initialize():
                     raise ValueError("Could not connect to the MT5 terminal for history download")
             loader = HistoricalDataLoader(self.base_dir, self.config, self.database, self.logger or _NullLogger())
-            frame = self._load_mt5_in_chunks(loader, connector, symbol, timeframe, start_dt, end_dt)
+            minutes = TIMEFRAME_MINUTES.get(str(timeframe).upper(), 60)
+            # Keep each request well under MT5's 100k-bar limit (about 50k bars per chunk).
+            chunk_days = max(5, min(120, int(50000 * minutes / 1440)))
+            frame = self._load_mt5_in_chunks(loader, connector, symbol, timeframe, start_dt, end_dt, chunk_days=chunk_days)
             if frame.empty:
                 raise ValueError("MT5 returned no bars for requested range")
             frozen = drop_unclosed_bars(self.normalize_frame(frame), timeframe, utc_now())

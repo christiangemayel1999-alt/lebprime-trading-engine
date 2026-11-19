@@ -8,6 +8,8 @@ from typing import Any
 
 _ALIASES = {
     "1MIN": "M1",
+    "2MIN": "M2",
+    "M2": "M2",
     "3MIN": "M3",
     "5MIN": "M5",
     "15MIN": "M15",
@@ -24,7 +26,7 @@ _ALIASES = {
     "H1": "H1",
 }
 
-_MINUTES = {"M1": 1, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60}
+_MINUTES = {"M1": 1, "M2": 2, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60}
 
 
 @dataclass(frozen=True, slots=True)
