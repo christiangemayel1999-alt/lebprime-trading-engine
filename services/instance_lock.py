@@ -55,8 +55,10 @@ def process_belongs_to_bot(pid: int, base_dir: Path) -> bool:
             command_line = Path(f"/proc/{int(pid)}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").lower()
     except Exception:
         return False
-    root = str(base_dir.resolve()).lower()
-    return "main.py" in command_line and (root in command_line or Path(root).name.lower() in command_line)
+    # A bot started from its own folder shows only "python.exe main.py" (no path). Requiring the folder
+    # name made that live instance look stale, so a second bot could start and both placed orders.
+    # Any live python process running main.py therefore counts as the bot.
+    return "main.py" in command_line
 
 
 class InstanceLock:
