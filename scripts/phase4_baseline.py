@@ -40,7 +40,7 @@ def _run(args: tuple[int, dict]) -> list[dict]:
     point = POINT.get(meta["symbol"], 0.0)
     rows = []
     for zone in result["zones"]:
-        if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT"}:
+        if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT", "EARLY_EXIT"}:
             continue
         risk = abs(float(zone.entry_price) - float(zone.sl_price))
         legs = (zone.metadata.get("live_legs") or {})
@@ -58,6 +58,27 @@ def _run(args: tuple[int, dict]) -> list[dict]:
             "mfe_r": zone.mfe_r, "mae_r": zone.mae_r,
         }
         row.update({k: v for k, v in zone.metadata.items() if k.split("_", 1)[0] in {"candidate", "limit", "entry1", "exit"} and not isinstance(v, (dict, list))})
+        # Zone structure at creation.
+        row.update({
+            "base_mode": zone.metadata.get("base_detection_mode"), "base_bars": zone.base_bar_count, "compact_count": zone.metadata.get("compact_count"),
+            "momentum_body_ratio": zone.momentum_body_ratio, "departure_atr": zone.departure_distance_atr,
+            "bars_source_to_limit": (int(zone.limit_created_bar_index) - int(zone.source_bar_index)) if zone.limit_created_bar_index is not None else None,
+            "fill_bar_index": zone.entry1_activated_bar_index, "limit_bar_index": zone.limit_created_bar_index,
+            "zone_top": zone.zone_top, "zone_bottom": zone.zone_bottom, "entry": zone.entry_price, "sl": zone.sl_price,
+            "tp1": zone.tp1_price, "tp2": zone.tp2_price,
+        })
+        # Distance (in R) to the nearest opposite-side zone that was live when this LIMIT was created.
+        opp_side = "SUPPLY" if zone.side == "DEMAND" else "DEMAND"
+        best = None
+        for other in result["zones"]:
+            if other.side != opp_side or other.limit_created_bar_index is None or other.limit_created_bar_index > zone.limit_created_bar_index:
+                continue
+            if other.terminal_bar_index is not None and other.terminal_bar_index <= zone.limit_created_bar_index:
+                continue
+            gap = (float(other.zone_bottom) - float(zone.entry_price)) if zone.side == "DEMAND" else (float(zone.entry_price) - float(other.zone_top))
+            if gap > 0 and (best is None or gap < best):
+                best = gap
+        row["opposing_zone_r"] = round(best / risk, 3) if best is not None and risk else None
         rows.append(row)
     return rows
 

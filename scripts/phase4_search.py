@@ -113,7 +113,7 @@ def score(job: tuple) -> dict:
     nets, grosses, years, created = [], [], {}, []
     window_start = until.rpartition("..")[0] if until else ""
     for zone in result["zones"]:
-        if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT"}:
+        if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT", "EARLY_EXIT"}:
             continue
         if window_start and str(zone.limit_created_time) < window_start:
             continue

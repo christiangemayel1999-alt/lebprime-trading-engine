@@ -925,6 +925,16 @@ class LebPrimeEngine(IndicatorEngine):
         leg["realized_r"] = float(leg["realized_r"]) + weight * float(leg["open_fraction"]) * pnl / risk
         leg["open_fraction"] = 0.0
 
+    def _momentum_against(self, demand: bool) -> bool:
+        """Failed-retest signal at a candle close: RSI(14) seen from the trade's side below the threshold
+        (e.g. a BUY whose RSI has collapsed under 35 while sitting in the demand zone)."""
+        threshold = float(self.parameters.get("early_exit_rsi", 0.0) or 0.0)
+        rsi = self._features.snapshot().get("rsi14")
+        if threshold <= 0.0 or rsi is None:
+            return False
+        toward = float(rsi) if demand else 100.0 - float(rsi)
+        return toward < threshold
+
     def _close_stop_mode(self) -> bool:
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
 
@@ -969,7 +979,10 @@ class LebPrimeEngine(IndicatorEngine):
                 if touched(entry1, True):
                     zone.metadata["zone_tested"] = True
                 closes_outside = bar.close > entry1 if demand else bar.close < entry1
-                if zone.metadata.get("zone_tested") and closes_outside:
+                min_rsi = float(self.parameters.get("confirm_min_rsi", 0.0) or 0.0)
+                rsi_now = self._features.snapshot().get("rsi14")
+                rsi_ok = min_rsi <= 0.0 or rsi_now is None or ((float(rsi_now) if demand else 100.0 - float(rsi_now)) >= min_rsi)
+                if zone.metadata.get("zone_tested") and closes_outside and rsi_ok:
                     leg = legs["1"]
                     leg.update({"filled": True, "fill_price": bar.close, "fill_bar_index": bar.index, "open_fraction": 1.0})
                     zone.activated_bar_index = bar.index
@@ -1008,6 +1021,8 @@ class LebPrimeEngine(IndicatorEngine):
                     exit_price = self._stop_exit_price(bar, demand, broker_stop)
                     reason = "Emergency broker stop touched on the entry candle" if close_mode else "SL touched on the entry candle"
                     self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, reason)
+                elif self._momentum_against(demand):
+                    self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, "Failed retest: momentum against at the fill candle close")
                 return
             approach = float(self.parameters.get("approach_cancel_atr", 0.0) or 0.0)
             atr_now = self._features.snapshot().get("atr14")
@@ -1083,6 +1098,10 @@ class LebPrimeEngine(IndicatorEngine):
                 # Pine rule: a candle closes with at least half its body beyond the SL; the bot exits at that close.
                 self._finish_live(zone, bar, "SL_HIT", bar.close, stop, "Candle closed beyond SL")
             if zone.terminal_state is None and zone.tp1_hit_bar_index is None:
+                window = int(self.parameters.get("early_exit_bars", 1) or 0)
+                if window > 0 and bar.index - int(zone.activated_bar_index) < window and self._momentum_against(demand):
+                    self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, "Failed retest: momentum against after the fill")
+                    return
                 self._apply_recovery(zone, bar, demand, legs, entry1, touched)
             return
 

@@ -51,7 +51,7 @@ class IndicatorEngine:
 
     def metrics(self) -> dict[str, Any]:
         events = Counter(event.event_type for event in self._events)
-        closed = [zone for zone in self._zones if zone.terminal_state in {"TP_HIT", "TP1_FINAL", "TP2_HIT", "SL_HIT", "BE_EXIT"}]
+        closed = [zone for zone in self._zones if zone.terminal_state in {"TP_HIT", "TP1_FINAL", "TP2_HIT", "SL_HIT", "BE_EXIT", "EARLY_EXIT"}]
         tp = sum(1 for zone in closed if zone.terminal_state in {"TP_HIT", "TP1_FINAL", "TP2_HIT"})
         sl = sum(1 for zone in closed if zone.terminal_state == "SL_HIT")
         be = sum(1 for zone in closed if zone.terminal_state == "BE_EXIT")
