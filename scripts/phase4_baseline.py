@@ -40,7 +40,7 @@ def _run(args: tuple[int, dict]) -> list[dict]:
     point = POINT.get(meta["symbol"], 0.0)
     rows = []
     for zone in result["zones"]:
-        if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT"}:
+        if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT"}:
             continue
         risk = abs(float(zone.entry_price) - float(zone.sl_price))
         legs = (zone.metadata.get("live_legs") or {})

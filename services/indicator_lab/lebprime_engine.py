@@ -781,14 +781,17 @@ class LebPrimeEngine(IndicatorEngine):
             if not leg["filled"] or leg["open_fraction"] <= 0.0:
                 continue
             sizing_price = float(leg["planned_price"])
-            if str(self.parameters.get("leg_sizing", LEG_SIZING_OWN)) == LEG_SIZING_EQUAL:
+            if self._confirm_entry():
+                sizing_price = float(leg["fill_price"])  # sized on the real distance from the confirmation close
+            elif str(self.parameters.get("leg_sizing", LEG_SIZING_OWN)) == LEG_SIZING_EQUAL:
                 sizing_price = float(self._live_legs(zone)["1"]["planned_price"])
             risk = abs(sizing_price - stop)
             if risk <= 0.0:
                 continue
             portion = float(leg["open_fraction"]) * fraction
             pnl = (exit_price - float(leg["fill_price"])) if demand else (float(leg["fill_price"]) - exit_price)
-            leg["realized_r"] = float(leg["realized_r"]) + LEG_RISK_WEIGHT * portion * pnl / risk
+            weight = 1.0 if self._single_entry() else LEG_RISK_WEIGHT
+            leg["realized_r"] = float(leg["realized_r"]) + weight * portion * pnl / risk
             leg["open_fraction"] = float(leg["open_fraction"]) - portion
 
     def _live_result_r(self, zone: ZoneRecord) -> float:
@@ -860,6 +863,12 @@ class LebPrimeEngine(IndicatorEngine):
                 return "session_filter"
         return None
 
+    def _confirm_entry(self) -> bool:
+        return str(self.parameters.get("entry_mode", "Limit")) == "Close confirmation"
+
+    def _single_entry(self) -> bool:
+        return self._confirm_entry() or str(self.parameters.get("entry2_mode", "Far edge")) == "Off"
+
     def _close_stop_mode(self) -> bool:
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
 
@@ -899,9 +908,32 @@ class LebPrimeEngine(IndicatorEngine):
         if zone.activated_bar_index is None:
             if bar.index <= int(zone.limit_created_bar_index):
                 return
+            if self._confirm_entry():
+                # Rule: enter only after price has tested the zone and a candle CLOSES back outside it.
+                if touched(entry1, True):
+                    zone.metadata["zone_tested"] = True
+                closes_outside = bar.close > entry1 if demand else bar.close < entry1
+                if zone.metadata.get("zone_tested") and closes_outside:
+                    leg = legs["1"]
+                    leg.update({"filled": True, "fill_price": bar.close, "fill_bar_index": bar.index, "open_fraction": 1.0})
+                    zone.activated_bar_index = bar.index
+                    zone.activated_time = bar.timestamp
+                    zone.entry1_activated_bar_index = bar.index
+                    zone.entry1_activated_time = bar.timestamp
+                    zone.activation_reason = "close_confirmation"
+                    self._emit(zone, bar, "ENTRY1_ACTIVATED", price=bar.close)
+                    return
+                if self._post_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
+                    zone.terminal_state = "CANCELED"
+                    zone.terminal_bar_index = bar.index
+                    zone.terminal_time = bar.timestamp
+                    zone.result_r = 0.0
+                    zone.terminal_reason = "Zone broken before confirmation"
+                    self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
+                return
             if touched(entry1, True):
                 self._fill_live_leg(zone, "1", bar, demand)
-                if touched(entry2, True):
+                if not self._single_entry() and touched(entry2, True):
                     self._fill_live_leg(zone, "2", bar, demand)
                 self._update_excursions(zone, bar, demand)
                 # The broker-side stop is live from the moment Entry 1 fills. With the candle-close
@@ -912,6 +944,18 @@ class LebPrimeEngine(IndicatorEngine):
                     exit_price = self._stop_exit_price(bar, demand, broker_stop)
                     reason = "Emergency broker stop touched on the entry candle" if close_mode else "SL touched on the entry candle"
                     self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, reason)
+                return
+            approach = float(self.parameters.get("approach_cancel_atr", 0.0) or 0.0)
+            atr_now = self._features.snapshot().get("atr14")
+            toward = bar.close < bar.open if demand else bar.close > bar.open
+            if approach > 0.0 and atr_now and toward and abs(bar.close - bar.open) >= approach * float(atr_now) and abs(bar.close - entry1) <= float(atr_now):
+                # Rule: a large candle racing toward the zone, closing within 1 ATR of it, cancels the limit.
+                zone.terminal_state = "CANCELED"
+                zone.terminal_bar_index = bar.index
+                zone.terminal_time = bar.timestamp
+                zone.result_r = 0.0
+                zone.terminal_reason = "Fast approach into the zone"
+                self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
                 return
             if self._post_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
                 zone.terminal_state = "CANCELED"
@@ -924,10 +968,23 @@ class LebPrimeEngine(IndicatorEngine):
 
         if bar.index <= int(zone.activated_bar_index):
             return
+        if zone.metadata.get("be_armed_after_bar") is not None and bar.index > int(zone.metadata["be_armed_after_bar"]):
+            zone.metadata["be_armed"] = True
         self._update_excursions(zone, bar, demand)
+        # Rule: break-even. Once a candle has reached be_trigger_r, the stop sits at Entry 1 from the next candle.
+        if zone.metadata.get("be_armed") and touched(entry1, True):
+            exit_price = self._stop_exit_price(bar, demand, entry1)
+            self._finish_live(zone, bar, "BE_EXIT", exit_price, entry1, "Stop at break-even")
+            return
+        be_trigger = float(self.parameters.get("be_trigger_r", 0.0) or 0.0)
+        if be_trigger > 0.0 and not zone.metadata.get("be_armed"):
+            risk1 = abs(entry1 - stop)
+            reached = bar.high >= entry1 + be_trigger * risk1 if demand else bar.low <= entry1 - be_trigger * risk1
+            if reached:
+                zone.metadata["be_armed_after_bar"] = bar.index
 
         if zone.tp1_hit_bar_index is None:
-            if not legs["2"]["filled"] and not legs["2"]["canceled"] and touched(entry2, True):
+            if not self._single_entry() and not legs["2"]["filled"] and not legs["2"]["canceled"] and touched(entry2, True):
                 self._fill_live_leg(zone, "2", bar, demand)
             if close_mode and hard_stop is not None and touched(hard_stop, True):
                 exit_price = self._stop_exit_price(bar, demand, hard_stop)
