@@ -134,14 +134,29 @@ class IndicatorEngine:
         return sum(abs(bar.close - bar.open) for bar in self._bars[-length:]) / float(length)
 
     def _atr(self, length: int) -> float | None:
-        if len(self._bars) < length + 1:
-            return None
-        trs: list[float] = []
-        for i in range(len(self._bars) - length, len(self._bars)):
+        """Pine ``ta.atr``: Wilder RMA of true range, seeded with the SMA of the first ``length`` values.
+
+        Updated incrementally, so calling it several times on one bar is safe.
+        """
+        states: dict[int, dict[str, Any]] = self.__dict__.setdefault("_atr_states", {})
+        state = states.setdefault(int(length), {"next": 0, "seed_sum": 0.0, "count": 0, "value": None})
+        while state["next"] < len(self._bars):
+            i = state["next"]
             bar = self._bars[i]
-            prev = self._bars[i - 1]
-            trs.append(max(bar.high - bar.low, abs(bar.high - prev.close), abs(bar.low - prev.close)))
-        return sum(trs) / float(length)
+            if i == 0:
+                tr = bar.high - bar.low
+            else:
+                prev_close = self._bars[i - 1].close
+                tr = max(bar.high - bar.low, abs(bar.high - prev_close), abs(bar.low - prev_close))
+            if state["value"] is None:
+                state["seed_sum"] += tr
+                state["count"] += 1
+                if state["count"] >= length:
+                    state["value"] = state["seed_sum"] / float(length)
+            else:
+                state["value"] = (tr + (length - 1) * state["value"]) / float(length)
+            state["next"] = i + 1
+        return state["value"]
 
     def _symbol_buffer(self, gold: float, us30: float, nas: float, wti: float) -> float:
         ticker = self.symbol.upper()

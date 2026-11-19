@@ -15,6 +15,7 @@ VSS3_PINE_PATH = Path("docs/indicator_reference/VSS3_KOSOVI_limit.pine")
 
 LEBPRIME_PARAMETERS: list[dict[str, Any]] = [
     {"name": "history_bars", "pine_name": "i_historyBars", "label": "Recent history bars", "type": "int", "default": 500, "min": 100, "max": 5000, "step": 1, "group": "Boundary 9 Engine"},
+    {"name": "apply_history_window", "pine_name": "", "label": "Apply Pine recent-history window (TradingView comparison only)", "type": "bool", "default": False, "group": "Boundary 9 Engine"},
     {"name": "body_len", "pine_name": "i_bodyLen", "label": "Average body length", "type": "int", "default": 20, "min": 5, "max": 100, "step": 1, "group": "Boundary 9 Engine"},
     {"name": "body_mult", "pine_name": "i_bodyMult", "label": "Momentum body x average", "type": "float", "default": 0.50, "min": 0.10, "max": 3.00, "step": 0.05, "group": "Boundary 9 Engine"},
     {"name": "momentum_count", "pine_name": "i_momentumCount", "label": "Same-direction momentum candles", "type": "int", "default": 4, "min": 2, "max": 10, "step": 1, "group": "Boundary 9 Engine"},

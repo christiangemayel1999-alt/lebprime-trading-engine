@@ -249,6 +249,12 @@ class LebPrimeEngine(IndicatorEngine):
     def _body_breaks_zone(bar: Candle, demand: bool, top: float, bottom: float) -> bool:
         return min(bar.open, bar.close) < bottom if demand else max(bar.open, bar.close) > top
 
+    def _post_limit_invalidated(self, bar: Candle, demand: bool, top: float, bottom: float) -> bool:
+        """Pine ``invalidAfterCreated``: after LIMIT CREATED, Close mode cancels on the close, not the body."""
+        if self.parameters["invalidation"] == "Wick":
+            return bar.low < bottom if demand else bar.high > top
+        return bar.close < bottom if demand else bar.close > top
+
     def _pre_limit_invalidated(self, bar: Candle, demand: bool, top: float, bottom: float) -> bool:
         wick_break = bar.low < bottom if demand else bar.high > top
         return wick_break if self.parameters["invalidation"] == "Wick" else self._body_breaks_zone(bar, demand, top, bottom)
@@ -650,8 +656,10 @@ class LebPrimeEngine(IndicatorEngine):
         return True
 
     def _process_pending(self, bar: Candle, atr: float) -> None:
+        # Pine walks the hidden candidates from newest to oldest; order matters when two
+        # overlapping candidates become ready on the same bar.
         remaining: list[dict] = []
-        for pending in self._pending:
+        for pending in reversed(self._pending):
             demand = bool(pending["demand"])
             diagnostic = pending.get("diagnostic")
             pending_row = self._candidate_pending_row(pending, bar)
@@ -668,7 +676,7 @@ class LebPrimeEngine(IndicatorEngine):
                     self._set_candidate_outcome(diagnostic, "OVERLAP_REJECTED", "overlap_at_limit_creation")
             else:
                 remaining.append(pending)
-        self._pending = remaining
+        self._pending = list(reversed(remaining))
 
     def finalize(self) -> dict:
         for pending in self._pending:
@@ -834,7 +842,7 @@ class LebPrimeEngine(IndicatorEngine):
                     exit_price = self._stop_exit_price(bar, demand, stop)
                     self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "SL touched on the entry candle")
                 return
-            if self._pre_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
+            if self._post_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
                 zone.terminal_state = "CANCELED"
                 zone.terminal_bar_index = bar.index
                 zone.terminal_time = bar.timestamp
@@ -891,7 +899,7 @@ class LebPrimeEngine(IndicatorEngine):
             if zone.terminal_state:
                 continue
             demand = zone.side == "DEMAND"
-            invalid_after_created = self._pre_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom)
+            invalid_after_created = self._post_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom)
             if zone.limit_created_bar_index is None:
                 continue
             if zone.activated_bar_index is None:
@@ -1011,6 +1019,18 @@ class LebPrimeEngine(IndicatorEngine):
                     zone.terminal_reason = "Price returned to Entry 1 after TP1" if returned_to_entry1 else "Price reached the previous Stop Loss condition after TP1"
                     self._emit(zone, bar, "TP1_FINAL", price=tp1, reason=zone.terminal_reason)
 
+    def run(self, frame) -> dict:
+        # Pine's inScanRange needs last_bar_index, which is only known for a complete dataset.
+        self._last_bar_index = len(frame) - 1
+        return super().run(frame)
+
+    def _in_scan_range(self, bar: Candle) -> bool:
+        """Pine ``inScanRange``: only the last ``history_bars`` chart bars may create zones (opt-in)."""
+        last = getattr(self, "_last_bar_index", None)
+        if not bool(self.parameters.get("apply_history_window", False)) or last is None:
+            return True
+        return bar.index > last - int(self.parameters["history_bars"])
+
     def process_bar(self, bar: Candle) -> None:
         self._bars.append(bar)
         self._update_swings()
@@ -1024,7 +1044,7 @@ class LebPrimeEngine(IndicatorEngine):
         recent = self._bars[-int(self.parameters["momentum_count"]):]
         bull_count = sum(1 for item in recent if self._is_momentum(item, avg_body, True)) if bar.index >= int(self.parameters["momentum_count"]) - 1 else 0
         bear_count = sum(1 for item in recent if self._is_momentum(item, avg_body, False)) if bar.index >= int(self.parameters["momentum_count"]) - 1 else 0
-        can_detect = bar.index >= history_required
+        can_detect = bar.index >= history_required and self._in_scan_range(bar)
         bull_qual = bull_count >= int(self.parameters["momentum_count"])
         bear_qual = bear_count >= int(self.parameters["momentum_count"])
         bull_edge = can_detect and bull_qual and not self._prev_bull_qual
