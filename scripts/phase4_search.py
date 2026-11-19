@@ -24,6 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 POINT = {"XAUUSD": 0.01, "XAGUSD": 0.001, "US30": 0.1, "USTEC": 0.1, "WTI": 0.001, "EURUSD": 0.00001}
+# Round-trip commission per 1.0 lot (USD) and USD value of a 1.0 price move per 1.0 lot.
+# XAUUSD 7.0 and USTEC 0.70 are measured on the demo account ($0.07 per 0.01 / 0.1 lot);
+# the other symbols use the same rate as their asset class (metals/FX/oil 7.0, indices 0.70).
+COMMISSION_PER_LOT = {"XAUUSD": 7.0, "XAGUSD": 7.0, "US30": 0.70, "USTEC": 0.70, "WTI": 7.0, "EURUSD": 7.0}
+VALUE_PER_PRICE_PER_LOT = {"XAUUSD": 100.0, "XAGUSD": 5000.0, "US30": 1.0, "USTEC": 1.0, "WTI": 1000.0, "EURUSD": 100000.0}
 
 GRID = {
     "body_mult": [0.3, 0.4, 0.6, 0.7, 0.8, 1.0],
@@ -111,7 +116,11 @@ def score(job: tuple[int, dict, str | None]) -> dict:
             continue
         risk = abs(float(zone.entry_price) - float(zone.sl_price))
         filled = sum(1 for leg in (zone.metadata.get("live_legs") or {}).values() if leg.get("filled")) or 1
-        cost = (float(zone.metadata.get("entry1_spread") or 0.0) * point / risk) * 0.5 * filled if risk else 0.0
+        weight = 1.0 if filled == 1 and (overrides.get("entry2_mode") == "Off" or overrides.get("entry_mode") == "Close confirmation") else 0.5
+        spread_r = (float(zone.metadata.get("entry1_spread") or 0.0) * point / risk) * weight * filled if risk else 0.0
+        value = VALUE_PER_PRICE_PER_LOT.get(meta["symbol"], 0.0)
+        commission_r = (COMMISSION_PER_LOT.get(meta["symbol"], 0.0) / (risk * value)) * weight * filled if risk and value else 0.0
+        cost = spread_r + commission_r
         gross = float(zone.result_r or 0.0)
         nets.append(gross - cost)
         grosses.append(gross)
