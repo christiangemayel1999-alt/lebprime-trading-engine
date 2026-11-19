@@ -2,6 +2,8 @@
 
 Stage A (sensitivity): change one parameter at a time from the defaults, training years only.
     python scripts/phase4_search.py sensitivity --datasets 52 ... 63 [--until 2024-01-01]
+Stage B (random): random combinations from SPACE, one shared setting scored on all datasets.
+    python scripts/phase4_search.py random --trials 300 --datasets 52 ... 63
 
 Scores are in R after spread (same cost model as phase4_baseline.py). Live broker execution model,
 candle-close SL, 2R emergency stop and equal lots, i.e. what the demo bot trades.
@@ -43,6 +45,24 @@ GRID = {
     "allow_overlap": [True],
     "hard_stop_beyond_r": [0.5, 2.0],
     "stop_rule": ["Price touch"],
+}
+
+SPACE = {
+    "body_mult": [0.4, 0.5, 0.6, 0.7, 0.8, 1.0],
+    "momentum_count": [3, 4, 5, 6],
+    "min_zone_width_atr": [0.1, 0.2, 0.3, 0.4],
+    "zone_refinement": ["Smallest Range Candle", "Full Base (Boundary 9)"],
+    "compact_range_atr": [0.6, 0.9, 1.2],
+    "zone_confirm_delay": [0, 3, 5],
+    "min_bars_after_source": [10, 20],
+    "stop_rule": ["Candle close (Pine)", "Price touch"],
+    "hard_stop_beyond_r": [0.5, 1.0, 2.0],
+    "tp1_r": [0.75, 1.0, 1.5],
+    "tp2_r": [1.5, 2.0, 3.0, 4.0],
+    "tp1_close_fraction": [0.0, 0.5, 1.0],
+    "max_risk_atr": [0.0, 1.5, 2.5, 4.0],
+    "trend_filter": ["None", "With EMA200", "Against EMA200"],
+    "session_filter": ["All", "London + New York"],
 }
 
 _CACHE: dict[int, tuple[dict, pd.DataFrame]] = {}
@@ -101,12 +121,16 @@ def score(job: tuple[int, dict, str | None]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["sensitivity"])
+    parser.add_argument("stage", choices=["sensitivity", "random"])
+    parser.add_argument("--trials", type=int, default=300)
+    parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--datasets", type=int, nargs="+", required=True)
     parser.add_argument("--until", default="2024-01-01", help="Training cut-off (exclusive)")
     parser.add_argument("--out", default=str(ROOT / "reports" / "phase4"))
     parser.add_argument("--workers", type=int, default=7)
     args = parser.parse_args()
+    if args.stage == "random":
+        return random_stage(args)
     variants = [{}] + [{name: value} for name, values in GRID.items() for value in values]
     jobs = [(d, v, args.until) for d, v in itertools.product(args.datasets, variants)]
     print(f"{len(jobs)} runs ({len(variants)} variants x {len(args.datasets)} datasets)", flush=True)
@@ -122,6 +146,47 @@ def main() -> int:
     pooled.to_csv(out / "stage_a_pooled.csv")
     pd.set_option("display.width", 200)
     print(pooled.head(25).to_string())
+    return 0
+
+
+def random_stage(args) -> int:
+    import random
+
+    rng = random.Random(args.seed)
+    trials: list[dict] = [{}]
+    seen = {"{}"}
+    while len(trials) < args.trials:
+        trial = {name: rng.choice(values) for name, values in SPACE.items()}
+        if trial["tp2_r"] <= trial["tp1_r"]:
+            continue
+        key = json.dumps(trial, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            trials.append(trial)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    jobs = [(d, t, args.until) for t in trials for d in args.datasets]
+    print(f"{len(jobs)} runs ({len(trials)} trials x {len(args.datasets)} datasets)", flush=True)
+    rows = []
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        for i, row in enumerate(pool.map(score, jobs, chunksize=2), start=1):
+            rows.append(row)
+            if i % (len(args.datasets) * 20) == 0:
+                pd.DataFrame(rows).to_csv(out / "stage_b_runs.csv", index=False)
+                print(f"  {i}/{len(jobs)} runs", flush=True)
+    table = pd.DataFrame(rows)
+    table.to_csv(out / "stage_b_runs.csv", index=False)
+    pooled = table.groupby("overrides").agg(
+        trades=("trades", "sum"), net_r=("net_r", "sum"),
+        win_rate=("win_rate", "mean"), worst_context_r=("net_r", "min"),
+        profitable_contexts=("net_r", lambda s: int((s > 0).sum())), max_dd_r=("max_dd_r", "max"),
+    )
+    pooled["avg_net_r"] = pooled.net_r / pooled.trades.clip(lower=1)
+    pooled = pooled[pooled.trades >= 1000].sort_values("avg_net_r", ascending=False)
+    pooled.to_csv(out / "stage_b_pooled.csv")
+    pd.set_option("display.width", 250)
+    pd.set_option("display.max_colwidth", 400)
+    print(pooled.head(15).to_string())
     return 0
 
 
