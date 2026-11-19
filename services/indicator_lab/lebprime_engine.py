@@ -247,8 +247,9 @@ class LebPrimeEngine(IndicatorEngine):
         entry = top if demand else bottom
         stop, swing = self._structural_stop(demand, top, bottom, source_bar_index)
         risk = abs(entry - stop)
-        tp1 = entry + risk * TP1_R if demand else entry - risk * TP1_R
-        tp2 = entry + risk * TP2_R if demand else entry - risk * TP2_R
+        tp1_r, tp2_r = self._tp_multiples()
+        tp1 = entry + risk * tp1_r if demand else entry - risk * tp1_r
+        tp2 = entry + risk * tp2_r if demand else entry - risk * tp2_r
         return entry, stop, tp1, tp2, swing
 
     @staticmethod
@@ -541,8 +542,8 @@ class LebPrimeEngine(IndicatorEngine):
             "invalidation_method": self.parameters["invalidation"],
             "retest_cooldown_used": self.parameters["retest_cooldown"],
             "buffer_used": buffer,
-            "tp1_r_used": TP1_R,
-            "tp2_r_used": TP2_R,
+            "tp1_r_used": self._tp_multiples()[0],
+            "tp2_r_used": self._tp_multiples()[1],
             "indicator_version": LEBPRIME_INDICATOR_VERSION,
             **context,
             **swing,
@@ -624,7 +625,7 @@ class LebPrimeEngine(IndicatorEngine):
             tp_price=tp2,
             risk_distance=risk,
             reward_distance=abs(tp2 - entry),
-            rr=TP2_R,
+            rr=self._tp_multiples()[1],
             buffer_used=buffer,
             creation_reason="momentum_boundary_zone",
             metadata=metadata,
@@ -679,7 +680,10 @@ class LebPrimeEngine(IndicatorEngine):
             if invalid:
                 self._set_candidate_outcome(diagnostic, "PRE_LIMIT_INVALIDATED", "pre_limit_invalidated")
             elif bar.index >= int(pending["due"]) and self._limit_creation_ready(bar, demand, float(pending["top"]), float(pending["bottom"]), int(pending["source_index"])):
-                if not self._has_overlap(demand, float(pending["top"]), float(pending["bottom"])):
+                filter_reason = self._limit_filter_reason(demand, float(pending["top"]), float(pending["bottom"]), int(pending["source_index"]))
+                if filter_reason is not None:
+                    self._set_candidate_outcome(diagnostic, "FILTERED", filter_reason)
+                elif not self._has_overlap(demand, float(pending["top"]), float(pending["bottom"])):
                     self._create_zone(demand, pending["top"], pending["bottom"], pending["source_index"], pending["id"], bar, True, atr, pending.get("avg_body"), pending.get("context"), candidate=pending.get("candidate"))
                 else:
                     self._set_candidate_outcome(diagnostic, "OVERLAP_REJECTED", "overlap_at_limit_creation")
@@ -826,6 +830,36 @@ class LebPrimeEngine(IndicatorEngine):
             zone.mfe_r = zone.mfe_points / risk
             zone.mae_r = zone.mae_points / risk
 
+    def _tp_multiples(self) -> tuple[float, float]:
+        if not self._live_mode():
+            return TP1_R, TP2_R
+        return float(self.parameters.get("tp1_r", TP1_R)), float(self.parameters.get("tp2_r", TP2_R))
+
+    def _limit_filter_reason(self, demand: bool, top: float, bottom: float, source_index: int) -> str | None:
+        """Optional filters applied when a LIMIT would be created (Live broker model only; all off by default)."""
+        if not self._live_mode():
+            return None
+        snap = self._features.snapshot()
+        max_risk_atr = float(self.parameters.get("max_risk_atr", 0.0) or 0.0)
+        if max_risk_atr > 0.0:
+            entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
+            atr = snap.get("atr14")
+            if atr and abs(entry - stop) / float(atr) > max_risk_atr:
+                return "risk_too_wide"
+        trend = str(self.parameters.get("trend_filter", "None"))
+        if trend != "None":
+            dist = snap.get("ema200_dist_atr")
+            if dist is not None:
+                with_trend = dist > 0 if demand else dist < 0
+                if (trend == "With EMA200" and not with_trend) or (trend == "Against EMA200" and with_trend):
+                    return "trend_filter"
+        session = str(self.parameters.get("session_filter", "All"))
+        if session != "All" and snap.get("session") is not None:
+            allowed = {"London + New York": {"LONDON", "LONDON_NY_OVERLAP", "NEW_YORK"}, "London only": {"LONDON", "LONDON_NY_OVERLAP"}}.get(session)
+            if allowed is not None and snap.get("session") not in allowed:
+                return "session_filter"
+        return None
+
     def _close_stop_mode(self) -> bool:
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
 
@@ -913,7 +947,7 @@ class LebPrimeEngine(IndicatorEngine):
                 if not legs["2"]["filled"]:
                     legs["2"]["canceled"] = True
                 # The runtime closes half of every open position after the TP1 candle closes.
-                self._close_live_legs(zone, bar.close, demand, fraction=0.5)
+                self._close_live_legs(zone, bar.close, demand, fraction=float(self.parameters.get("tp1_close_fraction", 0.5)))
                 zone.metadata["tp1_partial_price"] = bar.close
                 self._emit(zone, bar, "TP1_HIT", price=tp1)
             elif close_mode and self._stop_confirmed(bar, demand, stop):
