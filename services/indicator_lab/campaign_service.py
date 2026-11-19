@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from services.indicator_lab.features import feature_columns
 from services.database import DatabaseService
 from services.indicator_lab.dataset_service import IndicatorDatasetService
 from services.indicator_lab.engine import IndicatorEngine
@@ -832,6 +833,10 @@ class IndicatorLabService:
             "min_flipped_order_distance_percent_used", "swing_high", "swing_low", "swing_lookback_used",
             "close_stop_level", "close_stop_triggered", "be_trigger_price", "be_armed_bar", "be_moved",
             "spread_buffer_used",
+            # Phase 3 recording: execution, outcome and market values at each lifecycle moment.
+            "exit_reason", "entry1_fill_price", "entry1_result_r", "entry2_fill_price", "entry2_result_r",
+            "hard_stop_price", "tp1_partial_price",
+            *feature_columns(),
         ]
         columns = [*ZONE_CSV_COLUMNS[:-1], *metadata_keys, "metadata_json"]
         for row in self.test_zones(test_id):

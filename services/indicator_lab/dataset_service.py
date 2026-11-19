@@ -166,6 +166,9 @@ class IndicatorDatasetService:
                 from mt5_connector import MT5Connector
 
                 connector = MT5Connector(self.config, self.logger or BotLogger(self.base_dir, self.config))
+                # A fresh connector has no terminal session yet; without this every fetch fails with "No IPC connection".
+                if not connector.initialize():
+                    raise ValueError("Could not connect to the MT5 terminal for history download")
             loader = HistoricalDataLoader(self.base_dir, self.config, self.database, self.logger or _NullLogger())
             frame = loader._load_mt5_bars(connector, symbol, timeframe, start_dt, end_dt, min_rows=1)
             if frame.empty:

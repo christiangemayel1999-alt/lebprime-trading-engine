@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.indicator_lab.engine import IndicatorEngine
+from services.indicator_lab.features import EVENT_MOMENTS, FeatureTracker, flatten_snapshot
 from services.indicator_lab.models import Candle, ZoneRecord
 
 LEBPRIME_INDICATOR_VERSION = "3.4.0"
@@ -37,6 +38,7 @@ class LebPrimeEngine(IndicatorEngine):
 
     def __init__(self, parameters: dict | None = None, *, symbol: str = "XAUUSD", timeframe: str = "M1") -> None:
         super().__init__(parameters, symbol=symbol, timeframe=timeframe)
+        self._features = FeatureTracker()
         self._pending: list[dict] = []
         self._candidate_diagnostics: list[dict] = []
         self._candidate_diagnostics_by_id: dict[str, dict] = {}
@@ -656,6 +658,9 @@ class LebPrimeEngine(IndicatorEngine):
 
     def _queue_or_create(self, demand: bool, top: float, bottom: float, source_index: int, zone_id: str, bar: Candle, atr: float, avg_body: float | None = None, context: dict | None = None, diagnostic: dict | None = None) -> bool:
         delay = int(self.parameters["zone_confirm_delay"])
+        if context is not None:
+            # Market values when the candidate was found; copied onto the zone if it becomes a LIMIT.
+            context.update(flatten_snapshot("candidate", self._features.snapshot()))
         self._pending.append({"demand": demand, "top": top, "bottom": bottom, "source_index": source_index, "due": bar.index + delay, "id": zone_id, "avg_body": avg_body, "context": context or {}, "candidate": bar, "diagnostic": diagnostic})
         return True
 
@@ -1059,6 +1064,19 @@ class LebPrimeEngine(IndicatorEngine):
                     zone.terminal_reason = "Price returned to Entry 1 after TP1" if returned_to_entry1 else "Price reached the previous Stop Loss condition after TP1"
                     self._emit(zone, bar, "TP1_FINAL", price=tp1, reason=zone.terminal_reason)
 
+    def _emit(self, zone: ZoneRecord, bar: Candle, event_type: str, *, price: float | None = None, reason: str | None = None, metadata: dict | None = None) -> None:
+        super()._emit(zone, bar, event_type, price=price, reason=reason, metadata=metadata)
+        moment = EVENT_MOMENTS.get(event_type)
+        if moment is not None:
+            # Record the market values at this lifecycle moment (closed candle, no look-ahead).
+            zone.metadata.update(flatten_snapshot(moment, self._features.snapshot()))
+            if moment == "exit":
+                zone.metadata["exit_reason"] = zone.terminal_reason or event_type
+                legs = zone.metadata.get("live_legs") or {}
+                for leg_no, leg in legs.items():
+                    zone.metadata[f"entry{leg_no}_fill_price"] = leg.get("fill_price")
+                    zone.metadata[f"entry{leg_no}_result_r"] = round(float(leg.get("realized_r") or 0.0), 4)
+
     def run(self, frame) -> dict:
         # Pine's inScanRange needs last_bar_index, which is only known for a complete dataset.
         self._last_bar_index = len(frame) - 1
@@ -1074,6 +1092,7 @@ class LebPrimeEngine(IndicatorEngine):
     def process_bar(self, bar: Candle) -> None:
         self._bars.append(bar)
         self._update_swings()
+        self._features.update(bar)
         body_len = int(self.parameters["body_len"])
         atr_len = int(self.parameters["atr_len"])
         avg_body = self._sma_body(body_len)

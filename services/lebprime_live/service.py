@@ -15,6 +15,11 @@ import pandas as pd
 from services.indicator_lab.lebprime_engine import LebPrimeEngine
 from services.indicator_lab.models import Candle, ZoneEvent, ZoneRecord
 from services.lebprime_live.repository import LebPrimeLiveRepository
+from services.indicator_lab.features import feature_columns
+
+RECORDED_ZONE_KEYS = frozenset(
+    [*feature_columns(), "exit_reason", "entry1_fill_price", "entry1_result_r", "entry2_fill_price", "entry2_result_r", "hard_stop_price", "tp1_partial_price"]
+)
 from services.lebprime_live.symbols import DEFAULT_SYMBOLS, SYMBOLS, SymbolMapping, resolve_symbol
 from services.lebprime_live.timeframes import TIMEFRAMES, aggregate_m45, normalize_lebprime_timeframe
 
@@ -410,7 +415,16 @@ class LebPrimeLiveService:
             "theoretical_state": zone.terminal_state or ("ACTIVE" if zone.activated_bar_index is not None else "PENDING"),
             "created_at": existing.get("created_at", zone.limit_created_time or now),
             "updated_at": now,
-            "metadata": {"indicator_version": zone.indicator_version, "engine_version": zone.engine_version},
+            "metadata": {
+                "indicator_version": zone.indicator_version,
+                "engine_version": zone.engine_version,
+                # Phase 3 recording: market values at candidate / limit / fills / TP1 / exit, plus outcome.
+                **{key: value for key, value in (zone.metadata or {}).items() if key in RECORDED_ZONE_KEYS},
+                "result_r": zone.result_r,
+                "exit_price": zone.exit_price,
+                "mfe_r": zone.mfe_r,
+                "mae_r": zone.mae_r,
+            },
         }
 
     def _register_limit(
