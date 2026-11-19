@@ -212,7 +212,9 @@ class IndicatorDatasetService:
         while cursor <= end_dt:
             chunk_end = min(end_dt, cursor + timedelta(days=chunk_days) - timedelta(microseconds=1))
             try:
-                part = loader._load_mt5_bars(connector, symbol, timeframe, cursor, chunk_end, min_rows=1)
+                # Overlap neighbouring chunks by 12h so the broker/UTC offset cannot leave gaps at the seams.
+                pad = timedelta(hours=12)
+                part = loader._load_mt5_bars(connector, symbol, timeframe, max(start_dt, cursor - pad), min(end_dt, chunk_end + pad), min_rows=1)
             except (ValueError, RuntimeError):
                 part = pd.DataFrame()
             if not part.empty:

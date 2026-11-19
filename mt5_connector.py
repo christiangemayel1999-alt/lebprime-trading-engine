@@ -1000,7 +1000,12 @@ class MT5Connector:
                 f"start={start_utc.isoformat()} | end={end_utc.isoformat()}"
             )
             raise RuntimeError(f"No {timeframe_label} bars returned in requested range")
-        self._update_server_time_offset(df["time"].iloc[-1])
+        # The server offset must come from a live tick. Inferring it from the last bar of a historical
+        # range compares an old bar with "now" and produced offsets of -13h to -15h, shifting whole
+        # downloaded datasets by that much.
+        tick = self._call_mt5("symbol_info_tick", mt5.symbol_info_tick, self.symbol)
+        if tick is not None and getattr(tick, "time", None):
+            self._update_server_time_offset(getattr(tick, "time", None))
         df["time"] = self._normalize_broker_timestamp_series(df["time"])
         df = df.sort_values("time").reset_index(drop=True)
         df = df[(df["time"] >= pd.Timestamp(start_utc)) & (df["time"] <= pd.Timestamp(end_utc))].reset_index(drop=True)
