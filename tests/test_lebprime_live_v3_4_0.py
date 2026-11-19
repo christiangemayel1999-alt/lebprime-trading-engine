@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -320,7 +322,9 @@ def test_realtime_buy_limit_created_places_both_entries_with_half_risk(tmp_path)
     assert len(connector.sent) == 4
     assert [request["type"] for request in connector.sent] == [2, 2, 2, 2]
     assert [request["price"] for request in connector.sent[:2]] == [first.entry1, first.entry2]
-    assert all(request["sl"] == first.sl_price and request["tp"] == first.tp2_price for request in connector.sent[:2])
+    # Candle-close SL rule (default): MT5 holds the emergency stop one risk beyond the SL; the bot enforces the SL.
+    emergency_stop = first.sl_price - (first.entry1 - first.sl_price)
+    assert all(request["sl"] == pytest.approx(emergency_stop) and request["tp"] == first.tp2_price for request in connector.sent[:2])
     assert [kind for kind, _ in connector.calls] == ["check", "send"] * 4
     assert risk.adjustments == [0.5, 0.5, 0.5, 0.5]
     row = service.repository.zone(first.engine_zone_id)

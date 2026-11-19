@@ -20,8 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PINE = "Pine indicator"
 
 
-def _engine(model: str | None = None, symbol: str = "XAUUSD") -> LebPrimeEngine:
-    params = default_parameters("LEBPRIME")
+def _engine(model: str | None = None, symbol: str = "XAUUSD", **overrides) -> LebPrimeEngine:
+    # Most tests below check the per-entry R maths with the original "own stop distance" sizing.
+    params = {**default_parameters("LEBPRIME"), "leg_sizing": "Own stop distance", **overrides}
     if model:
         params["execution_model"] = model
     return LebPrimeEngine(params, symbol=symbol)
@@ -74,9 +75,9 @@ def test_limit_fills_on_any_touch_like_a_broker_order():
     assert _run(_engine(PINE), pine_zone, bars) == []
 
 
-def test_stop_is_checked_on_the_entry_candle():
+def test_stop_is_checked_on_the_entry_candle_touch_rule():
     zone = _demand_zone()
-    events = _run(_engine(), zone, [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 97.5, 98.2)])
+    events = _run(_engine(stop_rule="Price touch"), zone, [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 97.5, 98.2)])
     assert events == ["ENTRY1_ACTIVATED", "ENTRY2_ACTIVATED", "SL_HIT"]
     assert zone.terminal_state == "SL_HIT"
     assert zone.result_r == pytest.approx(-1.0)
@@ -91,30 +92,30 @@ def test_each_entry_carries_half_the_signal_risk():
     assert engine._live_result_r(zone) == pytest.approx(-0.5)
 
 
-def test_gap_through_the_stop_exits_at_the_open():
+def test_gap_through_the_stop_exits_at_the_open_touch_rule():
     zone = _demand_zone()
     bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 97.0, 97.5, 96.5, 97.2)]
-    _run(_engine(), zone, bars)
+    _run(_engine(stop_rule="Price touch"), zone, bars)
     # Entry 2 fills at the 97.0 open (better than 99), both legs stop at 97.0.
     assert zone.terminal_state == "SL_HIT"
     assert zone.exit_price == 97.0
     assert zone.result_r == pytest.approx(0.5 * (-3.0 / 2.0) + 0.5 * 0.0)
 
 
-def test_stop_wins_when_target_and_stop_share_a_candle():
+def test_stop_wins_when_target_and_stop_share_a_candle_touch_rule():
     zone = _demand_zone()
     bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 100.5, 102.5, 97.9, 101.0)]
-    assert _run(_engine(), zone, bars)[-1] == "SL_HIT"
+    assert _run(_engine(stop_rule="Price touch"), zone, bars)[-1] == "SL_HIT"
     assert zone.result_r == pytest.approx(-1.0)
 
     pine_zone = _demand_zone()
     assert _run(_engine(PINE), pine_zone, bars)[-1] == "TP1_HIT"
 
 
-def test_stop_triggers_on_a_wick_without_a_body_close():
+def test_stop_triggers_on_a_wick_without_a_body_close_touch_rule():
     zone = _demand_zone()
     bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 100.5, 100.6, 97.9, 100.4)]
-    assert _run(_engine(), zone, bars)[-1] == "SL_HIT"
+    assert _run(_engine(stop_rule="Price touch"), zone, bars)[-1] == "SL_HIT"
     pine_zone = _demand_zone()
     assert "SL_HIT" not in _run(_engine(PINE), pine_zone, bars)
 
@@ -133,16 +134,16 @@ def test_tp1_partial_and_return_to_entry_use_candle_closes():
     assert zone.metadata["live_legs"]["2"]["canceled"] is True
 
 
-def test_tp2_after_tp1_and_stop_after_tp1():
+def test_tp2_after_tp1_and_stop_after_tp1_touch_rule():
     zone = _demand_zone()
     bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 100.5, 102.2, 100.2, 102.0), _bar(3, 102.0, 104.5, 101.5, 104.2)]
-    _run(_engine(), zone, bars)
+    _run(_engine(stop_rule="Price touch"), zone, bars)
     assert zone.terminal_state == "TP2_HIT"
     assert zone.result_r == pytest.approx(0.5 * 0.5 * (2.0 / 2.0) + 0.5 * 0.5 * (4.0 / 2.0))
 
     zone = _demand_zone()
     bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 100.5, 102.2, 100.2, 102.0), _bar(3, 101.0, 101.2, 97.0, 97.5)]
-    _run(_engine(), zone, bars)
+    _run(_engine(stop_rule="Price touch"), zone, bars)
     assert zone.terminal_state == "TP1_FINAL"
     assert zone.result_r == pytest.approx(0.5 * 0.5 * (2.0 / 2.0) - 0.5 * 0.5 * (2.0 / 2.0))
 
@@ -201,3 +202,58 @@ def test_dataset_drops_the_forming_candle():
     kept = drop_unclosed_bars(frame, "M1", now)
     assert list(kept["timestamp_utc"]) == ["2026-11-18T17:17:00+00:00", "2026-11-18T17:18:00+00:00"]
     assert len(drop_unclosed_bars(frame, "M15", now)) == 0
+
+
+
+# ---------------------------------------------------------------- candle-close stop (Pine rule, default)
+
+def test_close_rule_is_the_default_with_an_emergency_stop_one_risk_beyond():
+    params = default_parameters("LEBPRIME")
+    assert params["stop_rule"] == "Candle close (Pine)"
+    assert params["hard_stop_beyond_r"] == 1.0
+    assert params["leg_sizing"] == "Entry 1 distance (equal lots)"
+    assert _engine().hard_stop_price(_demand_zone()) == pytest.approx(96.0)  # SL 98 - 1 x risk 2
+    assert _engine(stop_rule="Price touch").hard_stop_price(_demand_zone()) is None
+
+
+def test_close_rule_ignores_a_wick_through_the_sl():
+    zone = _demand_zone()
+    bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 100.5, 100.6, 97.9, 100.4)]
+    assert _run(_engine(), zone, bars) == ["ENTRY1_ACTIVATED", "ENTRY2_ACTIVATED"]
+    assert zone.terminal_state is None
+
+
+def test_close_rule_exits_at_the_close_beyond_the_sl():
+    zone = _demand_zone()
+    bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 98.6, 98.7, 97.0, 97.2)]
+    assert _run(_engine(), zone, bars)[-1] == "SL_HIT"
+    # Entry 1 (100) and Entry 2 (gap fill at the 98.6 open) both closed at 97.2: more than 1R lost.
+    expected = 0.5 * (97.2 - 100.0) / 2.0 + 0.5 * (97.2 - 98.6) / 1.0
+    assert zone.result_r == pytest.approx(expected)
+    assert zone.exit_price == 97.2
+
+
+def test_close_rule_emergency_stop_caps_a_crash():
+    zone = _demand_zone()
+    bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 99.0, 99.1, 95.0, 98.5)]
+    assert _run(_engine(), zone, bars)[-1] == "SL_HIT"
+    assert zone.exit_price == 96.0
+    assert zone.terminal_reason == "Emergency broker stop"
+
+
+def test_close_rule_follows_pine_on_the_july_style_tp2_case():
+    # Wick touches the SL (98) after Entry 1 fills, then price runs to TP2: Pine and the close rule both win.
+    zone = _demand_zone()
+    bars = [_bar(0, 102, 102.5, 101, 101.5), _bar(1, 101.0, 101.5, 99.8, 100.5), _bar(2, 100.4, 100.6, 97.8, 100.2), _bar(3, 100.2, 104.2, 100.0, 104.0)]
+    assert _run(_engine(), zone, bars)[-1] == "TP2_HIT"
+    pine_zone = _demand_zone()
+    assert _run(_engine("Pine indicator"), pine_zone, bars)[-1] == "TP2_HIT"
+
+
+def test_equal_lot_sizing_measures_entry2_from_entry1_risk():
+    engine = _engine(leg_sizing="Entry 1 distance (equal lots)")
+    zone = _demand_zone()
+    legs = engine._live_legs(zone)
+    legs["2"].update({"filled": True, "fill_price": 99.0, "open_fraction": 1.0})
+    engine._close_live_legs(zone, 98.0, True)
+    assert engine._live_result_r(zone) == pytest.approx(0.5 * (98.0 - 99.0) / 2.0)

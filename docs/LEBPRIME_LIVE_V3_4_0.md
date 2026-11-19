@@ -61,3 +61,18 @@ Selectable logical -> MT5 symbols: XAUUSD -> XAUUSD, US30 -> US30, NAS100 -> UST
 XAGUSD -> XAGUSD, WTI -> WTI, EURUSD -> EURUSD. Without a `symbols` list in config the
 runtime still defaults to XAUUSD, US30 and NAS100. EURUSD uses the Pine forex SL buffer
 (0.0005). Indicator Lab datasets drop the still-forming last candle when frozen.
+
+## Stop-loss rule (phase 2)
+
+Default `stop_rule = Candle close (Pine)`: like the TradingView indicator, a trade is closed only
+when a candle closes with at least half its body beyond the SL. A wick through the SL does not close
+it. The bot acts on closed candles, so the exit price is that candle's close, and a loss can be larger
+than 1R. The SL is judged from the candle after Entry 1 fills, as in Pine.
+
+Because the real SL is only enforced at candle close, MT5 holds a wider emergency stop:
+`hard_stop_beyond_r` x risk beyond the SL (default 1.0, i.e. 2R from Entry 1). It covers gaps and the
+bot being offline. `0` puts the broker stop at the structural SL. `Price touch` restores the plain
+broker stop at the SL.
+
+`leg_sizing` defaults to `Entry 1 distance (equal lots)`: both entries are sized from Entry 1's risk,
+so a close beyond the SL cannot turn Entry 2 (sized on a much smaller distance) into a multi-R loss.

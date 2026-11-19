@@ -572,6 +572,16 @@ class LebPrimeLiveService:
                 )
 
     @staticmethod
+    def _broker_stop(context: LiveContext, zone: ZoneRecord) -> float:
+        """Stop sent to MT5: the emergency stop under the candle-close SL rule, else the structural SL.
+
+        With the candle-close rule the real SL is enforced by the bot at candle close (engine SL_HIT ->
+        close at market); the broker only holds a wider emergency stop for gaps or the bot being offline.
+        """
+        hard_stop = context.engine.hard_stop_price(zone)
+        return float(hard_stop) if hard_stop is not None else float(zone.sl_price)
+
+    @staticmethod
     def _entry_specs(zone: ZoneRecord) -> list[tuple[int, str, float]]:
         values = [(1, "ENTRY1", zone.entry1), (2, "ENTRY2", zone.entry2)]
         return [(number, label, float(value)) for number, label, value in values if value is not None]
@@ -608,7 +618,7 @@ class LebPrimeLiveService:
             "entry_price": entry,
             "normalized_price": existing.get("normalized_price"),
             "volume": existing.get("volume"),
-            "sl": existing.get("sl", zone.sl_price),
+            "sl": existing.get("sl", self._broker_stop(context, zone)),
             "tp": existing.get("tp", zone.tp2_price),
             "mt5_order_ticket": existing.get("mt5_order_ticket"),
             "mt5_deal_ticket": existing.get("mt5_deal_ticket"),
@@ -791,8 +801,11 @@ class LebPrimeLiveService:
         symbol_spec = connector.get_symbol_spec(force_refresh=True)
         direction = "LONG" if zone.side == "DEMAND" else "SHORT"
         sent: list[tuple[int, str]] = []
+        equal_lots = str(context.engine.parameters.get("leg_sizing", "")) == "Entry 1 distance (equal lots)"
+        broker_stop = self._broker_stop(context, zone)
         for entry_number, label, entry in candidates:
-            risk_price = abs(entry - float(zone.sl_price))
+            sizing_entry = float(zone.entry1) if equal_lots and zone.entry1 is not None else entry
+            risk_price = abs(sizing_entry - float(zone.sl_price))
             trade_plan = {
                 "entry_price": entry,
                 "stop_loss": float(zone.sl_price),
@@ -812,6 +825,23 @@ class LebPrimeLiveService:
                 risk_adjustment=0.5,
             )
             if not sizing.get("valid"):
+                # Say exactly why: the risk budget, the lot it buys and the broker/config minimum.
+                self._log(
+                    "lebprime_sizing_blocked",
+                    {
+                        "context": context.key,
+                        "zone_id": zone.engine_zone_id,
+                        "entry_number": entry_number,
+                        "reason": sizing.get("reason_code") or sizing.get("reason"),
+                        "balance": float(getattr(account, "balance", 0.0) or 0.0),
+                        "sl_distance_price": risk_price,
+                        "raw_lot": sizing.get("raw_lot"),
+                        "min_volume": sizing.get("min_volume"),
+                        "broker_volume_min": symbol_spec.get("volume_min"),
+                        "config_min_lot": self.config.get("risk", {}).get("min_lot"),
+                    },
+                    level="WARNING",
+                )
                 self._execution_rejected(context, zone, payload, "RISK_BLOCKED", str(sizing.get("reason_code") or sizing.get("reason")), sent, connector)
                 return
             volume = float(sizing["volume"])
@@ -830,7 +860,7 @@ class LebPrimeLiveService:
                 direction=direction,
                 volume=float(margin["volume"]),
                 entry_price=entry,
-                sl=float(zone.sl_price),
+                sl=broker_stop,
                 tp=float(zone.tp2_price),
                 comment=self._order_comment(zone.engine_zone_id, label),
             )

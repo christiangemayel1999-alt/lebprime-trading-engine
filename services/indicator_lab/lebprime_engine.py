@@ -13,6 +13,10 @@ SL_SWING_PIVOT_LEN = 2
 MAX_AFTER_ZONE_SWING_BARS = 60
 EXECUTION_LIVE = "Live broker"
 EXECUTION_PINE = "Pine indicator"
+STOP_CLOSE = "Candle close (Pine)"
+STOP_TOUCH = "Price touch"
+LEG_SIZING_OWN = "Own stop distance"
+LEG_SIZING_EQUAL = "Entry 1 distance (equal lots)"
 LEG_RISK_WEIGHT = 0.5  # Entry 1 and Entry 2 each carry half of the configured risk, as in the live runtime.
 FOREX_CURRENCIES = {
     "EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "SEK", "NOK", "DKK",
@@ -767,7 +771,10 @@ class LebPrimeEngine(IndicatorEngine):
         for leg in self._live_legs(zone).values():
             if not leg["filled"] or leg["open_fraction"] <= 0.0:
                 continue
-            risk = abs(float(leg["planned_price"]) - stop)
+            sizing_price = float(leg["planned_price"])
+            if str(self.parameters.get("leg_sizing", LEG_SIZING_OWN)) == LEG_SIZING_EQUAL:
+                sizing_price = float(self._live_legs(zone)["1"]["planned_price"])
+            risk = abs(sizing_price - stop)
             if risk <= 0.0:
                 continue
             portion = float(leg["open_fraction"]) * fraction
@@ -814,10 +821,31 @@ class LebPrimeEngine(IndicatorEngine):
             zone.mfe_r = zone.mfe_points / risk
             zone.mae_r = zone.mae_points / risk
 
+    def _close_stop_mode(self) -> bool:
+        return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
+
+    def hard_stop_price(self, zone: ZoneRecord) -> float | None:
+        """Emergency broker stop used with the candle-close SL: ``hard_stop_beyond_r`` x risk beyond the SL.
+
+        It protects against gaps and the bot being offline, because the real SL is only acted on at
+        candle close. None when the SL itself is the broker stop (touch rule) or the stop is disabled.
+        """
+        beyond = float(self.parameters.get("hard_stop_beyond_r", 1.0) or 0.0)
+        if not self._close_stop_mode() or beyond <= 0.0 or zone.sl_price is None:
+            return None
+        entry1 = float(zone.entry1 if zone.entry1 is not None else zone.entry_price)
+        stop = float(zone.sl_price)
+        risk = abs(entry1 - stop)
+        return stop - beyond * risk if zone.side == "DEMAND" else stop + beyond * risk
+
     def _manage_zone_live(self, zone: ZoneRecord, bar: Candle) -> None:
         demand = zone.side == "DEMAND"
         legs = self._live_legs(zone)
         stop = float(zone.sl_price)
+        close_mode = self._close_stop_mode()
+        hard_stop = self.hard_stop_price(zone)
+        if hard_stop is not None:
+            zone.metadata["hard_stop_price"] = hard_stop
         entry1 = float(legs["1"]["planned_price"])
         entry2 = float(legs["2"]["planned_price"])
         tp1 = float(zone.tp1_price if zone.tp1_price is not None else zone.tp_price)
@@ -837,10 +865,14 @@ class LebPrimeEngine(IndicatorEngine):
                 if touched(entry2, True):
                     self._fill_live_leg(zone, "2", bar, demand)
                 self._update_excursions(zone, bar, demand)
-                # The broker stop is live from the moment Entry 1 fills.
-                if touched(stop, True):
-                    exit_price = self._stop_exit_price(bar, demand, stop)
-                    self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "SL touched on the entry candle")
+                # The broker-side stop is live from the moment Entry 1 fills. With the candle-close
+                # rule the SL itself is only judged from the next candle (as in Pine); the emergency
+                # stop still protects the fill candle.
+                broker_stop = hard_stop if close_mode else stop
+                if broker_stop is not None and touched(broker_stop, True):
+                    exit_price = self._stop_exit_price(bar, demand, broker_stop)
+                    reason = "Emergency broker stop touched on the entry candle" if close_mode else "SL touched on the entry candle"
+                    self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, reason)
                 return
             if self._post_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
                 zone.terminal_state = "CANCELED"
@@ -858,7 +890,10 @@ class LebPrimeEngine(IndicatorEngine):
         if zone.tp1_hit_bar_index is None:
             if not legs["2"]["filled"] and not legs["2"]["canceled"] and touched(entry2, True):
                 self._fill_live_leg(zone, "2", bar, demand)
-            if touched(stop, True):
+            if close_mode and hard_stop is not None and touched(hard_stop, True):
+                exit_price = self._stop_exit_price(bar, demand, hard_stop)
+                self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "Emergency broker stop")
+            elif not close_mode and touched(stop, True):
                 exit_price = self._stop_exit_price(bar, demand, stop)
                 self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "SL touched")
             elif touched(tp2, False):
@@ -876,17 +911,22 @@ class LebPrimeEngine(IndicatorEngine):
                 self._close_live_legs(zone, bar.close, demand, fraction=0.5)
                 zone.metadata["tp1_partial_price"] = bar.close
                 self._emit(zone, bar, "TP1_HIT", price=tp1)
+            elif close_mode and self._stop_confirmed(bar, demand, stop):
+                # Pine rule: a candle closes with at least half its body beyond the SL; the bot exits at that close.
+                self._finish_live(zone, bar, "SL_HIT", bar.close, stop, "Candle closed beyond SL")
             return
 
         if bar.index <= int(zone.tp1_hit_bar_index):
             return
-        if touched(stop, True):
-            exit_price = self._stop_exit_price(bar, demand, stop)
-            self._finish_live(zone, bar, "TP1_FINAL", exit_price, tp1, "Remaining position stopped at SL after TP1")
+        broker_stop = hard_stop if close_mode else stop
+        if broker_stop is not None and touched(broker_stop, True):
+            exit_price = self._stop_exit_price(bar, demand, broker_stop)
+            reason = "Remaining position hit the emergency broker stop after TP1" if close_mode else "Remaining position stopped at SL after TP1"
+            self._finish_live(zone, bar, "TP1_FINAL", exit_price, tp1, reason)
         elif touched(tp2, False):
             exit_price = self._target_exit_price(bar, demand, tp2)
             self._finish_live(zone, bar, "TP2_HIT", exit_price, tp2, "TP2")
-        elif touched(entry1, True):
+        elif touched(entry1, True) or (close_mode and self._stop_confirmed(bar, demand, stop)):
             self._finish_live(zone, bar, "TP1_FINAL", bar.close, tp1, "Price returned to Entry 1 after TP1; closed at candle close")
 
     def _manage_zones(self, bar: Candle) -> None:
