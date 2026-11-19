@@ -1176,6 +1176,11 @@ class MT5Connector:
         positions = self._call_mt5("positions_get", mt5.positions_get, symbol=self.symbol) or []
         return [p for p in positions if int(getattr(p, "magic", 0)) == int(self.config["mt5"]["magic_number"])]
 
+    def get_all_bot_positions(self) -> list[Any]:
+        """Return bot-managed positions on every symbol (LebPrime trades several symbols)."""
+        positions = self._call_mt5("positions_get_all", mt5.positions_get) or []
+        return [p for p in positions if int(getattr(p, "magic", 0)) == int(self.config["mt5"]["magic_number"])]
+
     def get_position_by_ticket(self, ticket: int | str) -> Any | None:
         """Return a live position by ticket."""
         try:

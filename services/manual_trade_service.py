@@ -57,7 +57,7 @@ class ManualTradeService:
             config = self.config_manager.load_runtime()
             connector = self._connector(config)
             self._ensure_connection(connector)
-            positions = [self._format_position(position) for position in connector.get_bot_positions()]
+            positions = [self._format_position(position) for position in connector.get_all_bot_positions()]
             return {
                 "ok": True,
                 "positions": positions,
@@ -73,6 +73,29 @@ class ManualTradeService:
                 level="WARNING",
             )
             return {"ok": False, "positions": [], "count": 0, "message": str(exc), "source": source}
+
+    def trade_history(self, days: int = 30) -> dict[str, Any]:
+        """LebPrime trades and win/loss summary, built from MT5 deals and linked to zones."""
+        from services.lebprime_live.trade_history import build_trades, summarize
+        from utils import utc_now
+
+        config = self.config_manager.load_runtime()
+        connector = self._connector(config)
+        self._ensure_connection(connector)
+        # MT5 stamps deals in broker server time (ahead of UTC), so query a day past "now" or the
+        # most recent deals fall outside the window.
+        from datetime import timedelta
+
+        start = utc_now() - timedelta(days=max(1, int(days)))
+        raw = connector._call_mt5("history_deals_get", mt5.history_deals_get, start, utc_now() + timedelta(days=1)) or []
+        magic = int(config["mt5"]["magic_number"])
+        deals = [deal for deal in raw if int(getattr(deal, "magic", 0)) == magic]
+        rows = self.database._query_dataframe(
+            "SELECT mt5_order_ticket, zone_id, context_key FROM lebprime_broker_entries WHERE mt5_order_ticket IS NOT NULL;", ()
+        )
+        entries = {str(row["mt5_order_ticket"]): row for row in rows}
+        trades = build_trades(deals, entries, offset_seconds=int(getattr(connector, "server_time_offset_seconds", 0) or 0))
+        return {"ok": True, "days": int(days), "trades": trades, "summary": summarize(trades, utc_now().date().isoformat())}
 
     def open_market_trade(
         self,

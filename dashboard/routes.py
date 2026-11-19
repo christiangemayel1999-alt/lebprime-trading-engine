@@ -406,6 +406,13 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     async def manual_positions(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return manual_trade_service.list_positions("dashboard", "dashboard")
 
+    @router.get("/api/lebprime/trades")
+    async def lebprime_trades(days: int = 30, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+        try:
+            return manual_trade_service.trade_history(days)
+        except Exception as exc:  # MT5 unavailable: show the message instead of failing the page
+            return {"ok": False, "message": str(exc), "trades": [], "summary": {}}
+
     @router.post("/api/control/close-all")
     async def control_close_all(payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()

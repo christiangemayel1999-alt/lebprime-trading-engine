@@ -683,13 +683,13 @@
                 <div class="col-12 col-xl-8"><div class="section-grid">
                     ${metric("Bot Status", metrics.bot_status || "N/A")}
 ${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode || "N/A", (state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE")}
-                    ${metric("Open Positions", num(metrics.open_positions).toFixed(0))}
-                    ${metric("Today PnL", num(metrics.today_pnl).toFixed(2))}
+                    ${metric("Open Positions", asArray(state.positions).length.toFixed(0))}
+                    ${metric("Today PnL", num(asObject((state.lebprimeTrades || {}).summary).today_pnl ?? metrics.today_pnl).toFixed(2))}
                     ${metric("Daily Loss Used", `${num(metrics.daily_loss_used_pct).toFixed(1)}%`)}
                     ${metric("Current Spread", num(metrics.spread).toFixed(2))}
                     ${metric("Session", runtimeControl.session || "N/A")}
                     ${metric("Regime", runtimeControl.regime || "N/A")}
-                    ${metric("Win Rate", `${num(metrics.win_rate).toFixed(2)}%`)}
+                    ${metric("Win Rate", `${num(asObject((state.lebprimeTrades || {}).summary).win_rate ?? metrics.win_rate).toFixed(1)}%`)}
                     ${metric("Active Strategies", num(metrics.enabled_strategy_count).toFixed(0))}
                     ${metric("Enabled Families", num(metrics.enabled_family_count).toFixed(0))}
                 </div></div>
@@ -1011,42 +1011,37 @@ const brokerEntries = asArray(status.broker_entries);
         };
     }
 
-    function renderTrades() {
-        const unresolved = state.status.runtime?.unresolved_trades || [];
-        const recentClosed = state.status.runtime?.recent_closed_trades || [];
-        const unresolvedCount = unresolved.length;
-        const closedCount = recentClosed.length;
-        document.getElementById("section-trades").innerHTML = `
-            <div class="row g-3">
-                <div class="col-12"><div class="card border-0 shadow-sm ${unresolvedCount > 0 ? "live-warning" : ""}"><div class="card-body">
-                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
-                        <div>
-                            <h2 class="h5 mb-1">Trade Recovery</h2>
-                            <div class="small text-secondary">Review open, pending, and recently finalized trades in one place.</div>
-                        </div>
-                        <div class="d-flex flex-wrap gap-2">
-                            <div class="badge text-bg-warning">Unresolved: ${unresolvedCount}</div>
-                            <div class="badge text-bg-success">Recent closes: ${closedCount}</div>
-                        </div>
-                    </div>
-                </div></div></div>
-                <div class="col-12 col-xl-6"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <div>
-                            <h2 class="h5 mb-1">Unresolved Trades</h2>
-                            <div class="small text-secondary">These trades are waiting for MT5 history to be matched and finalized.</div>
-                        </div>
-                    </div>
-                    <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Ticket</th><th>Setup / Regime</th><th>Status</th><th>Reason</th><th>Attempts</th><th>Last Try</th></tr></thead>
-                    <tbody>${unresolved.map((row) => `<tr><td>${esc(row.mt5_ticket || row.trade_id)}</td><td><div>${esc(row.setup_family || row.setup || "")}</div><div class="small text-secondary">${esc(row.regime || "")} | ${esc(row.session || "")}</div></td><td><span class="badge text-bg-warning">${esc(row.status || "PENDING")}</span></td><td><div>${esc(row.unresolved_reason || row.close_reason || "pending")}</div><div class="small text-secondary">${esc(row.note || "")}</div></td><td>${esc(row.resolution_attempts || 0)}</td><td>${esc(row.last_resolution_attempt_at || row.created_at || row.updated_at || "")}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No unresolved trades.</td></tr>`}</tbody></table></div>
-                </div></div></div>
-                <div class="col-12 col-xl-6"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Recently Closed Trades</h2>
-                    <div class="small text-secondary mb-3">Finalized outcomes with realized PnL, R multiple, and exit reason.</div>
-                    <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Time</th><th>Ticket</th><th>Outcome</th><th>PnL</th><th>R</th><th>Close Reason</th><th>Exec Reason</th></tr></thead>
-                    <tbody>${recentClosed.map((row) => `<tr><td>${esc(row.closed_at || row.updated_at || row.timestamp || "")}</td><td>${esc(row.mt5_ticket || row.trade_id)}</td><td><span class="badge text-bg-${(row.outcome_label || row.win_loss) === "WIN" ? "success" : (row.outcome_label || row.win_loss) === "LOSS" ? "danger" : "secondary"}">${esc(row.outcome_label || row.win_loss || "UNKNOWN")}</span></td><td>${num(row.pnl).toFixed(2)}</td><td>${num(row.realized_r).toFixed(2)}</td><td>${esc(row.close_reason || row.execution_reason || "")}</td><td>${esc(row.execution_reason || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="text-secondary">No closed trades yet.</td></tr>`}</tbody></table></div>
-                </div></div></div>
+    function lebprimeTradeSummaryCards(summary) {
+        const tone = num(summary.net_pnl) >= 0 ? "text-success" : "text-danger";
+        return `
+            <div class="row g-2 mb-3">
+                <div class="col-6 col-lg-2"><div class="small text-secondary">Closed trades</div><div class="h5 mb-0">${num(summary.closed_trades).toFixed(0)}</div></div>
+                <div class="col-6 col-lg-2"><div class="small text-secondary">Wins / Losses</div><div class="h5 mb-0">${num(summary.wins).toFixed(0)} / ${num(summary.losses).toFixed(0)}</div></div>
+                <div class="col-6 col-lg-2"><div class="small text-secondary">Win rate</div><div class="h5 mb-0">${num(summary.win_rate).toFixed(1)}%</div></div>
+                <div class="col-6 col-lg-2"><div class="small text-secondary">Net P&amp;L</div><div class="h5 mb-0 ${tone}">${num(summary.net_pnl).toFixed(2)}</div></div>
+                <div class="col-6 col-lg-2"><div class="small text-secondary">Today P&amp;L</div><div class="h5 mb-0">${num(summary.today_pnl).toFixed(2)}</div></div>
+                <div class="col-6 col-lg-2"><div class="small text-secondary">Open trades</div><div class="h5 mb-0">${num(summary.open_trades).toFixed(0)}</div></div>
             </div>`;
+    }
+
+    function renderTrades() {
+        const history = state.lebprimeTrades || {};
+        const trades = asArray(history.trades);
+        const summary = asObject(history.summary);
+        const positions = asArray(state.positions);
+        document.getElementById("section-trades").innerHTML = `
+            <div class="card border-0 shadow-sm mb-3"><div class="card-body">
+                <h2 class="h5 mb-1">LebPrime Trades (last ${num(history.days, 30).toFixed(0)} days)</h2>
+                <div class="small text-secondary mb-3">From MT5 deals on this account (bot magic number), P&amp;L after commission and swap. Each row is one entry (Entry 1 or Entry 2).${history.ok === false ? ` <span class="text-warning">MT5: ${esc(history.message || "unavailable")}</span>` : ""}</div>
+                ${lebprimeTradeSummaryCards(summary)}
+                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Opened (UTC)</th><th>Closed (UTC)</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Lot</th><th>Open</th><th>Close</th><th>P&amp;L</th><th>Result</th><th>Exit</th><th>Zone</th></tr></thead>
+                <tbody>${trades.map((t) => `<tr><td>${esc(String(t.open_time || "").slice(0, 16).replace("T", " "))}</td><td>${esc(String(t.close_time || "").slice(0, 16).replace("T", " ") || "-")}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${esc(t.entry_label || "")}</td><td>${num(t.volume).toFixed(2)}</td><td>${esc(t.open_price)}</td><td>${t.close_price == null ? "-" : num(t.close_price).toFixed(2)}</td><td class="${num(t.pnl) >= 0 ? "text-success" : "text-danger"}">${num(t.pnl).toFixed(2)}</td><td>${t.result ? badge(t.result, t.result === "WIN" ? "success" : t.result === "LOSS" ? "danger" : "secondary") : badge(t.status, "warning")}</td><td>${esc(t.exit_reason || "-")}</td><td class="small">${esc(t.zone_id || (t.tracked_by_bot ? "" : "not in bot records"))}</td></tr>`).join("") || `<tr><td colspan="12" class="text-secondary">No LebPrime trades yet.</td></tr>`}</tbody></table></div>
+            </div></div>
+            <div class="card border-0 shadow-sm"><div class="card-body">
+                <h2 class="h5">Open Positions</h2>
+                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Lot</th><th>Open</th><th>SL</th><th>TP</th><th>Profit</th><th>Comment</th></tr></thead>
+                <tbody>${positions.map((p) => `<tr><td>${esc(p.ticket)}</td><td>${esc(p.symbol)}</td><td>${esc(p.side)}</td><td>${num(p.volume).toFixed(2)}</td><td>${esc(p.open_price)}</td><td>${esc(p.sl)}</td><td>${esc(p.tp)}</td><td class="${num(p.profit) >= 0 ? "text-success" : "text-danger"}">${num(p.profit).toFixed(2)}</td><td class="small">${esc(p.comment)}</td></tr>`).join("") || `<tr><td colspan="9" class="text-secondary">No open positions.</td></tr>`}</tbody></table></div>
+            </div></div>`;
     }
 
     function renderPerformance() {
@@ -1059,7 +1054,15 @@ const brokerEntries = asArray(status.broker_entries);
         const topBlocked = Object.entries(summary.by_blocked_reason || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
         const topClose = Object.entries(summary.by_close_reason || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
         const topExec = Object.entries(summary.by_execution_reason || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+        const lpSummary = asObject((state.lebprimeTrades || {}).summary);
         document.getElementById("section-performance").innerHTML = `
+            <div class="card border-0 shadow-sm mb-3"><div class="card-body">
+                <h2 class="h5 mb-1">LebPrime Results (MT5, last ${num((state.lebprimeTrades || {}).days, 30).toFixed(0)} days)</h2>
+                <div class="small text-secondary mb-3">Wins and losses per closed entry, P&amp;L after commission and swap.</div>
+                ${lebprimeTradeSummaryCards(lpSummary)}
+                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Symbol</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win rate</th><th>P&amp;L</th></tr></thead>
+                <tbody>${asArray(lpSummary.by_symbol).map((r) => `<tr><td>${esc(r.symbol)}</td><td>${num(r.trades).toFixed(0)}</td><td>${num(r.wins).toFixed(0)}</td><td>${num(r.losses).toFixed(0)}</td><td>${(num(r.wins) / Math.max(num(r.trades), 1) * 100).toFixed(1)}%</td><td class="${num(r.pnl) >= 0 ? "text-success" : "text-danger"}">${num(r.pnl).toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No closed trades yet.</td></tr>`}</tbody></table></div>
+            </div></div>
             <div class="row g-3">
                 <div class="col-12">
                     <div class="card border-0 shadow-sm"><div class="card-body">
@@ -1166,6 +1169,10 @@ const brokerEntries = asArray(status.broker_entries);
     async function fetchWorkerStatus() {
         const payload = await api("/api/worker/status");
         state.workerStatus = payload.worker || {};
+        renderAll();
+    }
+    async function fetchLebprimeTrades() {
+        state.lebprimeTrades = await api("/api/lebprime/trades?days=30");
         renderAll();
     }
     async function refreshPositions() {
@@ -1891,6 +1898,7 @@ const brokerEntries = asArray(status.broker_entries);
             refreshStatus,
             refreshConfig,
             refreshPositions,
+            fetchLebprimeTrades,
             refreshLogs,
             fetchJobs,
             fetchWorkerStatus,
@@ -1907,6 +1915,7 @@ const brokerEntries = asArray(status.broker_entries);
         const refreshSeconds = Math.max(2, num(state.config.dashboard?.refresh_seconds || 5, 5));
         setInterval(refreshStatus, refreshSeconds * 1000);
         setInterval(refreshPositions, Math.max(5, refreshSeconds) * 1000);
+        setInterval(fetchLebprimeTrades, 20000);
         setInterval(refreshLogs, 15000);
         setInterval(fetchJobs, 5000);
         setInterval(fetchWorkerStatus, 5000);
