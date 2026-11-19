@@ -99,15 +99,18 @@ def _frame(dataset_id: int, until: str | None) -> tuple[dict, pd.DataFrame]:
     return _CACHE[key]
 
 
-def score(job: tuple[int, dict, str | None]) -> dict:
-    dataset_id, overrides, until = job
+def score(job: tuple) -> dict:
+    """job = (dataset_id, overrides, window[, split]). With a split date, stats are also reported
+    separately for trades created before ("tune") and from ("check") that date, from one run."""
+    dataset_id, overrides, until = job[:3]
+    split = job[3] if len(job) > 3 else None
     from services.indicator_lab.lebprime_engine import LebPrimeEngine
     from services.indicator_lab.parameter_registry import default_parameters
 
     meta, frame = _frame(dataset_id, until)
     result = LebPrimeEngine({**default_parameters("LEBPRIME"), **overrides}, symbol=meta["symbol"], timeframe=meta["timeframe"]).run(frame)
     point = POINT.get(meta["symbol"], 0.0)
-    nets, grosses, years = [], [], {}
+    nets, grosses, years, created = [], [], {}, []
     window_start = until.rpartition("..")[0] if until else ""
     for zone in result["zones"]:
         if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT"}:
@@ -124,6 +127,7 @@ def score(job: tuple[int, dict, str | None]) -> dict:
         gross = float(zone.result_r or 0.0)
         nets.append(gross - cost)
         grosses.append(gross)
+        created.append(str(zone.limit_created_time))
         year = str(zone.terminal_time)[:4]
         years[year] = years.get(year, 0.0) + gross - cost
     equity, peak, max_dd = 0.0, 0.0, 0.0
@@ -132,7 +136,16 @@ def score(job: tuple[int, dict, str | None]) -> dict:
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
     n = len(nets)
+    extra = {}
+    if split:
+        for label, keep in (("tune", lambda t: t < split), ("check", lambda t: t >= split)):
+            part = [(g, v) for g, v, t in zip(grosses, nets, created) if keep(t)]
+            m = len(part)
+            extra[f"{label}_trades"] = m
+            extra[f"{label}_win_rate"] = round(sum(1 for g, _ in part if g > 0) / m * 100, 2) if m else 0.0
+            extra[f"{label}_net_r"] = round(sum(v for _, v in part), 2)
     return {
+        **extra,
         "dataset_id": dataset_id, "symbol": meta["symbol"], "timeframe": meta["timeframe"],
         "overrides": json.dumps(overrides, sort_keys=True),
         "trades": n, "win_rate": round(sum(1 for g in grosses if g > 0) / n * 100, 2) if n else 0.0,
@@ -143,7 +156,8 @@ def score(job: tuple[int, dict, str | None]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["sensitivity", "random", "evaluate"])
+    parser.add_argument("stage", choices=["sensitivity", "random", "evaluate", "split"])
+    parser.add_argument("--split", default="2024-01-01", help="split: first date of the check period")
     parser.add_argument("--window", help="evaluate: START..END, e.g. 2024-01-01..2025-01-01")
     parser.add_argument("--top", type=int, default=20, help="evaluate: best N settings from stage_b_pooled.csv")
     parser.add_argument("--settings", help="evaluate: JSON file with a list of settings instead of --top")
@@ -158,6 +172,8 @@ def main() -> int:
         return random_stage(args)
     if args.stage == "evaluate":
         return evaluate_stage(args)
+    if args.stage == "split":
+        return split_stage(args)
     variants = [{}] + [{name: value} for name, values in GRID.items() for value in values]
     jobs = [(d, v, args.until) for d, v in itertools.product(args.datasets, variants)]
     print(f"{len(jobs)} runs ({len(variants)} variants x {len(args.datasets)} datasets)", flush=True)
@@ -221,6 +237,28 @@ def random_stage(args) -> int:
     pd.set_option("display.width", 250)
     pd.set_option("display.max_colwidth", 400)
     print(pooled.head(15).to_string())
+    return 0
+
+
+def split_stage(args) -> int:
+    """One run per setting and dataset over --window; stats split at --split (tune / check)."""
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    settings = json.loads(Path(args.settings).read_text(encoding="utf-8"))
+    jobs = [(d, o, args.window, args.split) for o in settings for d in args.datasets]
+    rows = []
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        for row in pool.map(score, jobs, chunksize=1):
+            rows.append(row)
+            pd.DataFrame(rows).to_csv(out / "split_runs.csv", index=False)  # saved as it goes
+    table = pd.DataFrame(rows)
+    pooled = table.groupby("overrides", sort=False).agg(
+        tune_trades=("tune_trades", "sum"), tune_net_r=("tune_net_r", "sum"), tune_win=("tune_win_rate", "mean"),
+        check_trades=("check_trades", "sum"), check_net_r=("check_net_r", "sum"), check_win=("check_win_rate", "mean"),
+        check_profitable_symbols=("check_net_r", lambda v: int((v > 0).sum())),
+    ).round(2)
+    pooled.to_csv(out / "split_pooled.csv")
+    print(pooled.reset_index(drop=True).to_string())
     return 0
 
 
