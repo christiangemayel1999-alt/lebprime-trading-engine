@@ -94,3 +94,34 @@ def test_parity_tool_rejects_a_normal_chart_export(tmp_path):
     pd.DataFrame({"time": [1, 2], "open": [1, 1], "high": [1, 1], "low": [1, 1], "close": [1, 1]}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="parity"):
         compare_tradingview_export(path, symbol="XAUUSD")
+
+
+def test_parity_table_check_matches_engine_rows():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("check_parity_table", Path(__file__).resolve().parents[1] / "scripts" / "check_parity_table.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    frame = _random_walk()
+    params = {**default_parameters("LEBPRIME"), "execution_model": "Pine indicator"}
+    zones = [z for z in LebPrimeEngine(params).run(frame)["zones"] if z.limit_created_bar_index is not None][-10:]
+    assert zones
+    rows = pd.DataFrame(
+        [
+            {
+                "created_utc": pd.Timestamp(z.limit_created_time).strftime("%Y-%m-%d %H:%M"),
+                "side": "BUY" if z.side == "DEMAND" else "SELL",
+                "entry1": z.entry_price, "sl": z.sl_price, "tp1": z.tp1_price, "tp2": z.tp2_price,
+                "status": module.python_status(z) + " 2025-01-02 10:00",
+            }
+            for z in zones
+        ]
+    )
+    report = module.compare(rows, frame, symbol="XAUUSD", timeframe="M15", tolerance=1e-9)
+    assert (report["match"] == "OK").all()
+
+    rows.loc[0, "sl"] = rows.loc[0, "sl"] + 5
+    report = module.compare(rows, frame, symbol="XAUUSD", timeframe="M15", tolerance=0.01)
+    assert report.loc[0, "match"] == "LEVELS_DIFFER"

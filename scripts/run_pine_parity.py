@@ -4,7 +4,7 @@ Usage:
     python scripts/run_pine_parity.py EXPORT.csv --symbol XAUUSD --timeframe M15 [--history-bars 5000]
 
 The CSV must come from "Export chart data" on a chart running
-docs/indicator_reference/LebPrime_Signals_v3_4_1_parity_export.pine, with the indicator's
+docs/indicator_reference/LebPrime_Signals_v3_4_1_parity_check.pine, with the indicator's
 "Recent history bars" input set to the same value as --history-bars.
 """
 

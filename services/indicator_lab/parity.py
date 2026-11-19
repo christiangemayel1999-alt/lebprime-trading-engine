@@ -1,7 +1,7 @@
 """Bar-by-bar comparison of the Python LebPrime engine with a TradingView chart export.
 
 Workflow:
-  1. Add docs/indicator_reference/LebPrime_Signals_v3_4_1_parity_export.pine to a
+  1. Add docs/indicator_reference/LebPrime_Signals_v3_4_1_parity_check.pine to a
      TradingView chart, set "Recent history bars" to cover the whole chart (e.g. 5000).
   2. Export chart data (CSV). The file holds the candles plus 26 "LP <side> <event>" columns.
   3. Run scripts/run_pine_parity.py on the CSV. The engine runs in Pine mode on the very

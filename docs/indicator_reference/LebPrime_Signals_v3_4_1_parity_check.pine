@@ -1,12 +1,14 @@
 //@version=6
 // ============================================================================
-// LebPrime Signals — v3.4.1 PARITY EXPORT BUILD
+// LebPrime Signals — v3.4.1 PARITY CHECK BUILD
 //
-// Same trading logic as LebPrime_Signals_v3_4_1.pine. The only additions are
-// 26 hidden data-window plots that record every lifecycle event, so that
-// "Export chart data" in TradingView produces a CSV the Python engine can be
-// compared against bar by bar (scripts/run_pine_parity.py).
-// Use it for testing only; trade from the normal v3.4.1 script.
+// Same trading logic as LebPrime_Signals_v3_4_1.pine. Additions for testing only:
+//   * a "Parity log" table (bottom right) listing the latest signals with their
+//     creation time (UTC), side, Entry 1, SL, TP1, TP2 and current status, so the
+//     Python engine can be checked from a screenshot, with no data export needed;
+//   * 26 hidden data-window plots with every lifecycle event, for plans that
+//     allow "Export chart data" (scripts/run_pine_parity.py).
+// Trade from the normal v3.4.1 script.
 //
 // PURPOSE
 //   Professional signal-generation indicator.
@@ -26,7 +28,7 @@
 //   • Professional lifecycle alerts are emitted exactly once per state transition.
 // ============================================================================
 
-indicator("LebPrime Signals — v3.4.1 Parity Export", overlay = true,
+indicator("LebPrime Signals — v3.4.1 Parity Check", overlay = true,
      max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
      max_bars_back = 2000)
 
@@ -298,6 +300,18 @@ var int statTp1Final = 0    // TP1 only, closed before TP2
 // 10 TP1 final, 11 SL hit, 12 canceled.
 var float[] parityEvents = array.new_float(26, na)
 array.fill(parityEvents, na)
+
+// Parity log (NEW): latest signals for the on-chart table.
+i_showParityLog = input.bool(true, "Show parity log table", group = "Parity Check")
+i_parityRows = input.int(20, "Parity log rows", minval = 5, maxval = 40, group = "Parity Check")
+var string[] logId = array.new_string()
+var string[] logTime = array.new_string()
+var string[] logSide = array.new_string()
+var float[] logEntry = array.new_float()
+var float[] logSl = array.new_float()
+var float[] logTp1 = array.new_float()
+var float[] logTp2 = array.new_float()
+var string[] logStatus = array.new_string()
 
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1111,8 +1125,36 @@ f_parity(int idx, int slot, float value) =>
     int offset = array.get(zDemand, idx) ? 0 : 13
     array.set(parityEvents, offset + slot, value)
 
+f_logTime() =>
+    str.format_time(time, "yyyy-MM-dd HH:mm", "UTC")
+
+f_logCreated(int idx) =>
+    array.push(logId, array.get(zId, idx))
+    array.push(logTime, f_logTime())
+    array.push(logSide, array.get(zDemand, idx) ? "BUY" : "SELL")
+    array.push(logEntry, array.get(zEntryPrice, idx))
+    array.push(logSl, array.get(zStopPrice, idx))
+    array.push(logTp1, array.get(zTarget1Price, idx))
+    array.push(logTp2, array.get(zTarget2Price, idx))
+    array.push(logStatus, "PENDING")
+    if array.size(logId) > 40
+        array.shift(logId)
+        array.shift(logTime)
+        array.shift(logSide)
+        array.shift(logEntry)
+        array.shift(logSl)
+        array.shift(logTp1)
+        array.shift(logTp2)
+        array.shift(logStatus)
+
+f_logStatus(int idx, string status) =>
+    int pos = array.indexof(logId, array.get(zId, idx))
+    if pos >= 0
+        array.set(logStatus, pos, status + " " + f_logTime())
+
 f_sendCreated(int idx) =>
     f_parity(idx, 0, array.get(zEntryPrice, idx))
+    f_logCreated(idx)
     f_parity(idx, 1, array.get(zTop, idx))
     f_parity(idx, 2, array.get(zBot, idx))
     f_parity(idx, 3, array.get(zStopPrice, idx))
@@ -1122,30 +1164,37 @@ f_sendCreated(int idx) =>
 
 f_sendActivated(int idx) =>
     f_parity(idx, 6, array.get(zEntryPrice, idx))
+    f_logStatus(idx, "E1")
     f_sendRaw(f_activatedMessage(idx))
 
 f_sendEntry2Activated(int idx) =>
     f_parity(idx, 7, array.get(zEntry2Price, idx))
+    f_logStatus(idx, "E1+E2")
     f_sendRaw(f_entry2ActivatedMessage(idx))
 
 f_sendTp1(int idx) =>
     f_parity(idx, 8, array.get(zTarget1Price, idx))
+    f_logStatus(idx, "TP1")
     f_sendRaw(f_tp1Message(idx))
 
 f_sendTp1Final(int idx, string reason) =>
     f_parity(idx, 10, array.get(zTarget1Price, idx))
+    f_logStatus(idx, "TP1 FINAL")
     f_sendRaw(f_tp1FinalMessage(idx, reason))
 
 f_sendTp2(int idx) =>
     f_parity(idx, 9, array.get(zTarget2Price, idx))
+    f_logStatus(idx, "TP2")
     f_sendRaw(f_tp2Message(idx))
 
 f_sendSl(int idx) =>
     f_parity(idx, 11, array.get(zStopPrice, idx))
+    f_logStatus(idx, "SL")
     f_sendRaw(f_slMessage(idx))
 
 f_sendCanceled(int idx, string reason) =>
     f_parity(idx, 12, array.get(zEntryPrice, idx))
+    f_logStatus(idx, "CANCELED")
     f_sendRaw(f_canceledMessage(idx, reason))
 
 f_testMessage() =>
@@ -1717,6 +1766,32 @@ f_trimHistoricToLimit(true)
 f_trimHistoricToLimit(false)
 
 // ════════════════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════════════════
+// PARITY LOG TABLE (NEW) — newest first, times in UTC
+// ════════════════════════════════════════════════════════════════════════════
+var table parityTable = table.new(position.bottom_right, 7, 41, border_width = 1,
+     border_color = color.new(#000000, 70), frame_width = 1, frame_color = color.new(#000000, 70))
+
+if i_showParityLog and barstate.islast
+    table.clear(parityTable, 0, 0, 6, 40)
+    color headBg = color.new(#1B2630, 0)
+    color rowBg = color.new(#263238, 0)
+    string[] heads = array.from("Created (UTC)", "Side", "Entry 1", "SL", "TP1", "TP2", "Status")
+    for c = 0 to 6
+        table.cell(parityTable, c, 0, array.get(heads, c), text_color = color.white, bgcolor = headBg, text_size = size.tiny)
+    int total = array.size(logId)
+    int shown = math.min(total, i_parityRows)
+    if shown > 0
+        for r = 0 to shown - 1
+            int k = total - 1 - r
+            table.cell(parityTable, 0, r + 1, array.get(logTime, k), text_color = color.white, bgcolor = rowBg, text_size = size.tiny)
+            table.cell(parityTable, 1, r + 1, array.get(logSide, k), text_color = array.get(logSide, k) == "BUY" ? #4CAF50 : #E53935, bgcolor = rowBg, text_size = size.tiny)
+            table.cell(parityTable, 2, r + 1, str.tostring(array.get(logEntry, k), format.mintick), text_color = color.white, bgcolor = rowBg, text_size = size.tiny)
+            table.cell(parityTable, 3, r + 1, str.tostring(array.get(logSl, k), format.mintick), text_color = color.white, bgcolor = rowBg, text_size = size.tiny)
+            table.cell(parityTable, 4, r + 1, str.tostring(array.get(logTp1, k), format.mintick), text_color = color.white, bgcolor = rowBg, text_size = size.tiny)
+            table.cell(parityTable, 5, r + 1, str.tostring(array.get(logTp2, k), format.mintick), text_color = color.white, bgcolor = rowBg, text_size = size.tiny)
+            table.cell(parityTable, 6, r + 1, array.get(logStatus, k), text_color = color.white, bgcolor = rowBg, text_size = size.tiny)
 
 // ════════════════════════════════════════════════════════════════════════════
 // PARITY EXPORT PLOTS (data window only; included in Export chart data)
