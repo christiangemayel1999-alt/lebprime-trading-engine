@@ -170,7 +170,7 @@ class IndicatorDatasetService:
                 if not connector.initialize():
                     raise ValueError("Could not connect to the MT5 terminal for history download")
             loader = HistoricalDataLoader(self.base_dir, self.config, self.database, self.logger or _NullLogger())
-            frame = loader._load_mt5_bars(connector, symbol, timeframe, start_dt, end_dt, min_rows=1)
+            frame = self._load_mt5_in_chunks(loader, connector, symbol, timeframe, start_dt, end_dt)
             if frame.empty:
                 raise ValueError("MT5 returned no bars for requested range")
             frozen = drop_unclosed_bars(self.normalize_frame(frame), timeframe, utc_now())
@@ -198,6 +198,30 @@ class IndicatorDatasetService:
             self._update_dataset(dataset_id, {"status": "FAILED", "metadata_json": {"error": str(exc)}})
             raise
         return self.get_dataset(dataset_id) or {}
+
+    @staticmethod
+    def _load_mt5_in_chunks(loader: Any, connector: Any, symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime, chunk_days: int = 120) -> pd.DataFrame:
+        """MT5 refuses very long ranges ("Invalid params" beyond its max bars), so fetch in chunks.
+
+        Chunks before the broker's first available bar simply come back empty.
+        """
+        from datetime import timedelta
+
+        frames = []
+        cursor = start_dt
+        while cursor <= end_dt:
+            chunk_end = min(end_dt, cursor + timedelta(days=chunk_days) - timedelta(microseconds=1))
+            try:
+                part = loader._load_mt5_bars(connector, symbol, timeframe, cursor, chunk_end, min_rows=1)
+            except (ValueError, RuntimeError):
+                part = pd.DataFrame()
+            if not part.empty:
+                frames.append(part)
+            cursor = chunk_end + timedelta(microseconds=1)
+        if not frames:
+            return pd.DataFrame()
+        merged = pd.concat(frames, ignore_index=True)
+        return merged.sort_values("time").drop_duplicates(subset=["time"], keep="last").reset_index(drop=True)
 
     def list_datasets(self) -> list[dict[str, Any]]:
         rows = self.database._query_dataframe("SELECT * FROM indicator_datasets ORDER BY id DESC;", ())

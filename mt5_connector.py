@@ -1211,7 +1211,22 @@ class MT5Connector:
         return None
 
     def calculate_margin(self, order_type: int, volume: float, price: float) -> float:
-        """Calculate required margin for a hypothetical order."""
+        """Calculate required margin for a hypothetical order.
+
+        MT5's order_calc_margin only accepts ORDER_TYPE_BUY / ORDER_TYPE_SELL and returns 0.0 for pending
+        types (BUY_LIMIT, SELL_STOP, ...), which made every LebPrime limit look like a margin failure.
+        Pending types are therefore priced as the market order they become once filled.
+        """
+        buy, sell = int(getattr(mt5, "ORDER_TYPE_BUY", 0)), int(getattr(mt5, "ORDER_TYPE_SELL", 1))
+        pending_to_market = {
+            int(getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2)): buy,
+            int(getattr(mt5, "ORDER_TYPE_SELL_LIMIT", 3)): sell,
+            int(getattr(mt5, "ORDER_TYPE_BUY_STOP", 4)): buy,
+            int(getattr(mt5, "ORDER_TYPE_SELL_STOP", 5)): sell,
+            int(getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", 6)): buy,
+            int(getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", 7)): sell,
+        }
+        order_type = pending_to_market.get(int(order_type), int(order_type))
         margin = self._call_mt5("order_calc_margin", mt5.order_calc_margin, order_type, self.symbol, volume, price)
         if margin is None:
             error_code, error_message = mt5.last_error()
