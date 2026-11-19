@@ -854,6 +854,21 @@ class LebPrimeLiveService:
                 lambda candidate_volume: connector.calculate_margin(order_type, candidate_volume, entry),
             )
             if not margin.get("valid"):
+                self._log(
+                    "lebprime_margin_blocked",
+                    {
+                        "context": context.key,
+                        "zone_id": zone.engine_zone_id,
+                        "entry_number": entry_number,
+                        "reason": margin.get("reason_code") or margin.get("reason"),
+                        "volume": volume,
+                        "required_margin": required_margin,
+                        "free_margin": float(getattr(account, "margin_free", 0.0) or 0.0),
+                        "equity": float(getattr(account, "equity", 0.0) or 0.0),
+                        "broker_volume_min": symbol_spec.get("volume_min"),
+                    },
+                    level="WARNING",
+                )
                 self._execution_rejected(context, zone, payload, "RISK_BLOCKED", str(margin.get("reason_code") or margin.get("reason")), sent, connector)
                 return
             request, request_reason, _ = connector.build_pending_limit_request(
