@@ -18,7 +18,6 @@ from dashboard.queries import (
     get_top_metrics,
 )
 from services.database import DatabaseService
-from services.backtest_storage import BacktestStorage
 from services.worker_control import DEFAULT_WORKER_STALE_SECONDS, read_worker_status
 
 
@@ -28,7 +27,6 @@ class DashboardDataService:
     def __init__(self, base_dir: str | Path, database: DatabaseService) -> None:
         self.base_dir = Path(base_dir)
         self.database = database
-        self.backtest_storage = BacktestStorage(database)
         self._runtime_logger = logging.getLogger("mtf_sniper_bot")
         self._last_status_count_log: tuple[tuple[str, int], ...] | None = None
         self._last_status_count_log_at = 0.0
@@ -557,182 +555,11 @@ class DashboardDataService:
             "unresolved_trades": self.unresolved_trades(limit=15),
             "recent_closed_trades": self.recent_closed_trades(limit=15),
             "daily_performance": self.daily_performance_snapshot(),
-            "backtest_runs": self.list_backtest_runs(limit=10),
             "live_integrity": self.live_integrity_snapshot(runtime_config),
         }
         self._log_status_counts(payload)
         return payload
 
-    def list_backtest_runs(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Return recent backtest runs for dashboard listing."""
-        return self.backtest_storage.list_runs(limit=limit)
-
-    def get_backtest_run_bundle(self, run_id: int) -> dict[str, Any]:
-        """Return full backtest bundle for a run id."""
-        return self.backtest_storage.get_run_bundle(run_id)
-
-    @staticmethod
-    def _parse_json_field(value: Any, default: Any) -> Any:
-        if value in (None, ""):
-            return default
-        if isinstance(value, (dict, list)):
-            return value
-        try:
-            return json.loads(value)
-        except Exception:
-            return default
-
-    def _normalize_playback_frame(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "run_id": self._as_int(row.get("run_id")),
-            "bar_index": self._as_int(row.get("bar_index")),
-            "timestamp": self._as_text(row.get("timestamp")),
-            "open": self._as_float(row.get("open")),
-            "high": self._as_float(row.get("high")),
-            "low": self._as_float(row.get("low")),
-            "close": self._as_float(row.get("close")),
-            "volume": self._as_float(row.get("volume")),
-            "tick_volume": self._as_float(row.get("tick_volume")),
-            "spread": self._as_float(row.get("spread")),
-            "equity": self._as_float(row.get("equity")),
-            "balance": self._as_float(row.get("balance")),
-            "floating_pnl": self._as_float(row.get("floating_pnl")),
-            "open_positions": self._parse_json_field(row.get("open_positions_json"), []),
-            "pending_orders": self._parse_json_field(row.get("pending_orders_json"), []),
-            "selected_candidate": self._parse_json_field(row.get("selected_candidate_json"), {}),
-            "candidate_summary": self._parse_json_field(row.get("candidate_summary_json"), {}),
-            "state": self._parse_json_field(row.get("state_json"), {}),
-        }
-
-    def _normalize_playback_event(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "run_id": self._as_int(row.get("run_id")),
-            "bar_index": self._as_int(row.get("bar_index")),
-            "timestamp": self._as_text(row.get("timestamp")),
-            "event_type": self._as_text(row.get("event_type"), "UNKNOWN"),
-            "position_id": self._as_text(row.get("position_id")),
-            "signal_id": self._as_text(row.get("signal_id")),
-            "strategy_name": self._as_text(row.get("strategy_name")),
-            "setup_family": self._as_text(row.get("setup_family")),
-            "side": self._as_text(row.get("side")),
-            "price": self._as_float(row.get("price")),
-            "reason_code": self._as_text(row.get("reason_code")),
-            "payload": self._parse_json_field(row.get("event_payload_json"), {}),
-        }
-
-    def _normalize_run_record(self, row: dict[str, Any]) -> dict[str, Any]:
-        run = dict(row or {})
-        run["enabled_strategies_json"] = self._parse_json_field(run.get("enabled_strategies_json"), [])
-        run["session_filter_json"] = self._parse_json_field(run.get("session_filter_json"), {})
-        run["spread_model"] = self._parse_json_field(run.get("spread_model"), {})
-        run["slippage_model"] = self._parse_json_field(run.get("slippage_model"), {})
-        run["artifacts_json"] = self._parse_json_field(run.get("artifacts_json"), {})
-        run["metadata_json"] = self._parse_json_field(run.get("metadata_json"), {})
-        return run
-
-    def get_backtest_replay_summary(self, run_id: int) -> dict[str, Any]:
-        """Return a front-end friendly summary for a finished backtest replay."""
-        bundle = self.backtest_storage.get_run_bundle(run_id)
-        frames = [self._normalize_playback_frame(row) for row in bundle.get("playback_frames", [])]
-        events = [self._normalize_playback_event(row) for row in bundle.get("playback_events", [])]
-        run = self._normalize_run_record(bundle.get("run") or {})
-        return {
-            "run": run,
-            "summary": bundle.get("summary") or {},
-            "frames_count": len(frames),
-            "events_count": len(events),
-            "last_frame": frames[-1] if frames else None,
-            "last_event": events[-1] if events else None,
-            "playback_ready": bool(run.get("state") in {"COMPLETED", "PARTIAL", "FAILED", "INTERRUPTED"}),
-            "history_resolution": (run.get("metadata_json") or {}).get("history_resolution", {}),
-        }
-
-    def get_backtest_replay_window(self, run_id: int, start_bar: int, end_bar: int) -> dict[str, Any]:
-        """Return a playback window with frames and events for a bar range."""
-        frames = self.database.get_backtest_playback_frames(run_id, start_bar=int(start_bar), end_bar=int(end_bar))
-        events = self.database.get_backtest_playback_events(run_id, start_bar=int(start_bar), end_bar=int(end_bar))
-        return {
-            "run_id": int(run_id),
-            "start_bar": int(start_bar),
-            "end_bar": int(end_bar),
-            "frames": [self._normalize_playback_frame(row) for row in frames],
-            "events": [self._normalize_playback_event(row) for row in events],
-        }
-
-    def get_backtest_replay_events(self, run_id: int, start_bar: int, end_bar: int) -> dict[str, Any]:
-        """Return replay events for a specific bar window."""
-        events = self.database.get_backtest_playback_events(run_id, start_bar=int(start_bar), end_bar=int(end_bar))
-        return {
-            "run_id": int(run_id),
-            "start_bar": int(start_bar),
-            "end_bar": int(end_bar),
-            "events": [self._normalize_playback_event(row) for row in events],
-        }
-
-    def get_backtest_replay_frame(self, run_id: int, bar_index: int) -> dict[str, Any] | None:
-        """Return one replay frame by bar index."""
-        row = self.database.get_backtest_playback_frame(run_id, int(bar_index))
-        return self._normalize_playback_frame(row) if row else None
-
-    def get_backtest_stream_status(self, run_id: int) -> dict[str, Any]:
-        """Return polling-friendly status for a running replay."""
-        run = self._normalize_run_record(self.database.get_backtest_run(run_id) or {})
-        if not run:
-            raise ValueError(f"Backtest run {run_id} not found")
-        latest_frame = self.database._query_dataframe(
-            """
-            SELECT *
-            FROM backtest_playback_frames
-            WHERE run_id = ?
-            ORDER BY bar_index DESC, id DESC
-            LIMIT 1;
-            """,
-            (int(run_id),),
-        )
-        latest_event = self.database._query_dataframe(
-            """
-            SELECT *
-            FROM backtest_playback_events
-            WHERE run_id = ?
-            ORDER BY bar_index DESC, id DESC
-            LIMIT 1;
-            """,
-            (int(run_id),),
-        )
-        return {
-            "run": run,
-            "state": self._as_text(run.get("state"), "UNKNOWN"),
-            "progress_current": self._as_int(run.get("progress_current")),
-            "progress_total": self._as_int(run.get("progress_total")),
-            "latest_frame": self._normalize_playback_frame(latest_frame[-1]) if latest_frame else None,
-            "latest_event": self._normalize_playback_event(latest_event[-1]) if latest_event else None,
-            "streaming": self._as_text(run.get("state")) in {"QUEUED", "RUNNING"},
-        }
-
-    def get_backtest_stream_window(self, run_id: int, after_bar: int) -> dict[str, Any]:
-        """Return incremental frames/events after a cursor bar index."""
-        frames = self.database.get_backtest_playback_frames(run_id, after_bar=int(after_bar))
-        events = self.database.get_backtest_playback_events(run_id, after_bar=int(after_bar))
-        return {
-            "run_id": int(run_id),
-            "after_bar": int(after_bar),
-            "frames": [self._normalize_playback_frame(row) for row in frames],
-            "events": [self._normalize_playback_event(row) for row in events],
-            "cursor": frames[-1]["bar_index"] if frames else int(after_bar),
-        }
-
     def worker_status(self, stale_seconds: int = DEFAULT_WORKER_STALE_SECONDS) -> dict[str, Any]:
         """Return dashboard-friendly worker heartbeat status."""
         return read_worker_status(self.base_dir, stale_seconds=stale_seconds)
-
-    def list_oos_runs(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Return recent OOS runs with parsed manifest fields."""
-        rows = self.database.get_oos_runs(limit=limit)
-        payload: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            item["request_json"] = json.loads(item["request_json"]) if item.get("request_json") else {}
-            item["metadata_json"] = json.loads(item["metadata_json"]) if item.get("metadata_json") else {}
-            item["scenarios"] = []
-            payload.append(item)
-        return payload

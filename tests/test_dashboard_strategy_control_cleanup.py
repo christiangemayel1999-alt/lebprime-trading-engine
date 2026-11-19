@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from services.config_manager import ConfigManager
-from strategy_factory import IGNORED_LEGACY_LIVE_CONTROL_KEYS, LIVE_SUPPORT_ENGINE_TYPE, build_live_runtime_support_engine
 from trading_bot.core.execution_mode import V1_BASELINE, apply_execution_mode_to_config
 
 
@@ -101,33 +100,6 @@ def test_save_and_unsaved_workflow_is_explicit() -> None:
     assert 'window.addEventListener("beforeunload"' in source
 
 
-def test_live_config_and_support_engine_disable_legacy_strategies() -> None:
-    config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-
-    assert "execution_mode" not in config["bot"]
-    assert "rollout_phase" not in config["bot"]
-    assert config["lebprime_v3_4_0"]["enabled"] is True
-    assert all(not row["enabled"] and not row["live_allowed"] for row in config["strategy"]["setup_controls"].values())
-    assert all(not row["enabled"] and not row["live_allowed"] for row in config["strategy"]["setup_families"].values())
-
-    engine = build_live_runtime_support_engine(config, ROOT)
-    assert engine.engine_type == LIVE_SUPPORT_ENGINE_TYPE
-    assert all(not row["enabled"] and not row["live_allowed"] for row in engine.config["strategy"]["setup_controls"].values())
-
-
-def test_historical_mode_resolution_remains_available_without_mutating_live_controls() -> None:
-    config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-    resolved_config, resolved = apply_execution_mode_to_config(
-        config,
-        V1_BASELINE,
-        apply_legacy_strategy_controls=False,
-    )
-
-    assert resolved.selected_mode == V1_BASELINE
-    assert all(not row["enabled"] for row in resolved_config["strategy"]["setup_controls"].values())
-    assert all(not row["enabled"] for row in resolved_config["strategy"]["setup_families"].values())
-
-
 def test_config_migration_preserves_unknown_keys_and_creates_backup(tmp_path: Path) -> None:
     config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
     config["future_extension"] = {"unknown_key": {"preserve_me": 17}}
@@ -143,15 +115,3 @@ def test_config_migration_preserves_unknown_keys_and_creates_backup(tmp_path: Pa
     assert backup["lebprime_v3_4_0"]["bars_to_fetch"] == 360
     assert manager.load_raw()["lebprime_v3_4_0"]["bars_to_fetch"] == 420
 
-
-def test_ignored_legacy_live_control_keys_are_documented() -> None:
-    assert IGNORED_LEGACY_LIVE_CONTROL_KEYS == (
-        "bot.execution_mode",
-        "bot.rollout_phase",
-        "strategy.lebprim_mode",
-        "strategy.setup_controls.<legacy_strategy>.enabled",
-        "strategy.setup_controls.<legacy_strategy>.live_allowed",
-        "strategy.setup_families.<legacy_strategy>.enabled",
-        "strategy.setup_families.<legacy_strategy>.live_allowed",
-        "backtest.selected_strategies",
-    )

@@ -11,13 +11,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import pytz
 
-from services.backtest_runner import BacktestRunner
 from services.config_manager import ConfigManager
 from services.control_state import ControlStateService
 from services.trade_journal import TradeJournalService
 from mt5_connector import MT5Connector
 from risk_manager import RiskManager
-from strategy_factory import build_strategy_engine
 from utils import utc_now
 
 
@@ -69,58 +67,6 @@ class TestControlStateAtomicity:
 class TestBacktestInputValidation:
     """Test FIX #2: Backtest requests are now validated before execution."""
 
-    def test_backtest_missing_start_date_rejected(self):
-        """Backtest without start_date should raise ValueError."""
-        with pytest.raises(ValueError, match="start_date is required"):
-            BacktestRunner._validate_backtest_request({})
-
-    def test_backtest_invalid_date_range_rejected(self):
-        """Backtest with start >= end should raise ValueError."""
-        with pytest.raises(ValueError, match="start_date.*must be before"):
-            BacktestRunner._validate_backtest_request({
-                "symbol": "XAUUSD",
-                "start_date": "2026-04-20",
-                "end_date": "2026-04-10",
-            })
-
-    def test_backtest_negative_balance_rejected(self):
-        """Backtest with negative initial_balance should raise ValueError."""
-        with pytest.raises(ValueError, match="initial_balance must be positive"):
-            BacktestRunner._validate_backtest_request({
-                "symbol": "XAUUSD",
-                "start_date": "2026-04-10",
-                "initial_balance": -1000,
-            })
-
-    def test_backtest_invalid_risk_percent_rejected(self):
-        """Backtest with invalid risk_percent should raise ValueError."""
-        with pytest.raises(ValueError, match="risk_percent must be between"):
-            BacktestRunner._validate_backtest_request({
-                "symbol": "XAUUSD",
-                "start_date": "2026-04-10",
-                "risk_percent": 150,  # Out of 0-100 range
-            })
-
-    def test_backtest_invalid_execution_model_rejected(self):
-        """Backtest with invalid execution_model should raise ValueError."""
-        with pytest.raises(ValueError, match="execution_model must be one of"):
-            BacktestRunner._validate_backtest_request({
-                "symbol": "XAUUSD",
-                "start_date": "2026-04-10",
-                "execution_model": "invalid_model",
-            })
-
-    def test_backtest_current_bar_close_execution_model_is_supported(self):
-        """Legacy direct backtest runner and dashboard can request current-bar close fills."""
-        BacktestRunner._validate_backtest_request({
-            "symbol": "XAUUSD",
-            "start_date": "2026-04-10",
-            "end_date": "2026-04-11",
-            "enabled_strategies": ["XAU_BOT_COMPRESS"],
-            "execution_model": "current_bar_close",
-        })
-
-
 class TestKillSwitchThreshold:
     """Test FIX #3: Kill switch default threshold changed from 1 to 5."""
 
@@ -141,25 +87,6 @@ class TestKillSwitchThreshold:
 
 class TestConfigReloadFallback:
     """Test FIX #4: Config reload has fallback if new strategy fails to build."""
-
-    def test_config_reload_fallback_preserves_previous_strategy(self):
-        """When new config fails to build strategy, previous strategy is preserved."""
-        # This is tested through main.py's config reload logic
-        # The fix ensures previous_strategy is restored if build_strategy_engine fails
-        
-        previous = MagicMock()
-        previous.__class__.__name__ = "PreviousStrategy"
-        
-        try:
-            # Simulate strategy build failure
-            raise ValueError("New strategy config invalid")
-        except Exception:
-            # Fallback preserves previous
-            current = previous
-        
-        assert current == previous
-        assert current.__class__.__name__ == "PreviousStrategy"
-
 
 class TestMT5SymbolSpecRefresh:
     """Test FIX #5: MT5 symbol spec can be force-refreshed before critical operations."""
@@ -200,26 +127,6 @@ class TestRiskStateTransactional:
 
 class TestStrategyEngineTyping:
     """Test FIX #7: Strategy engine type is now a proper typed attribute."""
-
-    def test_strategy_engine_has_typed_engine_type(self):
-        """Strategy engine has engine_type as instance attribute."""
-        config = {
-            "bot": {"execution_mode": "V1_BASELINE"},
-            "strategy": {},
-        }
-        
-        # Mock the strategy classes
-        with patch("strategy_factory.StrategyEngine") as MockV1:
-            with patch("strategy_factory.UnifiedStrategyEngine") as MockV2:
-                mock_engine = MagicMock()
-                MockV1.return_value = mock_engine
-                
-                engine = build_strategy_engine(config)
-                
-                # Verify engine_type is set
-                assert hasattr(engine, "engine_type")
-                assert engine.engine_type in ("legacy_strategy_engine", "unified_strategy_engine")
-
 
 class TestTradeJournalRecovery:
     """Test FIX #8: Trade journal has startup recovery for unflushed outbox."""
@@ -279,16 +186,6 @@ class TestModeResolutionCentralization:
 class TestLiveVsBacktestParity:
     """Test that live and backtest flows use same core logic after fixes."""
 
-    def test_backtest_strategy_selection_validation(self):
-        """Backtest strategy selection is now validated to prevent empty family sets."""
-        with pytest.raises(ValueError, match="No enabled_strategies"):
-            BacktestRunner._validate_backtest_request({
-                "symbol": "XAUUSD",
-                "start_date": "2026-04-10",
-                "end_date": "2026-04-20",
-                "enabled_strategies": [],
-            })
-
     def test_config_reload_path_validation(self):
         """Config reload validates new strategy before committing changes."""
         # The fix ensures that if build_strategy_engine fails, previous config/strategy
@@ -299,20 +196,6 @@ class TestLiveVsBacktestParity:
 # Integration test
 class TestEndToEndParity:
     """Integration tests verifying live vs backtest parity."""
-
-    def test_same_mode_resolution_live_and_backtest(self):
-        """Both live and backtest should use same mode resolution."""
-        # Live: Uses ConfigManager.resolve_runtime_mode(control_state)
-        # Backtest: Uses strategy_factory.build_strategy_engine with config mode
-        
-        control_state = {"runtime": {"mode": "DRY_RUN"}}
-        config = {"bot": {"execution_mode": "V2_FULL"}}
-        
-        # Both should resolve through apply_execution_mode_to_config
-        # Live would call: resolved_mode_tuple = apply_execution_mode_to_config(config, mode)
-        # Backtest would call: resolved_mode_tuple = apply_execution_mode_to_config(run_config, mode)
-        pass
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

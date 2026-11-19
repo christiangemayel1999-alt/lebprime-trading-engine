@@ -738,7 +738,7 @@ def test_strategy_runtime_controls_are_present_and_configured():
     assert strategy["execution_mode"] in {"DRY", "LIVE"}
     source = (root / "dashboard" / "static" / "dashboard.js").read_text(encoding="utf-8")
     assert "lebprime_v3_4_0" in source
-    assert "Live (demo only)" in source
-    assert "Active zone families" in source
-    assert "Duplicate suppressed" in source
+    assert "LIVE DEMO" in source
+    assert "Families" in source
+    assert "Duplicate Suppressed" in source
     assert "/api/strategies/lebprime-v3-4-0/status" in source

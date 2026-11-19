@@ -383,48 +383,6 @@ def test_close_reconciliation_can_finalize_from_deal_history_without_orders(tmp_
     assert "DEAL-RCN-2" in str(finalized_row["matched_deal_ids"])
 
 
-def test_blocked_setup_replay_suppresses_same_setup_without_material_change(tmp_path: Path) -> None:
-    db, journal = _journal(tmp_path)
-    bot = _build_bot(db, journal, _ResolutionConnector([]))
-    now_utc = utc_now()
-    bot.state["setup_registry"] = {
-        "fp-1": {
-            "last_decision": "blocked",
-            "last_blocked_at": (now_utc - timedelta(seconds=20)).isoformat(),
-            "last_block_reason": "blocked_chasing_entry",
-            "last_anchor_time": "2026-04-20T08:00:00+00:00",
-            "last_entry_price": 3300.00,
-            "last_entry_score": 60.0,
-            "last_spread_points": 12.0,
-        }
-    }
-
-    suppressed = bot._blocked_setup_replay_stage(
-        {
-            "setup_fingerprint": "fp-1",
-            "anchor_time": "2026-04-20T08:00:00+00:00",
-        },
-        {"entry_price": 3300.03, "entry_score": 62.0},
-        {"spread_points": 11.0},
-        "blocked_chasing_entry",
-        now_utc,
-    )
-    assert suppressed["suppress"] is True
-
-    allowed = bot._blocked_setup_replay_stage(
-        {
-            "setup_fingerprint": "fp-1",
-            "anchor_time": "2026-04-20T08:01:00+00:00",
-        },
-        {"entry_price": 3300.03, "entry_score": 62.0},
-        {"spread_points": 11.0},
-        "blocked_chasing_entry",
-        now_utc,
-    )
-    assert allowed["suppress"] is False
-    assert allowed["material_change"] == "new_anchor_time"
-
-
 def _lifecycle_manager(
     tmp_path: Path,
     *,

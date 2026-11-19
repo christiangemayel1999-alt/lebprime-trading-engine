@@ -227,7 +227,7 @@ def test_status_api_returns_dashboard_payload_shape(tmp_path: Path) -> None:
     assert isinstance(runtime["resolved_runtime"], dict)
     assert isinstance(runtime["unresolved_trades"], list)
     assert isinstance(runtime["recent_closed_trades"], list)
-    assert isinstance(runtime["backtest_runs"], list)
+    assert "backtest_runs" not in runtime
     assert isinstance(runtime["live_integrity"], dict)
     assert isinstance(runtime["live_integrity"]["unresolved_trades_count"], int)
     assert isinstance(runtime["last_signal"], dict)

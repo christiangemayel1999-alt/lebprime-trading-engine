@@ -24,13 +24,14 @@ def test_indicator_lab_uses_persistent_draft_state() -> None:
     assert 'safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab);' in source
 
 
-def test_backtest_edit_lock_does_not_skip_other_dashboard_sections() -> None:
+def test_indicator_lab_edit_lock_does_not_skip_other_dashboard_sections() -> None:
     source = DASHBOARD_JS.read_text(encoding="utf-8")
 
     render_all = source[source.index("function renderAll(options = {})"):source.index("\n    async function boot()", source.index("function renderAll(options = {})"))]
 
-    assert "if (preserveBacktestEditing)" not in render_all
-    assert 'if (!preserveBacktestEditing) {\n            safeRenderSection("section-backtest", "Backtest", renderBacktest);' in render_all
+    assert "preserveBacktestEditing" not in render_all
+    for removed in ("section-backtest", "section-oos", "section-manual-trading", "section-sessions", "section-symbols"):
+        assert removed not in render_all
     assert 'if (!preserveIndicatorLabEditing) {\n            safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab);' in render_all
     assert "restoreUiState();" in render_all
     assert "activateSection(state.activeSection);" in render_all

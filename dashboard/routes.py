@@ -11,27 +11,15 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from dashboard.schemas import (
-    BacktestRunRequest,
     ConfigPatchRequest,
     ExecutionModeRequest,
-    FamilyToggleRequest,
     IndicatorCampaignRequest,
     IndicatorDatasetCreateRequest,
-    JobBacktestRequest,
     JobCancelRequest,
-    JobOOSRequest,
     JobResumeRequest,
-    ManualTradeOpenRequest,
     ModeSwitchRequest,
-    ModifyPositionRequest,
-    PartialCloseRequest,
-    PositionTicketRequest,
     PresetRequest,
     RawConfigImportRequest,
-    OOSRebuildRequest,
-    OOSResumeRequest,
-    OOSRunRequest,
-    StrategyToggleRequest,
     ToggleRequest,
 )
 from trading_bot.core.execution_mode import dashboard_mode_options
@@ -50,7 +38,6 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     database = services["database"]
     audit_service = services["audit_service"]
     dashboard_auth = services["dashboard_auth"]
-    oos_service = services.get("oos_service")
     indicator_lab_service = services.get("indicator_lab_service")
     lebprime_live_service = services.get("lebprime_live_service")
     job_service = services.get("job_service")
@@ -244,7 +231,6 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
             "readonly_mode": bool(config.get("dashboard", {}).get("readonly_mode", False)),
             "auth": dashboard_auth.public_status(),
             "worker": worker_status,
-            "oos": oos_service.get_status() if oos_service is not None else {"ok": True, "run": None, "history": [], "state": "IDLE"},
             "jobs": {"ok": True, "jobs": job_service.list_jobs(limit=10) if job_service is not None else []},
         }
 
@@ -350,30 +336,6 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         assert_not_readonly()
         return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="execution", preview_only=payload.preview_only)
 
-    @router.get("/api/sessions")
-    async def get_sessions(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, **control_plane.get_section("sessions")}
-
-    @router.patch("/api/sessions/update")
-    @router.post("/api/sessions/update")
-    async def update_sessions(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="sessions", preview_only=payload.preview_only)
-
-    @router.get("/api/symbols")
-    async def get_symbols(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, **control_plane.get_section("symbols")}
-
-    @router.patch("/api/symbols/update")
-    @router.post("/api/symbols/update")
-    async def update_symbols(payload: ConfigPatchRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return control_plane.update_config(actor=payload.actor, updates=payload.updates, reason=payload.reason, target="symbols", preview_only=payload.preview_only)
-
-    @router.get("/api/backtests")
-    async def get_backtests(limit: int = 20, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, "backtest": control_plane.get_section("backtest").get("backtest", {}), "runs": dashboard_data.list_backtest_runs(limit=limit)}
-
     @router.get("/api/logs")
     async def get_logs(
         level: str | None = None,
@@ -391,24 +353,6 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     @router.get("/api/audit")
     async def get_audit(limit: int = 50, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, "audit": dashboard_data.recent_audit(limit=limit)}
-
-    @router.post("/api/families/toggle")
-    async def toggle_family(payload: FamilyToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        try:
-            return operator_service.toggle_family(payload.actor, payload.family_name, payload.enabled, payload.live_allowed)
-        except ValueError as exc:
-            status_code = 404 if str(exc).startswith("Unknown family") else 400
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-
-    @router.post("/api/strategies/toggle")
-    async def toggle_strategy(payload: StrategyToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        try:
-            return operator_service.toggle_strategy(payload.actor, payload.strategy_name, payload.enabled)
-        except ValueError as exc:
-            status_code = 404 if str(exc).startswith("Unknown strategy") else 400
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     @router.post("/api/control/start")
     async def start_bot(payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
@@ -462,118 +406,10 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
     async def manual_positions(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return manual_trade_service.list_positions("dashboard", "dashboard")
 
-    @router.post("/api/manual/open")
-    async def manual_open(payload: ManualTradeOpenRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return manual_trade_service.open_market_trade(
-            actor=payload.actor,
-            source="dashboard",
-            symbol=payload.symbol,
-            side=payload.side,
-            volume=payload.volume,
-            sl=payload.sl,
-            tp=payload.tp,
-            comment=payload.comment,
-        )
-
-    @router.post("/api/manual/close")
-    async def manual_close(payload: PositionTicketRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return manual_trade_service.close_position(payload.actor, "dashboard", payload.ticket)
-
-    @router.post("/api/manual/partial-close")
-    async def manual_partial_close(payload: PartialCloseRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return manual_trade_service.partial_close(payload.actor, "dashboard", payload.ticket, payload.volume)
-
-    @router.post("/api/manual/modify")
-    async def manual_modify(payload: ModifyPositionRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return manual_trade_service.modify_position(payload.actor, "dashboard", payload.ticket, payload.sl, payload.tp)
-
-    @router.post("/api/manual/breakeven")
-    async def manual_breakeven(payload: PositionTicketRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return manual_trade_service.move_to_break_even(payload.actor, "dashboard", payload.ticket)
-
-    @router.post("/api/manual/close-all")
-    async def manual_close_all(payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        return manual_trade_service.close_all_positions(payload.actor, "dashboard")
-
     @router.post("/api/control/close-all")
     async def control_close_all(payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return manual_trade_service.close_all_positions(payload.actor, "dashboard")
-
-    @router.post("/api/jobs/backtest")
-    async def create_backtest_job(payload: JobBacktestRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        request_payload = {
-            "symbol": payload.symbol,
-            "timeframe": payload.timeframe,
-            "start_date": payload.start_date,
-            "end_date": payload.end_date,
-            "enabled_strategies": payload.enabled_strategies,
-            "session_filter": payload.session_filter,
-            "initial_balance": payload.initial_balance,
-            "risk_percent": payload.risk_percent,
-            "spread_model": payload.spread_model,
-            "slippage_model": payload.slippage_model,
-            "execution_model": payload.execution_model,
-            "engine_mode": payload.engine_mode,
-            "notes": payload.notes,
-        }
-        if job_service is None:
-            raise HTTPException(status_code=503, detail="Job service not configured")
-        result = job_service.create_backtest_job(request_payload, actor=payload.actor)
-        audit_service.log_action(
-            payload.actor,
-            "backtest_job_created",
-            payload.symbol,
-            {
-                "timeframe": payload.timeframe,
-                "start_date": payload.start_date,
-                "end_date": payload.end_date or payload.start_date,
-                "enabled_strategies": payload.enabled_strategies,
-                "job_id": result.get("id"),
-            },
-        )
-        warning = result.get("warning") or result.get("metadata_json", {}).get("warning")
-        return {"ok": True, "job": result, "worker": result.get("metadata_json", {}).get("worker_status"), "warning": warning}
-
-    @router.post("/api/jobs/oos")
-    async def create_oos_job(payload: JobOOSRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        if job_service is None:
-            raise HTTPException(status_code=503, detail="Job service not configured")
-        request_payload = {
-            "symbol": payload.symbol,
-            "timeframe": payload.timeframe,
-            "start_date": payload.start_date,
-            "end_date": payload.end_date,
-            "enabled_strategies": payload.enabled_strategies,
-            "session_filter": {"enabled": bool(payload.allowed_sessions), "allowed_sessions": payload.allowed_sessions},
-            "initial_balance": payload.initial_balance,
-            "risk_percent": payload.risk_percent,
-            "spread_model": {"type": "fixed_points", "points": payload.spread_points},
-            "slippage_model": {"type": "fixed_points", "points": payload.slippage_points},
-            "execution_model": payload.execution_model,
-            "engine_mode": payload.engine_mode,
-            "notes": payload.notes,
-        }
-        result = job_service.create_oos_job(
-            request=request_payload,
-            actor=payload.actor,
-            baseline_run_id=payload.baseline_run_id,
-            baseline_bundle_path=payload.baseline_bundle_path,
-            baseline_database_path=payload.baseline_database_path,
-            output_dir=payload.output_dir,
-            title=payload.title,
-            notes=payload.notes,
-        )
-        audit_service.log_action(payload.actor, "oos_job_created", payload.symbol, {"request": request_payload, "job_id": result.get("id")})
-        return {"ok": True, "job": result}
 
     @router.get("/api/indicator-lab/datasets")
     async def indicator_lab_datasets(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
@@ -821,160 +657,5 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         audit_service.log_action(payload.actor, "job_cancel", str(job_id), {"state": job.get("state")})
         return {"ok": True, "job": job}
-
-    @router.post("/api/backtest/run")
-    async def run_backtest(payload: BacktestRunRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        result = await create_backtest_job(JobBacktestRequest(**payload.model_dump()), _)
-        return {"ok": True, "job": result.get("job"), "result": None}
-
-    @router.post("/api/oos/run")
-    async def run_oos(payload: OOSRunRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        if job_service is None:
-            if oos_service is None:
-                raise HTTPException(status_code=503, detail="OOS service not configured")
-            request_payload = {
-                "symbol": payload.symbol,
-                "timeframe": payload.timeframe,
-                "start_date": payload.start_date,
-                "end_date": payload.end_date,
-                "enabled_strategies": payload.enabled_strategies,
-                "session_filter": {"enabled": bool(payload.allowed_sessions), "allowed_sessions": payload.allowed_sessions},
-                "initial_balance": payload.initial_balance,
-                "risk_percent": payload.risk_percent,
-                "spread_model": {"type": "fixed_points", "points": payload.spread_points},
-                "slippage_model": {"type": "fixed_points", "points": payload.slippage_points},
-                "execution_model": payload.execution_model,
-                "engine_mode": payload.engine_mode,
-                "notes": payload.notes,
-            }
-            result = oos_service.start_run(
-                request=request_payload,
-                actor=payload.actor,
-                baseline_run_id=payload.baseline_run_id,
-                baseline_bundle_path=payload.baseline_bundle_path,
-                baseline_database_path=payload.baseline_database_path,
-                output_dir=payload.output_dir,
-                title=payload.title,
-                notes=payload.notes,
-            )
-            audit_service.log_action(payload.actor, "oos_run_created", payload.symbol, {"request": request_payload})
-            return {"ok": True, "job": None, "run": result.get("run"), "state": result.get("state")}
-        result = await create_oos_job(JobOOSRequest(**payload.model_dump()), _)
-        return {"ok": True, "job": result.get("job")}
-
-    @router.get("/api/oos/status")
-    async def get_oos_status(oos_run_id: int | None = None, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        if oos_service is None:
-            raise HTTPException(status_code=503, detail="OOS service not configured")
-        payload = oos_service.get_status(oos_run_id)
-        payload.setdefault("history", [])
-        payload.setdefault("active_run_id", None)
-        payload.setdefault("state", "IDLE")
-        return payload
-
-    @router.post("/api/oos/resume")
-    async def resume_oos(payload: OOSResumeRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        if job_service is None:
-            if oos_service is None:
-                raise HTTPException(status_code=503, detail="OOS service not configured")
-            try:
-                result = oos_service.resume_run(payload.oos_run_id, rerun_partial=payload.rerun_partial)
-            except ValueError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            audit_service.log_action(payload.actor, "oos_resume", str(payload.oos_run_id), {"rerun_partial": payload.rerun_partial})
-            return {"ok": True, "job": None, "run": result.get("run"), "state": result.get("state")}
-        try:
-            result = job_service.create_oos_job(
-                request={},
-                actor=payload.actor,
-                rerun_partial=payload.rerun_partial,
-                existing_oos_run_id=payload.oos_run_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        audit_service.log_action(payload.actor, "oos_resume", str(payload.oos_run_id), {"rerun_partial": payload.rerun_partial, "job_id": result.get("id")})
-        return {"ok": True, "job": result}
-
-    @router.post("/api/oos/rebuild-report")
-    async def rebuild_oos_report(payload: OOSRebuildRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        assert_not_readonly()
-        if oos_service is None:
-            raise HTTPException(status_code=503, detail="OOS service not configured")
-        try:
-            result = oos_service.rebuild_report(payload.oos_run_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        audit_service.log_action(payload.actor, "oos_rebuild_report", str(payload.oos_run_id), result)
-        return result
-
-    @router.get("/api/oos/history")
-    async def list_oos_history(limit: int = 20, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        if oos_service is None:
-            raise HTTPException(status_code=503, detail="OOS service not configured")
-        payload = oos_service.history(limit=limit)
-        payload.setdefault("runs", [])
-        return payload
-
-    @router.get("/api/backtest/runs")
-    async def list_backtest_runs(limit: int = 20, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, "runs": dashboard_data.list_backtest_runs(limit=limit)}
-
-    @router.get("/api/backtest/run/{run_id}")
-    async def get_backtest_run(run_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, "result": dashboard_data.get_backtest_run_bundle(run_id)}
-
-    @router.get("/api/backtests/{run_id}/replay/summary")
-    async def get_backtest_replay_summary(run_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        return {"ok": True, "result": dashboard_data.get_backtest_replay_summary(run_id)}
-
-    @router.get("/api/backtests/{run_id}/replay/window")
-    async def get_backtest_replay_window(
-        run_id: int,
-        start_bar: int = 0,
-        end_bar: int = -1,
-        _: None = Depends(dashboard_auth.dependency),
-    ) -> dict[str, Any]:
-        if end_bar < 0:
-            raise HTTPException(status_code=400, detail="end_bar is required")
-        return {"ok": True, "result": dashboard_data.get_backtest_replay_window(run_id, start_bar, end_bar)}
-
-    @router.get("/api/backtests/{run_id}/replay/events")
-    async def get_backtest_replay_events(
-        run_id: int,
-        start_bar: int = 0,
-        end_bar: int = -1,
-        _: None = Depends(dashboard_auth.dependency),
-    ) -> dict[str, Any]:
-        if end_bar < 0:
-            raise HTTPException(status_code=400, detail="end_bar is required")
-        return {"ok": True, "result": dashboard_data.get_backtest_replay_events(run_id, start_bar, end_bar)}
-
-    @router.get("/api/backtests/{run_id}/replay/frame/{bar_index}")
-    async def get_backtest_replay_frame(run_id: int, bar_index: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        frame = dashboard_data.get_backtest_replay_frame(run_id, bar_index)
-        if frame is None:
-            raise HTTPException(status_code=404, detail="Playback frame not found")
-        return {"ok": True, "result": frame}
-
-    @router.get("/api/backtests/{run_id}/stream/status")
-    async def get_backtest_stream_status(run_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
-        try:
-            return {"ok": True, "result": dashboard_data.get_backtest_stream_status(run_id)}
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @router.get("/api/backtests/{run_id}/stream/window")
-    async def get_backtest_stream_window(
-        run_id: int,
-        after_bar: int = -1,
-        _: None = Depends(dashboard_auth.dependency),
-    ) -> dict[str, Any]:
-        if after_bar < 0:
-            raise HTTPException(status_code=400, detail="after_bar is required")
-        return {"ok": True, "result": dashboard_data.get_backtest_stream_window(run_id, after_bar)}
 
     return router
