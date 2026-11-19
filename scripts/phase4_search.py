@@ -166,12 +166,19 @@ def random_stage(args) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     jobs = [(d, t, args.until) for t in trials for d in args.datasets]
-    print(f"{len(jobs)} runs ({len(trials)} trials x {len(args.datasets)} datasets)", flush=True)
     rows = []
+    previous = out / "stage_b_runs.csv"
+    if previous.exists():
+        # Resume: keep finished runs and only run what is missing (same seed => same trial list).
+        done = pd.read_csv(previous)
+        rows = done.to_dict("records")
+        finished = {(int(r["dataset_id"]), r["overrides"]) for r in rows}
+        jobs = [job for job in jobs if (job[0], json.dumps(job[1], sort_keys=True)) not in finished]
+    print(f"{len(jobs)} runs to do ({len(trials)} trials x {len(args.datasets)} datasets, {len(rows)} already done)", flush=True)
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         for i, row in enumerate(pool.map(score, jobs, chunksize=2), start=1):
             rows.append(row)
-            if i % (len(args.datasets) * 20) == 0:
+            if i % (len(args.datasets) * 5) == 0:
                 pd.DataFrame(rows).to_csv(out / "stage_b_runs.csv", index=False)
                 print(f"  {i}/{len(jobs)} runs", flush=True)
     table = pd.DataFrame(rows)
