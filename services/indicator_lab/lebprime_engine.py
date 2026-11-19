@@ -925,6 +925,28 @@ class LebPrimeEngine(IndicatorEngine):
         leg["realized_r"] = float(leg["realized_r"]) + weight * float(leg["open_fraction"]) * pnl / risk
         leg["open_fraction"] = 0.0
 
+    def _structure_exit_reason(self, zone: ZoneRecord, bar: Candle, demand: bool) -> str | None:
+        """Earlier invalidation at a candle close (the candle-close SL stays as the final stop):
+        - the fill candle closes more than x R beyond Entry 1 (deep, fast entry into the zone);
+        - the Nth close beyond the zone's far edge since the fill (the zone is not holding)."""
+        entry1 = float(zone.entry_price)
+        risk = abs(entry1 - float(zone.sl_price))
+        if risk <= 0:
+            return None
+        depth = float(self.parameters.get("early_exit_fill_close_r", 0.0) or 0.0)
+        if depth > 0.0 and bar.index == int(zone.activated_bar_index):
+            moved = (bar.close - entry1) / risk if demand else (entry1 - bar.close) / risk
+            if moved <= -depth:
+                return f"Fill candle closed {depth}R beyond Entry 1"
+        limit = int(self.parameters.get("exit_after_far_closes", 0) or 0)
+        if limit > 0:
+            beyond = bar.close < float(zone.zone_bottom) if demand else bar.close > float(zone.zone_top)
+            if beyond:
+                zone.metadata["far_edge_closes"] = int(zone.metadata.get("far_edge_closes", 0)) + 1
+                if zone.metadata["far_edge_closes"] >= limit:
+                    return f"{limit} closes beyond the zone's far edge"
+        return None
+
     def _momentum_against(self, demand: bool) -> bool:
         """Failed-retest signal at a candle close: RSI(14) seen from the trade's side below the threshold
         (e.g. a BUY whose RSI has collapsed under 35 while sitting in the demand zone)."""
@@ -1023,6 +1045,8 @@ class LebPrimeEngine(IndicatorEngine):
                     self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, reason)
                 elif self._momentum_against(demand):
                     self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, "Failed retest: momentum against at the fill candle close")
+                elif (reason := self._structure_exit_reason(zone, bar, demand)) is not None:
+                    self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, reason)
                 return
             approach = float(self.parameters.get("approach_cancel_atr", 0.0) or 0.0)
             atr_now = self._features.snapshot().get("atr14")
@@ -1101,6 +1125,9 @@ class LebPrimeEngine(IndicatorEngine):
                 window = int(self.parameters.get("early_exit_bars", 1) or 0)
                 if window > 0 and bar.index - int(zone.activated_bar_index) < window and self._momentum_against(demand):
                     self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, "Failed retest: momentum against after the fill")
+                    return
+                if (reason := self._structure_exit_reason(zone, bar, demand)) is not None:
+                    self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, reason)
                     return
                 self._apply_recovery(zone, bar, demand, legs, entry1, touched)
             return
