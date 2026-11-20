@@ -996,6 +996,16 @@ class LebPrimeEngine(IndicatorEngine):
         if zone.activated_bar_index is None:
             if bar.index <= int(zone.limit_created_bar_index):
                 return
+            expiry = int(self.parameters.get("limit_expiry_bars", 0) or 0)
+            if expiry > 0 and bar.index - int(zone.limit_created_bar_index) > expiry:
+                # Zone expiry: an untouched LIMIT older than N candles is cancelled.
+                zone.terminal_state = "CANCELED"
+                zone.terminal_bar_index = bar.index
+                zone.terminal_time = bar.timestamp
+                zone.result_r = 0.0
+                zone.terminal_reason = f"Expired after {expiry} candles without a fill"
+                self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
+                return
             if self._confirm_entry():
                 # Rule: enter only after price has tested the zone and a candle CLOSES back outside it.
                 if touched(entry1, True):

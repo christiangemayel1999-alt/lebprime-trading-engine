@@ -62,6 +62,7 @@ LEBPRIME_PARAMETERS: list[dict[str, Any]] = [
     {"name": "confirm_min_rsi", "pine_name": "", "label": "Close confirmation: minimum RSI from the trade's side (0 = off)", "type": "float", "default": 0.0, "min": 0.0, "max": 70.0, "step": 1.0, "group": "Entry rules"},
     {"name": "early_exit_fill_close_r", "pine_name": "", "label": "Exit if the fill candle closes x R beyond Entry 1 (0 = off)", "type": "float", "default": 0.0, "min": 0.0, "max": 2.0, "step": 0.05, "group": "Entry rules"},
     {"name": "exit_after_far_closes", "pine_name": "", "label": "Exit at the Nth close beyond the zone's far edge (0 = off)", "type": "int", "default": 0, "min": 0, "max": 10, "step": 1, "group": "Entry rules"},
+    {"name": "limit_expiry_bars", "pine_name": "", "label": "Cancel an unfilled LIMIT after N candles (0 = never)", "type": "int", "default": 0, "min": 0, "max": 100000, "step": 50, "group": "Entry rules"},
     {"name": "leg_sizing", "pine_name": "", "label": "Entry 2 lot sizing", "type": "enum", "default": "Entry 1 distance (equal lots)", "values": ["Own stop distance", "Entry 1 distance (equal lots)"], "group": "TP / SL"},
     {"name": "show_tpsl", "pine_name": "i_showTPSL", "label": "Show TP1 / TP2 / SL", "type": "bool", "default": True, "group": "TP / SL"},
     {"name": "gold_buffer", "pine_name": "i_goldBuffer", "label": "Gold / XAUUSD SL buffer", "type": "float", "default": 1.0, "min": 0.0, "max": None, "step": 0.1, "group": "SL Buffers - Built-in"},
