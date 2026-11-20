@@ -247,11 +247,20 @@ def split_stage(args) -> int:
     settings = json.loads(Path(args.settings).read_text(encoding="utf-8"))
     jobs = [(d, o, args.window, args.split) for o in settings for d in args.datasets]
     rows = []
+    previous = out / "split_runs.csv"
+    if previous.exists():
+        # Resume after an interruption: keep finished runs, run only what is missing.
+        rows = pd.read_csv(previous).to_dict("records")
+        finished = {(int(r["dataset_id"]), str(r["overrides"])) for r in rows}
+        jobs = [j for j in jobs if (j[0], json.dumps(j[1], sort_keys=True)) not in finished]
+        print(f"resume: {len(rows)} done, {len(jobs)} to run", flush=True)
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         for row in pool.map(score, jobs, chunksize=1):
             rows.append(row)
             pd.DataFrame(rows).to_csv(out / "split_runs.csv", index=False)  # saved as it goes
     table = pd.DataFrame(rows)
+    order = {json.dumps(o, sort_keys=True): i for i, o in enumerate(settings)}
+    table = table.assign(_o=table.overrides.map(order)).sort_values(["_o", "dataset_id"]).drop(columns="_o")
     pooled = table.groupby("overrides", sort=False).agg(
         tune_trades=("tune_trades", "sum"), tune_net_r=("tune_net_r", "sum"), tune_win=("tune_win_rate", "mean"),
         check_trades=("check_trades", "sum"), check_net_r=("check_net_r", "sum"), check_win=("check_win_rate", "mean"),

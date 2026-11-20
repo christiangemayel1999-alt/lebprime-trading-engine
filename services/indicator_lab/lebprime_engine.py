@@ -957,6 +957,37 @@ class LebPrimeEngine(IndicatorEngine):
         toward = float(rsi) if demand else 100.0 - float(rsi)
         return toward < threshold
 
+    def _apply_confirmation_stop(self, zone: ZoneRecord, bar: Candle, demand: bool, legs: dict) -> None:
+        """Optional tighter stop after a close confirmation: just beyond the retest's deepest point
+        instead of the zone's far side. Entry, stop and targets are re-based on the confirmation fill,
+        so R is measured on the real (smaller) risk. Never wider than the original stop."""
+        if str(self.parameters.get("confirm_stop", "Zone stop")) != "Retest extreme":
+            return
+        extreme = zone.metadata.get("retest_extreme")
+        atr = self._features.snapshot().get("atr14") or self._atr(14)
+        if extreme is None or not atr:
+            return
+        fill = float(bar.close)
+        buffer = float(self.parameters.get("confirm_stop_buffer_atr", 0.1) or 0.0) * float(atr)
+        min_risk = float(self.parameters.get("confirm_min_risk_atr", 0.25) or 0.0) * float(atr)
+        stop = float(extreme) - buffer if demand else float(extreme) + buffer
+        if abs(fill - stop) < min_risk:
+            stop = fill - min_risk if demand else fill + min_risk
+        original = float(zone.sl_price)
+        stop = max(stop, original) if demand else min(stop, original)
+        risk = abs(fill - stop)
+        if risk <= 0.0:
+            return
+        tp1_r, tp2_r = self._tp_multiples()
+        zone.metadata["zone_sl_price"] = original
+        zone.sl_price = stop
+        zone.entry1 = fill
+        zone.entry_price = fill
+        legs["1"]["planned_price"] = fill
+        zone.tp1_price = fill + tp1_r * risk if demand else fill - tp1_r * risk
+        zone.tp2_price = fill + tp2_r * risk if demand else fill - tp2_r * risk
+        zone.tp_price = zone.tp2_price
+
     def _close_stop_mode(self) -> bool:
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
 
@@ -1010,6 +1041,11 @@ class LebPrimeEngine(IndicatorEngine):
                 # Rule: enter only after price has tested the zone and a candle CLOSES back outside it.
                 if touched(entry1, True):
                     zone.metadata["zone_tested"] = True
+                if zone.metadata.get("zone_tested"):
+                    # Deepest point of the retest so far (used by the "Retest extreme" stop).
+                    prev = zone.metadata.get("retest_extreme")
+                    extreme = bar.low if demand else bar.high
+                    zone.metadata["retest_extreme"] = extreme if prev is None else (min(prev, extreme) if demand else max(prev, extreme))
                 closes_outside = bar.close > entry1 if demand else bar.close < entry1
                 min_rsi = float(self.parameters.get("confirm_min_rsi", 0.0) or 0.0)
                 rsi_now = self._features.snapshot().get("rsi14")
@@ -1022,6 +1058,7 @@ class LebPrimeEngine(IndicatorEngine):
                     zone.entry1_activated_bar_index = bar.index
                     zone.entry1_activated_time = bar.timestamp
                     zone.activation_reason = "close_confirmation"
+                    self._apply_confirmation_stop(zone, bar, demand, legs)
                     self._emit(zone, bar, "ENTRY1_ACTIVATED", price=bar.close)
                     return
                 if self._post_limit_invalidated(bar, demand, zone.zone_top, zone.zone_bottom):
