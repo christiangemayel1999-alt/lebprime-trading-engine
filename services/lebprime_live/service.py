@@ -838,6 +838,7 @@ class LebPrimeLiveService:
                 entry_mode="limit",
                 risk_adjustment=0.5,
             )
+            sizing = self._round_up_to_min_lot(context, zone, entry_number, sizing, trade_plan, symbol_spec, account)
             if not sizing.get("valid"):
                 # Say exactly why: the risk budget, the lot it buys and the broker/config minimum.
                 self._log(
@@ -1263,6 +1264,41 @@ class LebPrimeLiveService:
         except Exception:
             return fallback.isoformat()
 
+    # A lot below the minimum is rounded up to it (Christian, 20 Nov 2026), unless that would put
+    # more than this share of the balance at risk on one entry.
+    MIN_LOT_ROUND_UP_MAX_RISK_PERCENT = 2.0
+
+    def _round_up_to_min_lot(self, context: LiveContext, zone: ZoneRecord, entry_number: int, sizing: dict[str, Any], trade_plan: dict[str, Any], symbol_spec: dict[str, Any], account: Any) -> dict[str, Any]:
+        if sizing.get("valid") or str(sizing.get("reason_code") or "") != "volume_below_min":
+            return sizing
+        min_volume = float(sizing.get("min_volume") or 0.0)
+        raw_lot = float(sizing.get("raw_lot") or 0.0)
+        if min_volume <= 0 or raw_lot <= 0:
+            return sizing
+        balance = float(getattr(account, "balance", 0.0) or 0.0)
+        risk_money = min_volume * float(trade_plan["sl_distance_pips"]) * float(symbol_spec.get("pip_value_per_lot") or 0.0)
+        risk_percent = risk_money / balance * 100.0 if balance > 0 else 999.0
+        if risk_percent > self.MIN_LOT_ROUND_UP_MAX_RISK_PERCENT:
+            return {**sizing, "reason_code": "volume_below_min_risk_too_high", "min_lot_risk_percent": risk_percent}
+        self._log(
+            "lebprime_lot_rounded_up",
+            {"context": context.key, "zone_id": zone.engine_zone_id, "entry_number": entry_number, "raw_lot": raw_lot, "volume": min_volume, "risk_money": round(risk_money, 2), "risk_percent": round(risk_percent, 2)},
+            level="INFO",
+        )
+        return {**sizing, "valid": True, "volume": min_volume, "normalized_volume": min_volume, "rounded_up_to_min": True}
+
+    @staticmethod
+    def _tp1_close_volume(volume: float, symbol_spec: dict[str, Any]) -> float:
+        """Half the position rounded down to the broker step; the whole position when half (or what
+        would remain) is below the broker minimum."""
+        step = float(symbol_spec.get("volume_step") or 0.01)
+        vmin = float(symbol_spec.get("volume_min") or step)
+        half = int((volume / 2.0) / step + 1e-9) * step
+        half = round(half, 8)
+        if half + 1e-12 < vmin or (volume - half) + 1e-12 < vmin:
+            return volume
+        return half
+
     def _manage_broker_lifecycle(self, context: LiveContext, zone: ZoneRecord, event_type: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply engine lifecycle decisions to the primary family's broker orders."""
         connector = self._connector(context.logical_symbol)
@@ -1283,10 +1319,15 @@ class LebPrimeLiveService:
             entry2 = self.repository.broker_entry(zone.engine_zone_id, 2)
             if entry2 and entry2.get("broker_status") in {"PLACING", "PENDING"} and entry2.get("mt5_order_ticket"):
                 actions.append(self._cancel_broker_entry(context, zone, entry2, "TP1_HIT"))
+            symbol_spec = connector.get_symbol_spec() if positions else {}
             for position in positions:
                 volume = float(getattr(position, "volume", 0.0) or 0.0)
-                close_volume = volume / 2.0
+                close_volume = self._tp1_close_volume(volume, symbol_spec)
                 try:
+                    if close_volume + 1e-12 >= volume:
+                        ok, result = connector.close_position(getattr(position, "ticket"), comment="LP340-TP1")
+                        actions.append({"action": "full_close_at_tp1", "ticket": str(getattr(position, "ticket", "")), "ok": bool(ok), "result": str(result)})
+                        continue
                     ok, result = connector.close_partial(getattr(position, "ticket"), close_volume, comment="LP340-TP1")
                     actions.append({"action": "partial_close", "ticket": str(getattr(position, "ticket", "")), "ok": bool(ok), "result": str(result)})
                 except Exception as exc:
