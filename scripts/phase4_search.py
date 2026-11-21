@@ -111,6 +111,7 @@ def score(job: tuple) -> dict:
     result = LebPrimeEngine({**default_parameters("LEBPRIME"), **overrides}, symbol=meta["symbol"], timeframe=meta["timeframe"]).run(frame)
     point = POINT.get(meta["symbol"], 0.0)
     nets, grosses, years, created = [], [], {}, []
+    regimes: dict[str, list] = {}
     window_start = until.rpartition("..")[0] if until else ""
     for zone in result["zones"]:
         if zone.terminal_state not in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "BE_EXIT", "EARLY_EXIT"}:
@@ -126,6 +127,8 @@ def score(job: tuple) -> dict:
         cost = spread_r + commission_r
         gross = float(zone.result_r or 0.0)
         nets.append(gross - cost)
+        reg = str(zone.metadata.get("limit_h4_trend") or "NONE")
+        regimes.setdefault(reg, [0, 0.0, 0]); regimes[reg][0] += 1; regimes[reg][1] += gross - cost; regimes[reg][2] += 1 if gross > 0 else 0
         grosses.append(gross)
         created.append(str(zone.limit_created_time))
         year = str(zone.terminal_time)[:4]
@@ -154,6 +157,8 @@ def score(job: tuple) -> dict:
         "trades": n, "win_rate": round(sum(1 for g in grosses if g > 0) / n * 100, 2) if n else 0.0,
         "net_r": round(sum(nets), 2), "avg_net_r": round(sum(nets) / n, 4) if n else 0.0, "max_dd_r": round(max_dd, 2),
         "profitable_years": sum(1 for v in years.values() if v > 0), "years": len(years),
+        "bull_trades": regimes.get("UP", [0, 0, 0])[0], "bull_net_r": round(regimes.get("UP", [0, 0.0, 0])[1], 2), "bull_wins": regimes.get("UP", [0, 0, 0])[2],
+        "bear_trades": regimes.get("DOWN", [0, 0, 0])[0], "bear_net_r": round(regimes.get("DOWN", [0, 0.0, 0])[1], 2), "bear_wins": regimes.get("DOWN", [0, 0, 0])[2],
     }
 
 

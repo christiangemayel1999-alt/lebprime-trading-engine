@@ -31,6 +31,9 @@ def is_forex_symbol(ticker: str) -> bool:
     return len(letters) >= 6 and letters[:3] in FOREX_CURRENCIES and letters[3:6] in FOREX_CURRENCIES
 
 
+TRADER_ENTRIES = {"Close confirmation", "Sweep reclaim", "Rejection candle", "Break of structure"}
+
+
 class LebPrimeEngine(IndicatorEngine):
     """Candle-by-candle implementation of LebPrime Boundary 9 zone lifecycle."""
 
@@ -881,6 +884,11 @@ class LebPrimeEngine(IndicatorEngine):
         snap = self._features.snapshot()
         if bool(self.parameters.get("require_compact_base", False)) and context.get("base_mode") == "FALLBACK_IMMEDIATE":
             return "no_real_base"
+        regime = str(self.parameters.get("regime_filter", "All"))
+        if regime != "All":
+            h4 = snap.get("h4_trend")
+            if (regime == "Bullish only" and h4 != "UP") or (regime == "Bearish only" and h4 != "DOWN"):
+                return "regime_filter"
         side_rule = str(self.parameters.get("side_filter", "Both"))
         if (side_rule == "Buys only" and not demand) or (side_rule == "Sells only" and demand):
             return "side_filter"
@@ -940,7 +948,7 @@ class LebPrimeEngine(IndicatorEngine):
         return None
 
     def _confirm_entry(self) -> bool:
-        return str(self.parameters.get("entry_mode", "Limit")) == "Close confirmation"
+        return str(self.parameters.get("entry_mode", "Limit")) in TRADER_ENTRIES
 
     def _single_entry(self) -> bool:
         return self._confirm_entry() or str(self.parameters.get("entry2_mode", "Far edge")) == "Off"
@@ -1018,7 +1026,7 @@ class LebPrimeEngine(IndicatorEngine):
         """Optional tighter stop after a close confirmation: just beyond the retest's deepest point
         instead of the zone's far side. Entry, stop and targets are re-based on the confirmation fill,
         so R is measured on the real (smaller) risk. Never wider than the original stop."""
-        if str(self.parameters.get("confirm_stop", "Zone stop")) != "Retest extreme":
+        if str(self.parameters.get("confirm_stop", "Zone stop")) != "Retest extreme" and str(self.parameters.get("entry_mode")) == "Close confirmation":
             return
         extreme = zone.metadata.get("retest_extreme")
         atr = self._features.snapshot().get("atr14") or self._atr(14)
@@ -1044,6 +1052,39 @@ class LebPrimeEngine(IndicatorEngine):
         zone.tp1_price = fill + tp1_r * risk if demand else fill - tp1_r * risk
         zone.tp2_price = fill + tp2_r * risk if demand else fill - tp2_r * risk
         zone.tp_price = zone.tp2_price
+
+    def _trader_trigger(self, zone: ZoneRecord, bar: Candle, demand: bool, entry1: float) -> bool:
+        """Entry triggers that wait for the zone to prove itself (all at a candle close):
+        - Sweep reclaim: a wick through the zone's far edge, then a close back inside or above it.
+        - Rejection candle: a candle that touched the zone closes with a long rejection wick (>= half its
+          range) in the trade's direction, or engulfs the previous candle.
+        - Break of structure: after the touch, a close beyond the highest high (lowest low for sells) made
+          since the touch."""
+        mode = str(self.parameters.get("entry_mode", "Limit"))
+        far = float(zone.zone_bottom) if demand else float(zone.zone_top)
+        md = zone.metadata
+        if mode == "Sweep reclaim":
+            if (bar.low < far) if demand else (bar.high > far):
+                md["swept"] = True
+            return bool(md.get("swept")) and ((bar.close > far) if demand else (bar.close < far)) and ((bar.close > bar.open) if demand else (bar.close < bar.open))
+        if mode == "Rejection candle":
+            touched_now = (bar.low <= entry1) if demand else (bar.high >= entry1)
+            rng = bar.high - bar.low
+            if not touched_now or rng <= 0:
+                return False
+            wick = (min(bar.open, bar.close) - bar.low) if demand else (bar.high - max(bar.open, bar.close))
+            prev = self._bars[-2] if len(self._bars) > 1 else bar
+            engulf = (bar.close > prev.high and bar.close > bar.open) if demand else (bar.close < prev.low and bar.close < bar.open)
+            beyond_far = (bar.close <= far) if demand else (bar.close >= far)
+            return (wick >= 0.5 * rng or engulf) and not beyond_far
+        if mode == "Break of structure":
+            level = md.get("bos_level")
+            hit = level is not None and ((bar.close > float(level)) if demand else (bar.close < float(level)))
+            # Track the swing made since the touch (excluding the current candle for the trigger).
+            new = bar.high if demand else bar.low
+            md["bos_level"] = new if level is None else (max(float(level), new) if demand else min(float(level), new))
+            return hit and int(md.get("bars_since_test", 0)) >= 2
+        return (bar.close > entry1) if demand else (bar.close < entry1)
 
     def _close_stop_mode(self) -> bool:
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
@@ -1117,7 +1158,9 @@ class LebPrimeEngine(IndicatorEngine):
                     prev = zone.metadata.get("retest_extreme")
                     extreme = bar.low if demand else bar.high
                     zone.metadata["retest_extreme"] = extreme if prev is None else (min(prev, extreme) if demand else max(prev, extreme))
-                closes_outside = bar.close > entry1 if demand else bar.close < entry1
+                if zone.metadata.get("zone_tested"):
+                    zone.metadata["bars_since_test"] = int(zone.metadata.get("bars_since_test", 0)) + 1
+                closes_outside = self._trader_trigger(zone, bar, demand, entry1) if zone.metadata.get("zone_tested") else False
                 min_rsi = float(self.parameters.get("confirm_min_rsi", 0.0) or 0.0)
                 rsi_now = self._features.snapshot().get("rsi14")
                 rsi_ok = min_rsi <= 0.0 or rsi_now is None or ((float(rsi_now) if demand else 100.0 - float(rsi_now)) >= min_rsi)
