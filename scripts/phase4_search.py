@@ -144,6 +144,9 @@ def score(job: tuple) -> dict:
             extra[f"{label}_trades"] = m
             extra[f"{label}_win_rate"] = round(sum(1 for g, _ in part if g > 0) / m * 100, 2) if m else 0.0
             extra[f"{label}_net_r"] = round(sum(v for _, v in part), 2)
+            wins = [v for _, v in part if v > 0]; losses = [v for _, v in part if v <= 0]
+            extra[f"{label}_sum_win_r"] = round(sum(wins), 2); extra[f"{label}_n_win"] = len(wins)
+            extra[f"{label}_sum_loss_r"] = round(sum(losses), 2); extra[f"{label}_n_loss"] = len(losses)
     return {
         **extra,
         "dataset_id": dataset_id, "symbol": meta["symbol"], "timeframe": meta["timeframe"],

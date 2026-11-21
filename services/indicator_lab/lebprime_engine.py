@@ -409,7 +409,13 @@ class LebPrimeEngine(IndicatorEngine):
 
     def _limit_creation_ready(self, bar: Candle, demand: bool, top: float, bottom: float, source_index: int) -> bool:
         source = self._bars[source_index]
-        return bar.index - source.index >= int(self.parameters["min_bars_after_source"]) and self._departure_ready(bar, demand, top, bottom)
+        ready = bar.index - source.index >= int(self.parameters["min_bars_after_source"]) and self._departure_ready(bar, demand, top, bottom)
+        min_dep = float(self.parameters.get("min_departure_atr", 0.0) or 0.0)
+        if ready and min_dep > 0.0 and self._live_mode():
+            atr = self._atr(int(self.parameters["atr_len"]))
+            gap = (bar.close - top) if demand else (bottom - bar.close)
+            ready = bool(atr) and gap >= min_dep * float(atr)
+        return ready
 
     def _update_swings(self) -> None:
         if len(self._bars) < SL_SWING_PIVOT_LEN * 2 + 1:
@@ -686,6 +692,11 @@ class LebPrimeEngine(IndicatorEngine):
             if diagnostic is not None:
                 diagnostic["confirmation_due_time"] = diagnostic.get("confirmation_due_time") or (bar.timestamp if bar.index >= int(pending["due"]) else None)
                 diagnostic["pending_bars_json"].append(pending_row)
+            cand = pending.get("candidate")
+            if bool(self.parameters.get("reject_pretouched", False)) and cand is not None and bar.index > cand.index:
+                edge = float(pending["top"]) if demand else float(pending["bottom"])
+                if (bar.low <= edge) if demand else (bar.high >= edge):
+                    (pending.setdefault("context", {}))["pretouched"] = True
             invalid = self._pre_limit_invalidated(bar, demand, float(pending["top"]), float(pending["bottom"]))
             if invalid:
                 self._set_candidate_outcome(diagnostic, "PRE_LIMIT_INVALIDATED", "pre_limit_invalidated")
@@ -870,6 +881,29 @@ class LebPrimeEngine(IndicatorEngine):
         snap = self._features.snapshot()
         if bool(self.parameters.get("require_compact_base", False)) and context.get("base_mode") == "FALLBACK_IMMEDIATE":
             return "no_real_base"
+        side_rule = str(self.parameters.get("side_filter", "Both"))
+        if (side_rule == "Buys only" and not demand) or (side_rule == "Sells only" and demand):
+            return "side_filter"
+        if bool(self.parameters.get("reject_pretouched", False)) and context.get("pretouched"):
+            return "touched_before_limit"
+        adx = snap.get("adx14")
+        if adx is not None:
+            if float(self.parameters.get("min_adx", 0.0) or 0.0) > 0.0 and float(adx) < float(self.parameters["min_adx"]):
+                return "adx_low"
+            if float(self.parameters.get("max_adx", 0.0) or 0.0) > 0.0 and float(adx) > float(self.parameters["max_adx"]):
+                return "adx_high"
+        pct = snap.get("atr14_percentile")
+        if pct is not None:
+            lo, hi = float(self.parameters.get("atr_pct_min", 0.0) or 0.0), float(self.parameters.get("atr_pct_max", 100.0) or 100.0)
+            if float(pct) < lo or float(pct) > hi:
+                return "volatility_band"
+        max_spread = float(self.parameters.get("max_spread_risk", 0.0) or 0.0)
+        if max_spread > 0.0 and snap.get("spread") is not None:
+            entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
+            point = {"XAUUSD": 0.01, "XAGUSD": 0.001, "US30": 0.1, "USTEC": 0.1, "NAS100": 0.1, "WTI": 0.001, "EURUSD": 0.00001}.get(self.symbol, 0.0)
+            risk = abs(entry - stop)
+            if risk > 0 and point and float(snap["spread"]) * point / risk > max_spread:
+                return "spread_too_large"
         min_room = float(self.parameters.get("min_room_r", 0.0) or 0.0)
         if min_room > 0.0:
             entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
@@ -900,7 +934,7 @@ class LebPrimeEngine(IndicatorEngine):
                     return "trend_filter"
         session = str(self.parameters.get("session_filter", "All"))
         if session != "All" and snap.get("session") is not None:
-            allowed = {"London + New York": {"LONDON", "LONDON_NY_OVERLAP", "NEW_YORK"}, "London only": {"LONDON", "LONDON_NY_OVERLAP"}}.get(session)
+            allowed = {"London + New York": {"LONDON", "LONDON_NY_OVERLAP", "NEW_YORK"}, "London only": {"LONDON", "LONDON_NY_OVERLAP"}, "London + New York, no overlap": {"LONDON", "NEW_YORK"}}.get(session)
             if allowed is not None and snap.get("session") not in allowed:
                 return "session_filter"
         return None
@@ -1050,6 +1084,20 @@ class LebPrimeEngine(IndicatorEngine):
         if zone.activated_bar_index is None:
             if bar.index <= int(zone.limit_created_bar_index):
                 return
+            if bool(self.parameters.get("cancel_on_weekend", False)) and len(self._bars) > 1:
+                from datetime import datetime
+                try:
+                    gap = (datetime.fromisoformat(bar.timestamp) - datetime.fromisoformat(self._bars[-2].timestamp)).total_seconds()
+                except ValueError:
+                    gap = 0
+                if gap > 36 * 3600:
+                    zone.terminal_state = "CANCELED"
+                    zone.terminal_bar_index = bar.index
+                    zone.terminal_time = bar.timestamp
+                    zone.result_r = 0.0
+                    zone.terminal_reason = "Cancelled over the weekend"
+                    self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
+                    return
             expiry = int(self.parameters.get("limit_expiry_bars", 0) or 0)
             if expiry > 0 and bar.index - int(zone.limit_created_bar_index) > expiry:
                 # Zone expiry: an untouched LIMIT older than N candles is cancelled.
@@ -1073,6 +1121,10 @@ class LebPrimeEngine(IndicatorEngine):
                 min_rsi = float(self.parameters.get("confirm_min_rsi", 0.0) or 0.0)
                 rsi_now = self._features.snapshot().get("rsi14")
                 rsi_ok = min_rsi <= 0.0 or rsi_now is None or ((float(rsi_now) if demand else 100.0 - float(rsi_now)) >= min_rsi)
+                max_pct = float(self.parameters.get("confirm_max_atr_pct", 100.0) or 100.0)
+                pct_now = self._features.snapshot().get("atr14_percentile")
+                if max_pct < 100.0 and pct_now is not None and float(pct_now) > max_pct:
+                    rsi_ok = False
                 if zone.metadata.get("zone_tested") and closes_outside and rsi_ok:
                     leg = legs["1"]
                     leg.update({"filled": True, "fill_price": bar.close, "fill_bar_index": bar.index, "open_fraction": 1.0})
