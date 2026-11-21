@@ -233,6 +233,11 @@ class LebPrimeEngine(IndicatorEngine):
 
     def _structural_stop(self, demand: bool, top: float, bottom: float, source_bar_index: int) -> tuple[float, dict]:
         buffer = self._buffer()
+        base = getattr(self, "_ctx_base", (None, None))
+        if self._live_mode() and str(self.parameters.get("sl_mode", "Structural swing")) == "Full base extreme" and base[0] is not None:
+            # Stop beyond the whole base (its true high/low), never inside the zone.
+            stop = min(float(base[1]), bottom) - buffer if demand else max(float(base[0]), top) + buffer
+            return stop, {"structural_swing_price": None, "structural_swing_bar_index": None, "structural_swing_time": None, "structural_swing_kind": "FULL_BASE"}
         if self._live_mode() and str(self.parameters.get("sl_mode", "Structural swing")) == "Zone far edge":
             # Tighter stop: just beyond the zone's far edge (plus the symbol buffer), ignoring older swings.
             stop = bottom - buffer if demand else top + buffer
@@ -523,6 +528,7 @@ class LebPrimeEngine(IndicatorEngine):
             self._set_candidate_outcome(diagnostic, "WIDTH_REJECTED", "width_filter")
             return False
         source = self._bars[source_index]
+        self._ctx_base = (context.get("base_high"), context.get("base_low"))
         entry, stop, tp1, tp2, swing = self._entry_stop_target(demand, top, bottom, source.index)
         candidate = candidate or bar
         buffer = self._buffer()
@@ -684,7 +690,7 @@ class LebPrimeEngine(IndicatorEngine):
             if invalid:
                 self._set_candidate_outcome(diagnostic, "PRE_LIMIT_INVALIDATED", "pre_limit_invalidated")
             elif bar.index >= int(pending["due"]) and self._limit_creation_ready(bar, demand, float(pending["top"]), float(pending["bottom"]), int(pending["source_index"])):
-                filter_reason = self._limit_filter_reason(demand, float(pending["top"]), float(pending["bottom"]), int(pending["source_index"]))
+                filter_reason = self._limit_filter_reason(demand, float(pending["top"]), float(pending["bottom"]), int(pending["source_index"]), pending.get("context"))
                 if filter_reason is not None:
                     self._set_candidate_outcome(diagnostic, "FILTERED", filter_reason)
                 elif not self._has_overlap(demand, float(pending["top"]), float(pending["bottom"])):
@@ -855,11 +861,24 @@ class LebPrimeEngine(IndicatorEngine):
             return False
         return 15 <= local.hour < 17
 
-    def _limit_filter_reason(self, demand: bool, top: float, bottom: float, source_index: int) -> str | None:
+    def _limit_filter_reason(self, demand: bool, top: float, bottom: float, source_index: int, context: dict | None = None) -> str | None:
         """Optional filters applied when a LIMIT would be created (Live broker model only; all off by default)."""
         if not self._live_mode():
             return None
+        context = context or {}
+        self._ctx_base = (context.get("base_high"), context.get("base_low"))
         snap = self._features.snapshot()
+        if bool(self.parameters.get("require_compact_base", False)) and context.get("base_mode") == "FALLBACK_IMMEDIATE":
+            return "no_real_base"
+        min_room = float(self.parameters.get("min_room_r", 0.0) or 0.0)
+        if min_room > 0.0:
+            entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
+            risk = abs(entry - stop)
+            gaps = [(float(z.zone_bottom) - entry) if demand else (entry - float(z.zone_top))
+                    for z in self._zones if z.terminal_state is None and z.side == ("SUPPLY" if demand else "DEMAND")]
+            gaps = [g for g in gaps if g > 0]
+            if risk > 0 and gaps and min(gaps) / risk < min_room:
+                return "no_room_to_opposing_zone"
         max_risk_atr = float(self.parameters.get("max_risk_atr", 0.0) or 0.0)
         if max_risk_atr > 0.0:
             entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
@@ -869,7 +888,11 @@ class LebPrimeEngine(IndicatorEngine):
         if self._in_blocked_beirut_window(self._bars[-1]):
             return "blocked_time_window"
         trend = str(self.parameters.get("trend_filter", "None"))
-        if trend != "None":
+        if trend == "With H4 trend":
+            h4 = snap.get("h4_trend")
+            if h4 != ("UP" if demand else "DOWN"):
+                return "trend_filter"
+        elif trend != "None":
             dist = snap.get("ema200_dist_atr")
             if dist is not None:
                 with_trend = dist > 0 if demand else dist < 0
@@ -1392,7 +1415,9 @@ class LebPrimeEngine(IndicatorEngine):
                 width_ok = self._valid_width(top - bottom, atr)
                 overlap = self._has_overlap(True, top, bottom)
                 context = self._zone_context(True, bar, source_offset, target_offset, compact, avg_body, atr, bull_count, bear_count, overlap)
-                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom})
+                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom,
+                                "base_high": self._range_high(int(compact["start_offset"]), int(compact["end_offset"])),
+                                "base_low": self._range_low(int(compact["start_offset"]), int(compact["end_offset"])), "base_mode": compact["mode"]})
                 diagnostic = self._new_candidate_diagnostic(True, raw_top, raw_bottom, top, bottom, max(0, len(self._bars) - 1 - source_offset), target_offset, compact, zone_id, bar, atr, context, same_side_spacing_ok=True, initial_overlap_ok=not overlap, width_ok=width_ok)
                 context["candidate_diagnostic"] = diagnostic
                 if width_ok and not overlap:
@@ -1410,7 +1435,9 @@ class LebPrimeEngine(IndicatorEngine):
                 width_ok = self._valid_width(top - bottom, atr)
                 overlap = self._has_overlap(True, top, bottom)
                 context = self._zone_context(True, bar, source_offset, target_offset, compact, avg_body, atr, bull_count, bear_count, overlap)
-                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom})
+                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom,
+                                "base_high": self._range_high(int(compact["start_offset"]), int(compact["end_offset"])),
+                                "base_low": self._range_low(int(compact["start_offset"]), int(compact["end_offset"])), "base_mode": compact["mode"]})
                 diagnostic = self._new_candidate_diagnostic(True, raw_top, raw_bottom, top, bottom, max(0, len(self._bars) - 1 - source_offset), target_offset, compact, zone_id, bar, atr, context, same_side_spacing_ok=False, initial_overlap_ok=not overlap, width_ok=width_ok)
                 self._set_candidate_outcome(diagnostic, "OTHER", "same_side_spacing")
             self._bull_leg = True
@@ -1423,7 +1450,9 @@ class LebPrimeEngine(IndicatorEngine):
                 width_ok = self._valid_width(top - bottom, atr)
                 overlap = self._has_overlap(False, top, bottom)
                 context = self._zone_context(False, bar, source_offset, target_offset, compact, avg_body, atr, bull_count, bear_count, overlap)
-                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom})
+                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom,
+                                "base_high": self._range_high(int(compact["start_offset"]), int(compact["end_offset"])),
+                                "base_low": self._range_low(int(compact["start_offset"]), int(compact["end_offset"])), "base_mode": compact["mode"]})
                 diagnostic = self._new_candidate_diagnostic(False, raw_top, raw_bottom, top, bottom, max(0, len(self._bars) - 1 - source_offset), target_offset, compact, zone_id, bar, atr, context, same_side_spacing_ok=True, initial_overlap_ok=not overlap, width_ok=width_ok)
                 context["candidate_diagnostic"] = diagnostic
                 if width_ok and not overlap:
@@ -1441,7 +1470,9 @@ class LebPrimeEngine(IndicatorEngine):
                 width_ok = self._valid_width(top - bottom, atr)
                 overlap = self._has_overlap(False, top, bottom)
                 context = self._zone_context(False, bar, source_offset, target_offset, compact, avg_body, atr, bull_count, bear_count, overlap)
-                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom})
+                context.update({"raw_zone_top": raw_top, "raw_zone_bottom": raw_bottom, "clamped_zone_top": top, "clamped_zone_bottom": bottom,
+                                "base_high": self._range_high(int(compact["start_offset"]), int(compact["end_offset"])),
+                                "base_low": self._range_low(int(compact["start_offset"]), int(compact["end_offset"])), "base_mode": compact["mode"]})
                 diagnostic = self._new_candidate_diagnostic(False, raw_top, raw_bottom, top, bottom, max(0, len(self._bars) - 1 - source_offset), target_offset, compact, zone_id, bar, atr, context, same_side_spacing_ok=False, initial_overlap_ok=not overlap, width_ok=width_ok)
                 self._set_candidate_outcome(diagnostic, "OTHER", "same_side_spacing")
             self._bear_leg = True
