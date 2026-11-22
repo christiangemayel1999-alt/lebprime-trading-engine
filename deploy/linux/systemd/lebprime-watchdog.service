@@ -1,0 +1,9 @@
+[Unit]
+Description=LebPrime health check (gateway, broker connection, quote freshness, bot heartbeat, disk)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/lebprime/lebprime.env
+Environment=LEBPRIME_MT5_GATEWAY_KEY_FILE=/etc/lebprime/gateway.key TZ=UTC PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/lebprime/venv/bin/python /opt/lebprime/deploy/bin/lebprime-watchdog
+TimeoutStartSec=90

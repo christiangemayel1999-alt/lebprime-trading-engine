@@ -116,7 +116,7 @@ class TradeJournalService:
         try:
             # Scan open positions in MT5 and verify they're in journal
             try:
-                positions = connector._call_mt5("positions_get", __import__("MetaTrader5").positions_get) or []
+                positions = connector._call_mt5("positions_get", connector.mt5.positions_get) or []
                 for pos in positions:
                     ticket = getattr(pos, "ticket", None)
                     if ticket:

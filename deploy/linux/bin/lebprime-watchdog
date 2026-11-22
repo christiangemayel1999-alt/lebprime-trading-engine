@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""LebPrime health check, run every minute by lebprime-watchdog.timer (as root).
+
+Checks, and what it does about them:
+  * a service is failed           -> Telegram alert (systemd already restarts on crash)
+  * gateway not answering x3      -> restart the MT5 terminal (the gateway restarts with it)
+  * broker disconnected > 5 min   -> restart the MT5 terminal
+  * wrong account in the terminal -> critical alert, no restart (a human must look)
+  * quotes frozen while the market is open -> alert, restart the terminal (at most every 30 min)
+  * bot heartbeat stale > 5 min   -> restart the bot
+  * ambiguous order executions    -> critical alert (reconcile before resuming)
+  * disk < 10% free, reboot pending -> alert
+Alerts are de-duplicated (same alert at most every 30 minutes).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+APP = Path(os.environ.get("LEBPRIME_APP_DIR", "/opt/lebprime/app"))
+STATE_PATH = Path(os.environ.get("LEBPRIME_WATCHDOG_STATE", "/var/lib/lebprime-watchdog/state.json"))
+STALE_QUOTE_SECONDS = int(os.environ.get("LEBPRIME_WATCHDOG_STALE_QUOTE_SECONDS", "300"))
+HEARTBEAT_STALE_SECONDS = int(os.environ.get("LEBPRIME_WATCHDOG_HEARTBEAT_STALE_SECONDS", "300"))
+DISCONNECT_RESTART_SECONDS = int(os.environ.get("LEBPRIME_WATCHDOG_DISCONNECT_RESTART_SECONDS", "300"))
+ALERT_REPEAT_SECONDS = 1800
+SERVICES = [
+    "lebprime-xvfb.service",
+    "lebprime-mt5-terminal.service",
+    "lebprime-mt5-gateway.service",
+    "lebprime-bot.service",
+    "lebprime-dashboard.service",
+    "lebprime-worker.service",
+]
+sys.path.insert(0, str(APP))
+
+
+def log(message: str, **fields: Any) -> None:
+    print(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "msg": message, **fields}, default=str), flush=True)
+
+
+def load_state() -> dict[str, Any]:
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state: dict[str, Any]) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    os.replace(tmp, STATE_PATH)
+
+
+def alert(state: dict[str, Any], key: str, text: str, *, critical: bool = False) -> None:
+    sent = state.setdefault("alerts", {})
+    now = time.time()
+    if now - float(sent.get(key, 0)) < ALERT_REPEAT_SECONDS:
+        return
+    sent[key] = now
+    log("alert", key=key, text=text, critical=critical)
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        return
+    prefix = "LebPrime VPS CRITICAL" if critical else "LebPrime VPS"
+    data = urllib.parse.urlencode({"chat_id": chat, "text": f"{prefix}: {text}"}).encode()
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10).read()
+    except Exception as exc:  # noqa: BLE001
+        log("telegram_send_failed", error=type(exc).__name__)
+
+
+def systemctl(*args: str) -> str:
+    result = subprocess.run(["systemctl", *args], capture_output=True, text=True, check=False)
+    return (result.stdout or "").strip()
+
+
+def restart(state: dict[str, Any], unit: str, reason: str, min_interval: int = 600) -> None:
+    restarts = state.setdefault("restarts", {})
+    now = time.time()
+    if now - float(restarts.get(unit, 0)) < min_interval:
+        log("restart_skipped_recently_done", unit=unit, reason=reason)
+        return
+    restarts[unit] = now
+    log("restart", unit=unit, reason=reason)
+    subprocess.run(["systemctl", "restart", unit], check=False)
+    alert(state, f"restart:{unit}", f"restarted {unit}: {reason}")
+
+
+def market_open(now: datetime) -> bool:
+    """XAUUSD hours (UTC, approximate): Sunday 23:00 to Friday 22:00, daily break 22:00-23:00."""
+    weekday, hour = now.weekday(), now.hour  # Monday = 0
+    if weekday == 5:
+        return False
+    if weekday == 6:
+        return hour >= 23
+    if weekday == 4 and hour >= 22:
+        return False
+    return hour != 22
+
+
+def check_services(state: dict[str, Any]) -> None:
+    for unit in SERVICES:
+        status = systemctl("is-active", unit)
+        enabled = systemctl("is-enabled", unit)
+        if enabled == "enabled" and status not in {"active", "activating", "reloading"}:
+            alert(state, f"service:{unit}", f"{unit} is {status}")
+
+
+def check_gateway(state: dict[str, Any], now: datetime) -> None:
+    if systemctl("is-active", "lebprime-mt5-gateway.service") != "active":
+        return
+    from trading_bot.mt5_transport.client import GatewayMT5  # noqa: PLC0415
+
+    health = GatewayMT5(call_timeout=10).gateway_health()
+    gw = state.setdefault("gateway", {})
+    if health is None:
+        gw["failures"] = int(gw.get("failures", 0)) + 1
+        log("gateway_unreachable", failures=gw["failures"])
+        if gw["failures"] >= 3:
+            restart(state, "lebprime-mt5-terminal.service", "gateway did not answer 3 health checks in a row")
+            gw["failures"] = 0
+        return
+    gw["failures"] = 0
+
+    if not health.get("expected_login_ok", True):
+        alert(state, "wrong_account", f"terminal is logged into {health.get('account_login')}, not the expected account; execution is blocked at the gateway", critical=True)
+
+    ambiguous = int((health.get("executions") or {}).get("ambiguous", 0))
+    if ambiguous > int(gw.get("ambiguous_seen", 0)):
+        alert(state, "ambiguous_execution", f"{ambiguous} order request(s) have an unknown outcome; pause and reconcile with the broker (lebprime-ctl reconcile)", critical=True)
+    gw["ambiguous_seen"] = ambiguous
+
+    if health.get("terminal_connected"):
+        gw.pop("disconnected_since", None)
+    else:
+        since = float(gw.setdefault("disconnected_since", time.time()))
+        if time.time() - since > DISCONNECT_RESTART_SECONDS:
+            restart(state, "lebprime-mt5-terminal.service", "MT5 terminal disconnected from the broker for 5 minutes")
+            gw.pop("disconnected_since", None)
+
+    quotes = gw.setdefault("quotes", {})
+    for symbol, tick in (health.get("ticks") or {}).items():
+        last = quotes.get(symbol) or {}
+        if last.get("time_msc") != tick.get("time_msc"):
+            quotes[symbol] = {"time_msc": tick.get("time_msc"), "changed_at": time.time()}
+            continue
+        frozen_for = time.time() - float(last.get("changed_at", time.time()))
+        if market_open(now) and frozen_for > STALE_QUOTE_SECONDS:
+            alert(state, f"stale:{symbol}", f"{symbol} quote unchanged for {int(frozen_for)}s while the market is open")
+            restart(state, "lebprime-mt5-terminal.service", f"{symbol} quotes frozen", min_interval=1800)
+
+
+def check_bot_heartbeat(state: dict[str, Any]) -> None:
+    if systemctl("is-active", "lebprime-bot.service") != "active":
+        return
+    try:
+        control = json.loads((APP / "storage" / "control_state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    heartbeat = ((control.get("runtime") or {}).get("heartbeat_at")) or ""
+    try:
+        beat = datetime.fromisoformat(str(heartbeat).replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if beat.tzinfo is None:
+        beat = beat.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - beat).total_seconds()
+    started = systemctl("show", "-p", "ActiveEnterTimestampMonotonic", "--value", "lebprime-bot.service")
+    uptime_ok = True
+    try:
+        uptime_ok = (time.monotonic() - int(started) / 1e6) > HEARTBEAT_STALE_SECONDS
+    except ValueError:
+        pass
+    if age > HEARTBEAT_STALE_SECONDS and uptime_ok:
+        restart(state, "lebprime-bot.service", f"bot heartbeat is {int(age)}s old")
+
+
+def check_host(state: dict[str, Any]) -> None:
+    usage = shutil.disk_usage("/var/lib")
+    if usage.free / usage.total < 0.10:
+        alert(state, "disk", f"disk almost full: {usage.free // (1 << 30)} GB free")
+    if Path("/var/run/reboot-required").exists():
+        alert(state, "reboot_required", "security updates need a reboot; schedule it on the weekend (execution starts paused afterwards)")
+
+
+def main() -> int:
+    state = load_state()
+    now = datetime.now(timezone.utc)
+    for check in (check_services, check_host, check_bot_heartbeat):
+        try:
+            check(state)
+        except Exception as exc:  # noqa: BLE001
+            log("check_failed", check=check.__name__, error=repr(exc))
+    try:
+        check_gateway(state, now)
+    except Exception as exc:  # noqa: BLE001
+        log("check_failed", check="check_gateway", error=repr(exc))
+    save_state(state)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

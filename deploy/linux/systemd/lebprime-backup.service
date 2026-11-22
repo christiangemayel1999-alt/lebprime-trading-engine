@@ -1,0 +1,12 @@
+[Unit]
+Description=LebPrime encrypted off-server backup (SQLite snapshots + state, restic)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/lebprime/backup.env
+ExecStart=/opt/lebprime/deploy/bin/lebprime-backup run
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=3h

@@ -1,0 +1,15 @@
+[Unit]
+Description=LebPrime virtual display for the MT5 terminal (Xvfb :99)
+PartOf=lebprime.target
+
+[Service]
+User=lebprime-mt5
+Group=lebprime-mt5
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -noreset
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=no
+
+[Install]
+WantedBy=lebprime.target

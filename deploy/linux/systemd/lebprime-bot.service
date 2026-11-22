@@ -1,0 +1,39 @@
+[Unit]
+Description=LebPrime live bot (native Linux Python, MT5 through the gateway)
+Wants=lebprime-mt5-gateway.service
+After=lebprime-mt5-gateway.service network-online.target
+PartOf=lebprime.target
+StartLimitIntervalSec=900
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=lebprime
+Group=lebprime
+# Only the bot may read the gateway key: one execution owner per account.
+SupplementaryGroups=lebprime-gw
+EnvironmentFile=/etc/lebprime/lebprime.env
+Environment=LEBPRIME_MT5_TRANSPORT=gateway LEBPRIME_MT5_GATEWAY_KEY_FILE=/etc/lebprime/gateway.key TZ=UTC PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LEBPRIME_RUNTIME=vps
+WorkingDirectory=/opt/lebprime/app
+# After a reboot (or first install) execution starts paused until an operator reconciles and resumes.
+ExecStartPre=/opt/lebprime/venv/bin/python /opt/lebprime/deploy/bin/lebprime-bootguard
+ExecStart=/opt/lebprime/venv/bin/python /opt/lebprime/app/main.py
+Restart=always
+RestartSec=20
+KillSignal=SIGTERM
+TimeoutStopSec=60
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/opt/lebprime/app /var/lib/lebprime /var/log/lebprime /run/lebprime
+MemoryMax=2G
+
+[Install]
+WantedBy=lebprime.target

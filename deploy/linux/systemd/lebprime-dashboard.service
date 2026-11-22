@@ -1,0 +1,28 @@
+[Unit]
+Description=LebPrime dashboard (127.0.0.1:8501, published through Caddy)
+After=network-online.target
+PartOf=lebprime.target
+
+[Service]
+User=lebprime
+Group=lebprime
+EnvironmentFile=/etc/lebprime/lebprime.env
+# No gateway key and no MT5 transport: the dashboard cannot place orders itself.
+# The worker runs as its own service, so the dashboard must not spawn one.
+Environment=LEBPRIME_MT5_TRANSPORT=auto DISABLE_BACKTEST_WORKER=1 TZ=UTC PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LEBPRIME_RUNTIME=vps
+WorkingDirectory=/opt/lebprime/app
+# Refuse to start without strong dashboard credentials in VPS mode.
+ExecStartPre=/opt/lebprime/venv/bin/python /opt/lebprime/deploy/bin/lebprime-preflight dashboard
+ExecStart=/opt/lebprime/venv/bin/python /opt/lebprime/app/scripts/run_dashboard.py --host 127.0.0.1 --port 8501 --no-worker
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/opt/lebprime/app /var/lib/lebprime /var/log/lebprime /run/lebprime
+MemoryMax=1500M
+
+[Install]
+WantedBy=lebprime.target

@@ -1,0 +1,35 @@
+# /etc/caddy/Caddyfile - HTTPS front door for the dashboard (the only public web service).
+# Set LEBPRIME_DOMAIN in /etc/default/caddy, e.g. LEBPRIME_DOMAIN=bot.example.com (DNS A record -> VPS IP).
+{
+	admin off
+}
+
+{$LEBPRIME_DOMAIN} {
+	log {
+		output file /var/log/caddy/lebprime-access.log {
+			roll_size 20MiB
+			roll_keep 10
+		}
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	# Same-origin check: state-changing requests must come from this site's own pages (CSRF protection).
+	@cross_origin_write {
+		not method GET HEAD OPTIONS
+		not header Origin https://{host}
+	}
+	respond @cross_origin_write "cross-origin request blocked" 403
+
+	# /health is unauthenticated in the app and reveals the install path; keep it local.
+	respond /health 404
+
+	reverse_proxy 127.0.0.1:8501
+}

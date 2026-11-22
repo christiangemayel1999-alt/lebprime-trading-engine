@@ -1,0 +1,10 @@
+[Unit]
+Description=On-demand VNC view of the MT5 virtual display (localhost only; use an SSH tunnel)
+Requires=lebprime-xvfb.service
+After=lebprime-xvfb.service
+
+[Service]
+User=lebprime-mt5
+Group=lebprime-mt5
+ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5900 -rfbauth /var/lib/lebprime-mt5/.vnc/passwd -forever -shared -noxdamage -quiet
+Restart=on-failure

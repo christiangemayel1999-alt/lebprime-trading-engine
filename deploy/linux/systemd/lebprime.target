@@ -1,0 +1,7 @@
+[Unit]
+Description=LebPrime trading stack (MT5 under Wine, gateway, bot, dashboard, research worker)
+Wants=lebprime-xvfb.service lebprime-mt5-terminal.service lebprime-mt5-gateway.service lebprime-bot.service lebprime-dashboard.service lebprime-worker.service lebprime-watchdog.timer lebprime-backup.timer
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

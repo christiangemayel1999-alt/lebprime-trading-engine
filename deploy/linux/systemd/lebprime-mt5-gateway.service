@@ -1,0 +1,26 @@
+[Unit]
+Description=LebPrime MT5 gateway (Windows Python under Wine, 127.0.0.1 only)
+BindsTo=lebprime-mt5-terminal.service
+After=lebprime-mt5-terminal.service
+PartOf=lebprime.target
+
+[Service]
+User=lebprime-mt5
+Group=lebprime-mt5
+SupplementaryGroups=lebprime-gw
+EnvironmentFile=/etc/lebprime/gateway.env
+Environment=DISPLAY=:99 WINEDEBUG=-all TZ=UTC WINEPREFIX=/var/lib/lebprime-mt5/wine PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WorkingDirectory=/opt/lebprime/app
+# Give the terminal time to load and connect before the first initialize().
+ExecStartPre=/bin/sleep 15
+ExecStart=/opt/lebprime/deploy/bin/lebprime-mt5-gateway
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/var/lib/lebprime-mt5
+
+[Install]
+WantedBy=lebprime.target

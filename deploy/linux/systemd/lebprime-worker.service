@@ -1,0 +1,28 @@
+[Unit]
+Description=LebPrime research/backtest worker (one job at a time, capped CPU and memory)
+After=network-online.target
+PartOf=lebprime.target
+
+[Service]
+User=lebprime
+Group=lebprime
+EnvironmentFile=/etc/lebprime/lebprime.env
+Environment=LEBPRIME_MT5_TRANSPORT=auto TZ=UTC PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LEBPRIME_RUNTIME=vps
+WorkingDirectory=/opt/lebprime/app
+ExecStart=/opt/lebprime/venv/bin/python /opt/lebprime/app/scripts/run_worker.py
+Restart=always
+RestartSec=30
+# Leave headroom for MT5 + bot: at most 2 of 4 vCPUs and 4 GB, lowest priority.
+CPUQuota=200%
+MemoryMax=4G
+MemorySwapMax=0
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/lebprime/app /var/lib/lebprime /var/log/lebprime
+
+[Install]
+WantedBy=lebprime.target

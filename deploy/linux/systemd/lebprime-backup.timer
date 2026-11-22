@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily LebPrime backup (weekend-safe time, 22:30 UTC)
+
+[Timer]
+OnCalendar=*-*-* 22:30:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

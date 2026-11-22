@@ -1,0 +1,28 @@
+[Unit]
+Description=LebPrime MetaTrader 5 terminal under Wine
+Requires=lebprime-xvfb.service
+After=lebprime-xvfb.service network-online.target
+Wants=network-online.target
+PartOf=lebprime.target
+StartLimitIntervalSec=900
+StartLimitBurst=6
+
+[Service]
+User=lebprime-mt5
+Group=lebprime-mt5
+EnvironmentFile=/etc/lebprime/gateway.env
+Environment=DISPLAY=:99 WINEDEBUG=-all TZ=UTC WINEPREFIX=/var/lib/lebprime-mt5/wine
+WorkingDirectory=/var/lib/lebprime-mt5
+ExecStart=/opt/lebprime/deploy/bin/lebprime-mt5-terminal
+ExecStopPost=/usr/bin/env WINEPREFIX=/var/lib/lebprime-mt5/wine /usr/bin/wineserver -k
+Restart=always
+RestartSec=15
+TimeoutStopSec=30
+KillMode=mixed
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/var/lib/lebprime-mt5
+
+[Install]
+WantedBy=lebprime.target

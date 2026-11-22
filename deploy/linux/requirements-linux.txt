@@ -1,0 +1,16 @@
+# Native Linux Python (bot, dashboard, worker, watchdog). Pinned to the versions running on the laptop today.
+# No MetaTrader5 here: on Linux the bot reaches MT5 through the gateway (LEBPRIME_MT5_TRANSPORT=gateway).
+pandas==3.0.2
+numpy==2.4.4
+ta==0.11.0
+pytz==2026.1.post1
+requests==2.33.1
+python-dotenv==1.2.2
+fastapi==0.148.0
+starlette==1.9.0
+pydantic==2.12.5
+uvicorn==0.54.0
+jinja2==3.1.6
+python-multipart==0.0.32
+httpx==0.28.1
+pytest==9.1.1

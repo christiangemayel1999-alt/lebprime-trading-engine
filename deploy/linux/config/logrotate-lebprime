@@ -1,0 +1,18 @@
+# /etc/logrotate.d/lebprime
+#
+# Who rotates what on the VPS:
+#   bot.log, errors.log        - the app itself (RotatingFileHandler); logrotate must not touch them
+#   service stdout/stderr      - journald, capped by /etc/systemd/journald.conf.d/lebprime.conf
+#   Caddy access log           - Caddy (roll_size/roll_keep in the Caddyfile)
+#   trades.csv, signals.csv... - NOT rotated: the app reads them back and rewrites them, so they are data
+# This file only covers the stray *.out.log / *.err.log files carried over from Windows launchers.
+/var/log/lebprime/*.out.log /var/log/lebprime/*.err.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su lebprime lebprime
+}

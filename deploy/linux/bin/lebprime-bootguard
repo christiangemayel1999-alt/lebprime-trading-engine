@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Start execution paused after a reboot or a fresh install.
+
+Runs as ExecStartPre of lebprime-bot.service. /run/lebprime is a tmpfs, so
+the marker below only survives crash restarts within the same boot. When it
+is missing, the guard sets execution_paused in the shared control state
+(through the app's own ControlStateService and its lock). An operator then
+checks positions and orders against the broker (`lebprime-ctl reconcile`)
+and resumes from the dashboard or Telegram.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+APP = Path(os.environ.get("LEBPRIME_APP_DIR", "/opt/lebprime/app"))
+MARKER = Path(os.environ.get("LEBPRIME_BOOT_MARKER", "/run/lebprime/boot-reconciled"))
+sys.path.insert(0, str(APP))
+
+
+def main() -> int:
+    if MARKER.exists():
+        return 0
+    from services.control_state import ControlStateService  # noqa: PLC0415
+
+    service = ControlStateService(APP)
+    state = service.update({"execution_paused": True})
+    service.mark_command("boot_guard_pause", "lebprime-bootguard", reason="reboot_or_install_requires_reconciliation")
+    print(
+        "lebprime-bootguard: execution paused until reconciliation "
+        f"(execution_paused={state.get('execution_paused')}). Check the broker with `lebprime-ctl reconcile`, then resume from the dashboard.",
+        file=sys.stderr,
+    )
+    # Marker means "the guard has run this boot", so crash restarts keep whatever the operator set.
+    MARKER.parent.mkdir(parents=True, exist_ok=True)
+    MARKER.write_text("paused-by-bootguard\n", encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

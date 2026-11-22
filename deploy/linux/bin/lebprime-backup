@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Encrypted off-server backups with restic: consistent SQLite snapshots + bot state.
+#   lebprime-backup run      snapshot, upload, apply retention (7 daily, 4 weekly)
+#   lebprime-backup verify   restic check + restore the latest snapshot to a temp dir and integrity-check every DB
+#   lebprime-backup restore <target-dir> [snapshot-id]
+# Needs /etc/lebprime/backup.env (RESTIC_REPOSITORY, RESTIC_PASSWORD_FILE, provider credentials).
+# Secrets (/etc/lebprime/*.env, gateway.key) are deliberately NOT backed up: keep them in your password manager.
+set -euo pipefail
+
+if [[ -z "${RESTIC_REPOSITORY:-}" && -r /etc/lebprime/backup.env ]]; then
+  set -a; . /etc/lebprime/backup.env; set +a
+fi
+STATE_DIR=/var/lib/lebprime
+STAGING=/var/lib/lebprime-backup/staging
+PY=/opt/lebprime/venv/bin/python
+
+snapshot() {
+  rm -rf "$STAGING"
+  mkdir -p "$STAGING"
+  # Copy everything except live SQLite files, then take online-consistent copies of the databases.
+  rsync -a --delete \
+    --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' --exclude '*.lock' \
+    "$STATE_DIR/" "$STAGING/state/"
+  "$PY" - "$STATE_DIR" "$STAGING/state" <<'PYEOF'
+import sqlite3, sys
+from pathlib import Path
+src_root, dst_root = Path(sys.argv[1]), Path(sys.argv[2])
+for db in sorted(src_root.rglob("*.db")):
+    dst = dst_root / db.relative_to(src_root)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30) as src, sqlite3.connect(dst) as out:
+        src.backup(out)
+    with sqlite3.connect(dst) as check:
+        result = check.execute("PRAGMA integrity_check").fetchone()[0]
+    if result != "ok":
+        raise SystemExit(f"integrity_check failed for snapshot of {db}: {result}")
+    print(f"snapshot ok: {db} -> {dst}")
+PYEOF
+  install -d "$STAGING/app"
+  cp -a /opt/lebprime/app/config.json "$STAGING/app/config.json"
+  if [[ -f /var/lib/lebprime-mt5/gateway/executions.jsonl ]]; then
+    install -d "$STAGING/gateway"
+    cp -a /var/lib/lebprime-mt5/gateway/executions.jsonl "$STAGING/gateway/"
+  fi
+  (cd "$STAGING" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+}
+
+case "${1:-}" in
+  run)
+    snapshot
+    restic snapshots >/dev/null 2>&1 || restic init
+    restic backup --tag lebprime --host lebprime-vps "$STAGING"
+    restic forget --tag lebprime --keep-daily 7 --keep-weekly 4 --prune
+    rm -rf "$STAGING"
+    ;;
+  verify)
+    restic check --read-data-subset=5%
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    restic restore latest --tag lebprime --target "$tmp"
+    root="$(find "$tmp" -type f -name SHA256SUMS -printf '%h\n' | head -n1)"
+    (cd "$root" && sha256sum --quiet -c SHA256SUMS)
+    find "$root" -name '*.db' -print0 | while IFS= read -r -d '' db; do
+      "$PY" -c "import sqlite3,sys; r=sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0]; print(sys.argv[1], r); sys.exit(r!='ok')" "$db"
+    done
+    echo "backup verify OK"
+    ;;
+  restore)
+    target="${2:?usage: lebprime-backup restore <target-dir> [snapshot]}"
+    restic restore "${3:-latest}" --tag lebprime --target "$target"
+    echo "Restored to $target. Follow RUNBOOK.md 'Restore from backup' to put it in place."
+    ;;
+  *)
+    echo "usage: lebprime-backup run|verify|restore <dir> [snapshot]" >&2
+    exit 2
+    ;;
+esac

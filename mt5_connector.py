@@ -8,11 +8,14 @@ from typing import Any, Callable
 
 import pandas as pd
 
-try:
-    import MetaTrader5 as mt5
-    MT5_IMPORT_ERROR: ModuleNotFoundError | None = None
-except ModuleNotFoundError as exc:
-    MT5_IMPORT_ERROR = exc
+from trading_bot.mt5_transport import load_mt5_module
+
+# LEBPRIME_MT5_TRANSPORT selects the native MetaTrader5 package (Windows) or the
+# authenticated Linux gateway; the trading logic below is identical for both.
+_mt5_module, MT5_IMPORT_ERROR = load_mt5_module()
+if _mt5_module is not None:
+    mt5 = _mt5_module
+else:
 
     class _UnavailableMT5:
         """Import-safe MT5 placeholder that fails only when MT5 APIs are used."""
