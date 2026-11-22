@@ -1,7 +1,7 @@
 # LebPrime on a Linux VPS
 
 This folder is everything needed to run the LebPrime MT5 bot on Ubuntu 24.04 instead of the Windows laptop.
-Read [MIGRATION_PLAN.md](MIGRATION_PLAN.md) before doing anything with real accounts, and keep
+Start with [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md). Read [MIGRATION_PLAN.md](MIGRATION_PLAN.md) before doing anything with real accounts, and keep
 [RUNBOOK.md](RUNBOOK.md) open when something goes wrong.
 
 ## How it works
@@ -36,6 +36,8 @@ The `MetaTrader5` Python package only exists for Windows, so the VPS runs two wo
 |---|---|
 | `install.sh`, `scripts/10..40-*.sh` | Ubuntu installer: hardening, Wine + MT5 + Windows Python, app layout, services |
 | `systemd/` | `lebprime-{xvfb,mt5-terminal,mt5-gateway,bot,dashboard,worker}.service`, watchdog and backup timers, on-demand VNC |
+| `scripts/vps_check.sh` | read-only server self-check (`--pre-install` for a bare server) |
+| `scripts/gateway_smoke.py` | Wine/MT5 gate: all Version 1 symbols, candles, optional demo order round trip |
 | `bin/lebprime-ctl` | operator tool: `status`, `health`, `reconcile`, `gate`, `logs`, `restart-mt5` |
 | `bin/lebprime-watchdog` | health check run every minute |
 | `bin/lebprime-bootguard` | pauses execution after every reboot or fresh install |

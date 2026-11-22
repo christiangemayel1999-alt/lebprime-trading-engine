@@ -57,7 +57,7 @@ def _fake_mt5(trade_mode: int = 0, login: int = 1001) -> types.ModuleType:
 def gateway_factory(tmp_path, monkeypatch):
     servers = []
 
-    def _start(trading: str = "enabled", **fake_kwargs):
+    def _start(trading: str = "enabled", symbols: str = "XAUUSD", max_volume: str = "1.0", **fake_kwargs):
         fake = _fake_mt5(**fake_kwargs)
         monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
         key_file = tmp_path / "gateway.key"
@@ -67,6 +67,8 @@ def gateway_factory(tmp_path, monkeypatch):
         monkeypatch.setenv("LEBPRIME_GATEWAY_JOURNAL", str(tmp_path / "executions.jsonl"))
         monkeypatch.setenv("LEBPRIME_MT5_EXPECTED_LOGIN", "1001")
         monkeypatch.setenv("LEBPRIME_MT5_GATEWAY_PORT", "0")
+        monkeypatch.setenv("LEBPRIME_GATEWAY_SYMBOLS", symbols)
+        monkeypatch.setenv("LEBPRIME_GATEWAY_MAX_VOLUME", max_volume)
         gateway_server = importlib.reload(importlib.import_module("trading_bot.mt5_transport.gateway_server"))
         gateway = gateway_server.Gateway(gateway_server.GatewayConfig())
         server = gateway_server._Server(("127.0.0.1", 0), gateway)
@@ -204,3 +206,13 @@ def test_auto_transport_keeps_native_behaviour(monkeypatch):
     monkeypatch.setenv("LEBPRIME_MT5_TRANSPORT", "gateway")
     module, err = mt5_transport.load_mt5_module()
     assert err is None and module.transport_name == "gateway"
+
+
+def test_symbol_allow_list_and_per_symbol_volume_caps(gateway_factory):
+    client, fake, _gw, _srv = gateway_factory(symbols="XAUUSD,XAGUSD,US30,USTEC", max_volume="XAUUSD=0.5,US30=5,*=1")
+    assert client.order_send(dict(_buy(), symbol="BTCUSD")) is None and "allow-listed" in client.last_error()[1]
+    assert client.order_send(dict(_buy(), volume=0.6)) is None and "0.5" in client.last_error()[1]
+    assert client.order_send(dict(_buy(), symbol="US30", volume=4.0)).retcode == 10009
+    assert client.order_send(dict(_buy(), symbol="USTEC", volume=1.5)) is None
+    assert client.order_send(dict(_buy(), symbol="XAGUSD", volume=1.0)).retcode == 10009
+    assert [r["symbol"] for r in fake.sent] == ["US30", "XAGUSD"]

@@ -68,10 +68,26 @@ class GatewayConfig:
             raise SystemExit(f"LEBPRIME_GATEWAY_TRADING must be disabled, reduce_only or enabled, not {self.trading!r}")
         self.demo_only = _env("LEBPRIME_GATEWAY_DEMO_ONLY", "1") != "0"
         self.symbols = {s.strip() for s in _env("LEBPRIME_GATEWAY_SYMBOLS", "XAUUSD").split(",") if s.strip()}
-        self.max_volume = float(_env("LEBPRIME_GATEWAY_MAX_VOLUME", "1.0"))
+        # "1.0" caps every symbol; "XAUUSD=1,XAGUSD=1,US30=5,USTEC=5,*=1" caps per symbol ("*" = default).
+        self.max_volume, self.max_volume_by_symbol = _parse_volume_caps(_env("LEBPRIME_GATEWAY_MAX_VOLUME", "1.0"))
         self.journal_path = Path(_env("LEBPRIME_GATEWAY_JOURNAL", r"Z:\var\lib\lebprime\gateway\executions.jsonl"))
         if self.bind not in {"127.0.0.1", "::1", "localhost"} and _env("LEBPRIME_GATEWAY_ALLOW_NON_LOOPBACK") != "1":
             raise SystemExit("Refusing to bind the MT5 gateway to a non-loopback address")
+
+
+def _parse_volume_caps(raw: str) -> tuple[float, dict[str, float]]:
+    default = 1.0
+    caps: dict[str, float] = {}
+    for part in [p.strip() for p in raw.split(",") if p.strip()]:
+        if "=" not in part:
+            default = float(part)
+            continue
+        symbol, value = (item.strip() for item in part.split("=", 1))
+        if symbol == "*":
+            default = float(value)
+        else:
+            caps[symbol] = float(value)
+    return default, caps
 
 
 # --------------------------------------------------------------------------- execution journal
@@ -385,8 +401,9 @@ class Gateway:
         if symbol is not None and symbol not in self.config.symbols:
             raise Rejected(protocol.ERR_REQUEST_REJECTED, f"symbol {symbol!r} is not allow-listed at the gateway")
         volume = request.get("volume")
-        if volume is not None and not (0 < float(volume) <= self.config.max_volume):
-            raise Rejected(protocol.ERR_REQUEST_REJECTED, f"volume {volume} outside (0, {self.config.max_volume}]")
+        cap = self.config.max_volume_by_symbol.get(str(symbol), self.config.max_volume)
+        if volume is not None and not (0 < float(volume) <= cap):
+            raise Rejected(protocol.ERR_REQUEST_REJECTED, f"volume {volume} outside (0, {cap}] for {symbol}")
         terminal = mt5.terminal_info()
         if terminal is None or not terminal.connected:
             raise Rejected(protocol.ERR_TERMINAL_DISCONNECTED, "MT5 terminal is not connected to the broker")
