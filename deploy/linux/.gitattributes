@@ -1,0 +1,2 @@
+# Shell scripts, units and configs run on Linux: always LF, even in a Windows checkout.
+* text=auto eol=lf
