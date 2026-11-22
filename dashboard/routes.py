@@ -608,6 +608,42 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @router.get("/api/indicator-lab/tests/{test_id}/money")
+    async def indicator_lab_test_money(
+        test_id: int,
+        starting_capital: float = 1000.0,
+        risk_pct: float = 1.0,
+        min_lot_max_risk_pct: float = 2.0,
+        open_risk_cap_pct: float = 2.0,
+        daily_loss_stop_pct: float = 3.0,
+        include_spread: bool = True,
+        min_lot: float | None = None,
+        lot_step: float | None = None,
+        commission_per_lot: float | None = None,
+        _: None = Depends(dashboard_auth.dependency),
+    ) -> dict[str, Any]:
+        if indicator_lab_service is None:
+            raise HTTPException(status_code=503, detail="Indicator Lab service not configured")
+        if min_lot is not None and min_lot <= 0 or lot_step is not None and lot_step <= 0:
+            raise HTTPException(status_code=400, detail="Min lot and lot step must be above 0")
+        try:
+            result = indicator_lab_service.test_money_simulation(
+                test_id,
+                starting_capital=starting_capital,
+                risk_pct=risk_pct,
+                min_lot_max_risk_pct=min_lot_max_risk_pct,
+                open_risk_cap_pct=open_risk_cap_pct,
+                daily_loss_stop_pct=daily_loss_stop_pct,
+                include_spread=include_spread,
+                min_lot=min_lot,
+                lot_step=lot_step,
+                commission_per_lot=commission_per_lot,
+            )
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        return {"ok": True, "result": result}
+
     @router.get("/api/indicator-lab/tests/{test_id}/replay")
     async def indicator_lab_test_replay(test_id: int, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         try:

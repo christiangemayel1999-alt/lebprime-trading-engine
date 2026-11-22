@@ -1550,6 +1550,199 @@ const brokerEntries = asArray(status.broker_entries);
         };
     }
 
+    // ---- Money simulation: starting capital, balance after every trade, equity curve, drawdown ----
+    const MONEY_DEFAULTS = { starting_capital: "1000", risk_pct: "1", min_lot_max_risk_pct: "2", open_risk_cap_pct: "2", daily_loss_stop_pct: "3", include_spread: true, min_lot: "", lot_step: "", commission_per_lot: "" };
+    const money$ = (value, digits = 2) => `${num(value) < 0 ? "-" : ""}$${Math.abs(num(value)).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+    const moneySigned = (value) => `${num(value) > 0 ? "+" : ""}${money$(value)}`;
+    let moneyTimer = null;
+    let moneyRequestSeq = 0;
+
+    function moneyState() {
+        const lab = state.indicatorLab;
+        lab.money = lab.money || { settings: { ...MONEY_DEFAULTS }, result: null, testId: null, loading: false, error: "" };
+        return lab.money;
+    }
+
+    function readMoneySettings() {
+        const money = moneyState();
+        const next = { ...money.settings };
+        Object.keys(MONEY_DEFAULTS).forEach((key) => {
+            const node = document.getElementById(`ilm-${key}`);
+            if (!node) return;
+            next[key] = node.type === "checkbox" ? node.checked : node.value;
+        });
+        money.settings = next;
+        return next;
+    }
+
+    async function fetchMoneySimulation() {
+        const lab = state.indicatorLab;
+        const money = moneyState();
+        const testId = num(lab.selectedTestId, 0);
+        if (!testId) return;
+        const s = money.settings;
+        const params = new URLSearchParams();
+        ["starting_capital", "risk_pct", "min_lot_max_risk_pct", "open_risk_cap_pct", "daily_loss_stop_pct", "min_lot", "lot_step", "commission_per_lot"].forEach((key) => {
+            const value = String(s[key] ?? "").trim();
+            if (value !== "") params.set(key, value);
+        });
+        params.set("include_spread", s.include_spread ? "true" : "false");
+        const seq = ++moneyRequestSeq;
+        money.loading = true;
+        try {
+            const payload = await api(`/api/indicator-lab/tests/${testId}/money?${params.toString()}`);
+            if (seq !== moneyRequestSeq) return;
+            money.result = payload.result || null;
+            money.testId = testId;
+            money.error = "";
+        } catch (error) {
+            if (seq !== moneyRequestSeq) return;
+            money.error = error.message;
+            money.testId = testId;
+        } finally {
+            if (seq === moneyRequestSeq) money.loading = false;
+        }
+        if (seq !== moneyRequestSeq) return;
+        const output = document.getElementById("ilm-output");
+        if (output) {
+            output.innerHTML = renderMoneyOutput();
+            bindMoneyChart();
+        }
+    }
+
+    function scheduleMoneySimulation(delay = 250) {
+        window.clearTimeout(moneyTimer);
+        moneyTimer = window.setTimeout(fetchMoneySimulation, delay);
+    }
+
+    function moneyEquityChart(curve, startingCapital) {
+        if (curve.length < 2) return `<div class="small text-secondary">The equity curve appears once the test has closed trades.</div>`;
+        const W = 1000, H = 260, padL = 64, padR = 12, padT = 12, padB = 26;
+        const values = curve.map((p) => num(p.balance));
+        const lo = Math.min(...values, startingCapital), hi = Math.max(...values, startingCapital);
+        const span = hi - lo || 1;
+        const x = (i) => padL + (i / (curve.length - 1)) * (W - padL - padR);
+        const y = (v) => padT + (1 - (v - lo) / span) * (H - padT - padB);
+        let peak = values[0];
+        const peakPts = values.map((v, i) => { peak = Math.max(peak, v); return `${x(i).toFixed(1)},${y(peak).toFixed(1)}`; });
+        const linePts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+        const ddArea = `${peakPts.join(" ")} ${linePts.slice().reverse().join(" ")}`;
+        const ticks = [lo, lo + span / 2, hi];
+        const date = (p) => String(p.time || "").substring(0, 10);
+        const endUp = values[values.length - 1] >= startingCapital;
+        return `<div class="money-chart-wrap">
+            <svg id="ilm-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="w-100 money-chart" role="img" aria-label="Account balance after each trade">
+                ${ticks.map((t) => `<line x1="${padL}" x2="${W - padR}" y1="${y(t).toFixed(1)}" y2="${y(t).toFixed(1)}" stroke="rgba(255,255,255,0.08)"/><text x="${padL - 6}" y="${(y(t) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#9aa4b2">${esc(money$(t, 0))}</text>`).join("")}
+                <line x1="${padL}" x2="${W - padR}" y1="${y(startingCapital).toFixed(1)}" y2="${y(startingCapital).toFixed(1)}" stroke="#9aa4b2" stroke-dasharray="4 4" stroke-width="1" vector-effect="non-scaling-stroke"/>
+                <polygon points="${ddArea}" fill="rgba(239,68,68,0.25)"/>
+                <polyline points="${linePts.join(" ")}" fill="none" stroke="${endUp ? "#22c55e" : "#ef4444"}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+                <text x="${padL}" y="${H - 8}" font-size="11" fill="#9aa4b2">${esc(date(curve[0]))}</text>
+                <text x="${W - padR}" y="${H - 8}" font-size="11" fill="#9aa4b2" text-anchor="end">${esc(date(curve[curve.length - 1]))}</text>
+                <line id="ilm-hover-line" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="rgba(255,255,255,0.4)" vector-effect="non-scaling-stroke" visibility="hidden"/>
+            </svg>
+            <div id="ilm-hover" class="money-chart-tip small d-none"></div>
+            <div class="small text-secondary mt-1">Balance after each closed trade. Dashed line = starting capital. Red shading = drawdown below the previous peak.</div>
+        </div>`;
+    }
+
+    function bindMoneyChart() {
+        const svg = document.getElementById("ilm-chart");
+        const result = moneyState().result;
+        if (!svg || !result) return;
+        const curve = asArray(result.equity_curve);
+        const tip = document.getElementById("ilm-hover");
+        const line = document.getElementById("ilm-hover-line");
+        const W = 1000, padL = 64, padR = 12;
+        svg.onmousemove = (event) => {
+            const rect = svg.getBoundingClientRect();
+            const vx = ((event.clientX - rect.left) / rect.width) * W;
+            const i = Math.max(0, Math.min(curve.length - 1, Math.round(((vx - padL) / (W - padL - padR)) * (curve.length - 1))));
+            const px = padL + (i / Math.max(1, curve.length - 1)) * (W - padL - padR);
+            line.setAttribute("x1", px); line.setAttribute("x2", px); line.setAttribute("visibility", "visible");
+            const trade = i > 0 ? asArray(result.trades)[i - 1] : null;
+            tip.innerHTML = `<div class="fw-semibold">${esc(money$(curve[i].balance))}</div><div class="text-secondary">${esc(String(curve[i].time || "").substring(0, 16).replace("T", " "))}</div>${trade ? `<div>Trade #${trade.n}: <span class="${num(trade.net_usd) >= 0 ? "text-success" : "text-danger"}">${esc(moneySigned(trade.net_usd))}</span></div>` : "<div>Start</div>"}`;
+            tip.classList.remove("d-none");
+            tip.style.left = `${Math.min(rect.width - 180, Math.max(0, event.clientX - rect.left + 12))}px`;
+            tip.style.top = "8px";
+        };
+        svg.onmouseleave = () => { tip.classList.add("d-none"); line.setAttribute("visibility", "hidden"); };
+    }
+
+    function renderMoneyOutput() {
+        const lab = state.indicatorLab;
+        const money = moneyState();
+        if (!lab.selectedTestId) return `<div class="small text-secondary">Pick a test in Results (Zones button) to see it as a real-money account.</div>`;
+        if (money.error && num(money.testId) === num(lab.selectedTestId)) return `<div class="alert alert-danger py-2 mb-0">${esc(money.error)}</div>`;
+        const r = money.result;
+        if (!r || num(r.test_id) !== num(lab.selectedTestId)) return `<div class="small text-secondary">Calculating...</div>`;
+        const s = asObject(r.summary);
+        const trades = asArray(r.trades);
+        const skipped = asArray(r.skipped);
+        const reasons = {};
+        skipped.forEach((t) => { reasons[t.reason] = (reasons[t.reason] || 0) + 1; });
+        const c = asObject(r.contract);
+        const tile = (label, value, tone = "", sub = "") => `<div class="col-6 col-md-4 col-xl-2"><div class="money-tile"><div class="small text-secondary">${esc(label)}</div><div class="money-tile-value ${tone}">${esc(value)}</div>${sub ? `<div class="small text-secondary">${esc(sub)}</div>` : ""}</div></div>`;
+        const profitTone = num(s.net_profit) >= 0 ? "text-success" : "text-danger";
+        const years = Object.entries(asObject(s.profit_by_year));
+        const time = (value) => esc(String(value || "").substring(0, 16).replace("T", " "));
+        return `
+            <div class="row g-2 mb-3">
+                ${tile("Starting capital", money$(s.starting_capital))}
+                ${tile("Ending balance", money$(s.ending_balance), profitTone)}
+                ${tile("Net profit", moneySigned(s.net_profit), profitTone, `${num(s.return_pct) > 0 ? "+" : ""}${num(s.return_pct).toFixed(2)}%`)}
+                ${tile("Max drawdown", money$(-num(s.max_drawdown_usd)), "text-danger", `-${num(s.max_drawdown_pct).toFixed(2)}% from peak`)}
+                ${tile("Trades taken", `${num(s.trades_taken)} / ${num(s.trades_available)}`, "", `${num(s.trades_skipped)} skipped`)}
+                ${tile("Win rate", `${num(s.win_rate).toFixed(1)}%`, "", `PF ${s.profit_factor == null ? "-" : num(s.profit_factor).toFixed(2)} | costs ${money$(num(s.total_commission_usd) + num(s.total_spread_usd))}`)}
+            </div>
+            ${moneyEquityChart(asArray(r.equity_curve), num(s.starting_capital))}
+            <div class="small text-secondary mt-2">${esc(r.symbol || "")} ${esc(r.timeframe || "")} contract: ${esc(money$(c.value_per_price_per_lot, 0))} per 1.0 price move per lot, min lot ${esc(c.min_lot)}, step ${esc(c.lot_step)}, commission ${esc(money$(c.commission_per_lot))} per lot round trip.${years.length ? ` Profit by year: ${years.map(([y, v]) => `${esc(y)} ${esc(moneySigned(v))}`).join(", ")}.` : ""}${skipped.length ? ` Skipped: ${Object.entries(reasons).map(([k, v]) => `${esc(k)} (${v})`).join(", ")}.` : ""}</div>
+            <div class="table-responsive mt-3 money-trades"><table class="table table-sm strategy-table mb-0">
+                <thead><tr><th>#</th><th>Entry</th><th>Exit</th><th>Side</th><th>Outcome</th><th>Lots</th><th>Risk $</th><th>Risk %</th><th>Net R</th><th>Costs $</th><th>P/L $</th><th>Balance after</th><th>Drawdown</th></tr></thead>
+                <tbody>${trades.map((t) => `<tr><td>${t.n}</td><td>${time(t.entry_time)}</td><td>${time(t.exit_time)}</td><td>${esc(t.side)}</td><td>${esc(t.outcome || "")}</td><td>${num(t.lots).toFixed(2)}</td><td>${esc(money$(t.risk_usd))}</td><td>${num(t.risk_pct).toFixed(2)}%</td><td>${num(t.net_r).toFixed(2)}</td><td>${esc(money$(num(t.commission_usd) + num(t.spread_usd)))}</td><td class="${num(t.net_usd) >= 0 ? "text-success" : "text-danger"}">${esc(moneySigned(t.net_usd))}</td><td class="fw-semibold">${esc(money$(t.balance_after))}</td><td class="${num(t.drawdown_pct) > 0 ? "text-danger" : "text-secondary"}">${num(t.drawdown_pct) > 0 ? `-${num(t.drawdown_pct).toFixed(2)}%` : "0%"}</td></tr>`).join("") || `<tr><td colspan="13" class="text-secondary">No closed trades in this test.</td></tr>`}</tbody>
+            </table></div>`;
+    }
+
+    function renderMoneyPanel() {
+        const money = moneyState();
+        const s = money.settings;
+        const n = (key, label, step, hint = "") => `<div class="col-6 col-md-3 col-xl">${field(`ilm-${key}`, label, s[key], "number", step)}${hint ? `<div class="form-text">${esc(hint)}</div>` : ""}</div>`;
+        return `
+                <div class="col-12">
+                    <div class="panel" id="il-money-panel">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <h3 class="h6 text-uppercase text-secondary fw-semibold mb-0">Money Simulation${state.indicatorLab.selectedTestId ? ` <span class="text-body-secondary">| Test #${esc(state.indicatorLab.selectedTestId)}</span>` : ""}</h3>
+                            <div class="small text-secondary">Every trade is sized from the current balance, so wins and losses compound. Numbers update as you type.</div>
+                        </div>
+                        <div class="row g-2 align-items-start mb-2">
+                            ${n("starting_capital", "Starting capital ($)", "100")}
+                            ${n("risk_pct", "Risk % per trade", "0.1")}
+                            ${n("min_lot_max_risk_pct", "Min-lot max risk %", "0.1", "Skip if min lot risks more")}
+                            ${n("open_risk_cap_pct", "Total open risk cap %", "0.1")}
+                            ${n("daily_loss_stop_pct", "Daily loss stop %", "0.5")}
+                            ${n("min_lot", "Min lot", "0.01", "Blank = broker")}
+                            ${n("lot_step", "Lot step", "0.01", "Blank = broker")}
+                            ${n("commission_per_lot", "Commission $/lot", "0.1", "Blank = broker")}
+                            <div class="col-6 col-md-3 col-xl-auto pt-md-4">${toggle("ilm-include_spread", "Charge spread", s.include_spread)}</div>
+                        </div>
+                        <div id="ilm-output">${renderMoneyOutput()}</div>
+                    </div>
+                </div>`;
+    }
+
+    function bindMoneyPanel() {
+        Object.keys(MONEY_DEFAULTS).forEach((key) => {
+            const node = document.getElementById(`ilm-${key}`);
+            if (!node) return;
+            const update = () => { readMoneySettings(); scheduleMoneySimulation(); };
+            node.addEventListener("input", update);
+            node.addEventListener("change", update);
+        });
+        bindMoneyChart();
+        const lab = state.indicatorLab;
+        const money = moneyState();
+        if (lab.selectedTestId && num(money.testId) !== num(lab.selectedTestId) && !money.loading) scheduleMoneySimulation(0);
+    }
+
     function renderIndicatorLab() {
         const container = ensureContainer("section-indicator-lab");
         const lab = state.indicatorLab;
@@ -1633,6 +1826,7 @@ const brokerEntries = asArray(status.broker_entries);
                         </table></div>
                     </div>
                 </div>
+${renderMoneyPanel()}
                 <div class="col-12">
                     <div class="panel">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -1664,6 +1858,7 @@ const brokerEntries = asArray(status.broker_entries);
                 </div>
             </div>`;
         document.getElementById("il-refresh").onclick = () => fetchIndicatorLab();
+        bindMoneyPanel();
         document.querySelectorAll("#section-indicator-lab input, #section-indicator-lab select").forEach((node) => {
             node.addEventListener("focus", () => markIndicatorLabInteraction());
             node.addEventListener("click", () => markIndicatorLabInteraction());

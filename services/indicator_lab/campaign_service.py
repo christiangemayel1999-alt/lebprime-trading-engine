@@ -17,6 +17,7 @@ from services.database import DatabaseService
 from services.indicator_lab.dataset_service import IndicatorDatasetService
 from services.indicator_lab.engine import IndicatorEngine
 from services.indicator_lab.lebprime_engine import LebPrimeEngine
+from services.indicator_lab import money_sim
 from services.indicator_lab.models import ZoneRecord
 from services.indicator_lab.parameter_registry import ENGINE_VERSION, LEBPRIME_INDICATOR_VERSION, LEBPRIME_PINE_PATH, VSS3_PINE_PATH, default_parameters, normalize_indicator, parameter_schema, validate_parameters
 from services.indicator_lab.vss3_engine import VSS3Engine
@@ -895,6 +896,23 @@ class IndicatorLabService:
             item.update({name: metrics.get(name) for name in RESULT_METRIC_COLUMNS})
             rows.append(item)
         return self._csv_text(rows, columns)
+
+    def test_money_simulation(self, test_id: int, **settings: Any) -> dict[str, Any]:
+        """Dollar account simulation of one completed test (see services/indicator_lab/money_sim.py)."""
+        test = self.get_test(test_id)
+        if not test:
+            raise ValueError(f"Test {test_id} not found")
+        parameters = test.get("parameter_snapshot_json") or {}
+        zones = self.test_zones(test_id)
+        symbol = next((z.get("symbol") for z in zones if z.get("symbol")), None)
+        trades = money_sim.trades_from_zones(zones, symbol=symbol, parameters=parameters)
+        result = money_sim.simulate(trades, **settings)
+        spec = money_sim.contract_for(symbol)
+        result["test_id"] = int(test_id)
+        result["symbol"] = symbol
+        result["timeframe"] = next((z.get("timeframe") for z in zones if z.get("timeframe")), None)
+        result["contract"] = spec
+        return result
 
     def test_replay(self, test_id: int) -> dict[str, Any]:
         test = self.get_test(test_id)
