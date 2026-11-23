@@ -207,17 +207,22 @@ class ControlStateService:
         with self._acquire_lock():
             state = self._merge_defaults(load_json(self.path, default_control_state()))
             runtime = state.setdefault("runtime", {})
-            top_level_fields = {
-                "bot_pid",
-                "bot_running",
-                "desired_state",
+            # Operator-owned flags: the dashboard/Telegram write them and the bot only reads them. The bot's
+            # heartbeat used to write its in-memory copy back here, which silently undid a Pause pressed
+            # between two bot reads. The bot's view is still recorded under runtime for display.
+            operator_fields = {
                 "execution_paused",
-                "kill_switch",
-                "kill_switch_reason",
                 "auto_execution_enabled",
                 "signal_generation_enabled",
                 "request_shutdown",
                 "request_reload_config",
+            }
+            top_level_fields = {
+                "bot_pid",
+                "bot_running",
+                "desired_state",
+                "kill_switch",
+                "kill_switch_reason",
                 "pending_restart",
                 "restart_required_reasons",
                 "bot_started_at",
@@ -225,7 +230,9 @@ class ControlStateService:
                 "last_error",
             }
             for key, value in snapshot.items():
-                if key in top_level_fields:
+                if key in operator_fields:
+                    runtime[f"bot_view_{key}"] = value
+                elif key in top_level_fields:
                     state[key] = value
                 else:
                     runtime[key] = value

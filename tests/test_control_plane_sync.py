@@ -443,3 +443,26 @@ def test_telegram_notifier_uses_form_payload_and_trade_close_format(monkeypatch:
     assert "data" in captured["kwargs"]
     assert "json" not in captured["kwargs"]
     assert notifier.send_trade_close({"mode": "LIVE", "symbol": "XAUUSD", "side": "BUY", "exit_price": 1.0, "pnl": 2.5, "status": "closed", "ticket": 7}) is True
+
+
+def test_runtime_snapshot_never_overwrites_operator_pause(tmp_path: Path) -> None:
+    """A heartbeat carrying the bot's stale in-memory flags must not undo a Pause the operator just pressed."""
+    control_state = ControlStateService(tmp_path)
+    control_state.save({"bot_running": True, "execution_paused": False, "runtime": {}})
+    control_state.mark_command("pause_execution", "dashboard", execution_paused=True)
+
+    control_state.record_runtime_snapshot(
+        {
+            "bot_pid": 1234,
+            "heartbeat_at": "2026-11-23T18:00:00+00:00",
+            "heartbeat_status": "RUNNING",
+            "execution_paused": False,
+            "auto_execution_enabled": True,
+            "request_shutdown": False,
+        }
+    )
+
+    state = control_state.load()
+    assert state["execution_paused"] is True
+    assert state["runtime"]["bot_view_execution_paused"] is False
+    assert state["last_command"] == "pause_execution"
