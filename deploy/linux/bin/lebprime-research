@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Run any research or backtest command inside the capped sandbox (lebprime-research.slice),
+# as the lebprime user, from the app folder, at the lowest priority. Output streams to your terminal
+# and is also kept in the journal (journalctl -t lebprime-research).
+#   sudo lebprime-research python scripts/phase4_search.py --help
+#   sudo lebprime-research --detach python scripts/phase4_search.py ...   (keeps running after you log out)
+set -euo pipefail
+detach=0
+[[ "${1:-}" == "--detach" ]] && { detach=1; shift; }
+[[ $# -gt 0 ]] || { sed -n '2,8p' "$0"; exit 2; }
+[[ "$1" == "python" || "$1" == "python3" ]] && { shift; set -- /opt/lebprime/venv/bin/python "$@"; }
+common=(--slice=lebprime-research.slice --uid=lebprime --gid=lebprime --working-directory=/opt/lebprime/app
+        -p Nice=19 -p IOSchedulingClass=idle -p EnvironmentFile=/etc/lebprime/lebprime.env
+        -E LEBPRIME_MT5_TRANSPORT=auto -E PYTHONDONTWRITEBYTECODE=1 -E TZ=UTC -E HOME=/var/lib/lebprime
+        -p ProtectSystem=strict -p ReadWritePaths="/opt/lebprime/app /var/lib/lebprime /var/log/lebprime" -p NoNewPrivileges=yes)
+if (( detach )); then
+  unit="lebprime-research-$(date +%Y%m%d-%H%M%S)"
+  systemd-run --unit="$unit" "${common[@]}" -p SyslogIdentifier=lebprime-research "$@"
+  echo "started $unit. Follow it: journalctl -fu $unit   Stop it: sudo systemctl stop $unit"
+else
+  exec systemd-run --pipe --wait --collect --quiet "${common[@]}" "$@"
+fi

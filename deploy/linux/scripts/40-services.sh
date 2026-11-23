@@ -40,7 +40,8 @@ install -m 644 "$HERE/config/tmpfiles-lebprime.conf" /etc/tmpfiles.d/lebprime.co
 systemd-tmpfiles --create /etc/tmpfiles.d/lebprime.conf
 
 # --- systemd units.
-install -m 644 "$HERE"/systemd/*.service "$HERE"/systemd/*.timer "$HERE"/systemd/lebprime.target /etc/systemd/system/
+install -m 644 "$HERE"/systemd/*.service "$HERE"/systemd/*.timer "$HERE"/systemd/*.slice "$HERE"/systemd/lebprime.target /etc/systemd/system/
+ln -sfn /opt/lebprime/deploy/bin/lebprime-research /usr/local/sbin/lebprime-research
 systemctl daemon-reload
 # Safe to enable now: display, terminal, gateway (trading gate disabled), dashboard, worker, watchdog.
 systemctl enable lebprime.target lebprime-xvfb lebprime-mt5-terminal lebprime-mt5-gateway lebprime-dashboard lebprime-worker lebprime-watchdog.timer

@@ -46,7 +46,7 @@ echo "== Wine / MT5"
 PREFIX=/var/lib/lebprime-mt5/wine
 as_mt5() { sudo -u lebprime-mt5 -H env WINEPREFIX="$PREFIX" WINEDEBUG=-all "$@"; }
 is "wine installed ($(wine --version 2>/dev/null))" "command -v wine"
-is "wine version held" "apt-mark showhold | grep -q winehq-stable" warn
+is "wine version held" "apt-mark showhold | grep -q winehq-" warn
 is "Wine prefix exists" "test -f $PREFIX/system.reg"
 is "Windows Python installed" "test -f $PREFIX/drive_c/Python312/python.exe"
 mt5ver=$(as_mt5 wine 'C:\Python312\python.exe' -c "import MetaTrader5 as m; print(m.__version__)" 2>/dev/null | tr -d '\r')
@@ -83,6 +83,7 @@ if systemctl is-active --quiet lebprime-mt5-gateway; then
   jq -e '.terminal_connected == true' >/dev/null 2>&1 <<<"$health" && pass "terminal connected to broker (ping $(jq -r .terminal_ping_ms <<<"$health") ms)" || fail "terminal not connected (lebprime-ctl health)"
   jq -e '.account_is_demo == true' >/dev/null 2>&1 <<<"$health" && pass "terminal is on a demo account" || fail "terminal is NOT on a demo account"
   jq -e '.expected_login_ok == true' >/dev/null 2>&1 <<<"$health" && pass "terminal on the expected login" || fail "terminal on an unexpected login"
+  jq -e '.armed == false' >/dev/null 2>&1 <<<"$health" && pass "gateway disarmed: new trades blocked until you resume" || warn "gateway ARMED: new demo trades allowed"
   amb=$(jq -r '.executions.ambiguous // 0' <<<"$health" 2>/dev/null)
   [[ "$amb" == "0" ]] && pass "no ambiguous executions" || fail "$amb ambiguous executions: reconcile (RUNBOOK)"
 else
@@ -90,7 +91,7 @@ else
 fi
 cs=/var/lib/lebprime/storage/control_state.json
 if [[ -f $cs ]]; then
-  jq -e '.execution_paused == true' >/dev/null <"$cs" && pass "execution paused" || warn "execution is NOT paused"
+  jq -e '.execution_paused == true' >/dev/null <"$cs" && pass "bot execution flag: paused" || warn "bot execution flag: not paused (the bot's heartbeat can overwrite it; the gateway arm switch is what blocks trades)"
 fi
 
 echo

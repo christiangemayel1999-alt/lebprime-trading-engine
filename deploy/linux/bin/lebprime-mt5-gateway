@@ -2,6 +2,6 @@
 # Start the MT5 gateway with Windows Python inside the same Wine prefix as the terminal.
 set -euo pipefail
 : "${WINEPREFIX:=/var/lib/lebprime-mt5/wine}"
-: "${LEBPRIME_WINE_PYTHON:=C:\Python312\python.exe}"
+: "${LEBPRIME_WINE_PYTHON:=C:/Python312/python.exe}"
 cd /opt/lebprime/app
 exec wine "$LEBPRIME_WINE_PYTHON" -m trading_bot.mt5_transport.gateway_server

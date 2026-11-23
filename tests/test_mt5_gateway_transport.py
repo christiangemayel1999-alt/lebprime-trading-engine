@@ -216,3 +216,14 @@ def test_symbol_allow_list_and_per_symbol_volume_caps(gateway_factory):
     assert client.order_send(dict(_buy(), symbol="USTEC", volume=1.5)) is None
     assert client.order_send(dict(_buy(), symbol="XAGUSD", volume=1.0)).retcode == 10009
     assert [r["symbol"] for r in fake.sent] == ["US30", "XAGUSD"]
+
+
+def test_arm_switch_blocks_new_risk_but_allows_closing(gateway_factory, tmp_path, monkeypatch):
+    arm = tmp_path / "armed"
+    monkeypatch.setenv("LEBPRIME_GATEWAY_ARM_FILE", str(arm))
+    client, fake, gateway, _srv = gateway_factory()
+    assert client.order_send(_buy()) is None and "not armed" in client.last_error()[1]
+    assert client.order_send(dict(_buy(), type=1, position=5)).retcode == 10009
+    arm.write_text("armed")
+    assert client.order_send(_buy()).retcode == 10009
+    assert len(fake.sent) == 2 and gateway.health()["armed"] is True

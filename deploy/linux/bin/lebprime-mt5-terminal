@@ -2,7 +2,7 @@
 # Start the MT5 terminal inside the dedicated Wine prefix (run by lebprime-mt5-terminal.service).
 set -euo pipefail
 : "${WINEPREFIX:=/var/lib/lebprime-mt5/wine}"
-: "${LEBPRIME_MT5_TERMINAL_PATH:=C:\Program Files\MetaTrader 5\terminal64.exe}"
+: "${LEBPRIME_MT5_TERMINAL_PATH:=C:/Program Files/MetaTrader 5/terminal64.exe}"
 unix_path="$(WINEPREFIX="$WINEPREFIX" winepath -u "$LEBPRIME_MT5_TERMINAL_PATH")"
 if [[ ! -f "$unix_path" ]]; then
   echo "MT5 terminal not found at $LEBPRIME_MT5_TERMINAL_PATH ($unix_path)" >&2

@@ -109,7 +109,7 @@ install_code() {  # $1 = source tree
   for d in storage reports backtests LebPrime_Results; do ln -sfn "/var/lib/lebprime/$d" "$APP/$d"; done
   ln -sfn /var/log/lebprime "$APP/logs"
   "$VENV/bin/python" -m compileall -q "$APP" >/dev/null || true
-  for unit in "$1"/deploy/linux/systemd/*.service "$1"/deploy/linux/systemd/*.timer "$1"/deploy/linux/systemd/*.target; do
+  for unit in "$1"/deploy/linux/systemd/*.service "$1"/deploy/linux/systemd/*.timer "$1"/deploy/linux/systemd/*.target "$1"/deploy/linux/systemd/*.slice; do
     cmp -s "$unit" "/etc/systemd/system/$(basename "$unit")" || install -m 644 "$unit" /etc/systemd/system/
   done
   systemctl daemon-reload
@@ -125,7 +125,10 @@ if [[ "${config_apply:-0}" == "1" ]]; then
   "$VENV/bin/python" - "$new_cfg" "$live_cfg" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1])); c.setdefault("mt5", {})["terminal_path"] = None
-json.dump(c, open(sys.argv[2], "w"), indent=4)
+import os
+tmp = sys.argv[2] + ".deploy-tmp"
+json.dump(c, open(tmp, "w"), indent=4)
+os.replace(tmp, sys.argv[2])
 PY
   chown lebprime:lebprime "$live_cfg"; chmod 640 "$live_cfg"
   cp "$new_cfg" "$base_cfg"

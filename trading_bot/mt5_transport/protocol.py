@@ -81,11 +81,13 @@ def encode_value(value: Any) -> Any:
         }
     if dtype is not None and hasattr(value, "item") and getattr(value, "shape", None) == ():
         return encode_value(value.item())
-    if isinstance(value, tuple) and hasattr(value, "_fields"):
+    if isinstance(value, tuple) and (hasattr(value, "_fields") or hasattr(value, "_asdict")):
+        # MetaTrader5 returns struct-sequence records that have _asdict() but not always _fields.
+        mapping = value._asdict() if hasattr(value, "_asdict") else dict(zip(value._fields, value))
         return {
             "__record__": type(value).__name__,
-            "fields": list(value._fields),
-            "values": [encode_value(item) for item in value],
+            "fields": list(mapping.keys()),
+            "values": [encode_value(item) for item in mapping.values()],
         }
     if isinstance(value, dict):
         return {str(key): encode_value(item) for key, item in value.items()}

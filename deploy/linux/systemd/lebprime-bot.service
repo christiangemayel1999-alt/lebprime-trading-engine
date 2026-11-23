@@ -7,6 +7,8 @@ StartLimitIntervalSec=900
 StartLimitBurst=8
 
 [Service]
+# Wins every CPU contest against research jobs (lebprime-research.slice has CPUWeight 20).
+CPUWeight=1000
 Type=simple
 User=lebprime
 Group=lebprime

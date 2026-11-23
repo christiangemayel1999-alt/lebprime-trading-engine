@@ -14,6 +14,17 @@ sudo lebprime-ctl logs            # follow bot + gateway logs (Ctrl+C to stop)
 If anything about open positions looks wrong, pause execution from the dashboard first, then investigate.
 Pausing is always safe; resuming is a decision.
 
+## Pausing and resuming trading (the arm switch)
+
+New trades need the gateway to be **armed**. It is disarmed after every reboot, so trading never resumes by itself.
+- **Resume:** press Resume in the dashboard (or `/resume` on Telegram). Within a minute the watchdog arms the gateway
+  and sends a Telegram message. By hand: `sudo lebprime-ctl arm`.
+- **Pause:** press Pause or the kill switch in the dashboard. The watchdog disarms the gateway within a minute.
+  By hand, instantly: `sudo lebprime-ctl disarm`.
+- Disarmed still lets stop-loss/take-profit changes, cancels and closes through, so open positions stay managed.
+- Why the gateway and not just the dashboard flag: the bot's heartbeat can write its own in-memory pause value over
+  a Pause you just pressed (a live-bot bug, reported separately). The gateway follows your last command instead.
+
 ## Golden rules
 
 1. One machine trades the account. Never run the Windows bot and the VPS bot at the same time on one account.
@@ -71,6 +82,37 @@ characters" means the credentials in `/etc/lebprime/lebprime.env` are missing or
 ### Disk almost full
 `sudo du -xh /var/lib /var/log | sort -h | tail -20`. Usual suspects: `storage/indicator_datasets`,
 old reports, journald (capped at 1 GB). Never delete `executions.jsonl` or `bot.db`.
+
+## Broker server list
+
+A freshly installed terminal only knows MetaQuotes' own servers. For OneRoyal it needs OneRoyal's `servers.dat`
+(copied from the laptop's `%APPDATA%\MetaQuotes\Terminal\<id>\config\servers.dat`) in
+`/var/lib/lebprime-mt5/wine/drive_c/Program Files/MetaTrader 5/Config/`. Stop the terminal, copy it, start it again;
+the gateway then logs in with the account in `/etc/lebprime/gateway.env`.
+
+## Research and backtests on the VPS
+
+Run any research command inside the capped sandbox (max 3 cores, 6 GB, lowest priority; MT5 and the bot always win):
+```bash
+sudo lebprime-research python scripts/phase4_search.py --help
+sudo lebprime-research --detach python scripts/phase4_search.py ...   # keeps running after you log out
+```
+The dashboard's Indicator Lab jobs run in the same sandbox (lebprime-worker.service).
+
+## Auto-deploy from GitHub
+
+Every new commit on `main` is deployed within about 2 minutes: the server pulls it with a read-only deploy key,
+runs the import check and gateway tests in a staging copy, installs it, restarts the dashboard, worker and bot,
+and rolls back if the bot does not stay up for 75 seconds. You get a Telegram message either way.
+`sudo lebprime-autodeploy status` shows what is deployed. A commit missing the Linux deployment code is refused.
+The live `config.json` is only replaced from git if nobody changed it on the server since the last deploy.
+
+## Dashboard login (password + 2FA)
+
+https://bot.lebprimesignals.com sends you to a login page: username, password, and the 6-digit code from your
+authenticator app. 5 wrong tries from one address lock it for 15 minutes; repeated failures get the address banned
+by fail2ban for 6 hours. Over SSH: `sudo lebprime-auth show` (first time), `sudo lebprime-auth set-password`,
+`sudo lebprime-auth reset-2fa` (new phone), `sudo fail2ban-client set lebprime-auth unbanip YOUR_IP` (if locked out).
 
 ## Reboots and updates
 

@@ -28,7 +28,7 @@ logs/
 *.sqlite
 *.sqlite3
 
-storage/
+/storage/
 state.json
 
 backtests/

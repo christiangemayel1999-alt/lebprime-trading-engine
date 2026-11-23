@@ -1,3 +1,4 @@
 # Windows Python 3.12 inside Wine (MT5 gateway only). Same MetaTrader5 build as the laptop.
+# numpy 2.x calls ucrtbase functions (crealf) that Wine 10 does not implement, so the gateway stays on 1.26.
 MetaTrader5==5.0.5735
-numpy==2.4.4
+numpy==1.26.4

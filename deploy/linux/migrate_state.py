@@ -176,6 +176,20 @@ def scrub_control_state(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file + rename. Needed in the sticky app folder, where Linux
+    (fs.protected_regular) refuses even root an O_CREAT open of a file another user owns."""
+    tmp = path.with_name(f".{path.name}.migrate-tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    tmp = dst.with_name(f".{dst.name}.migrate-tmp")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
 def do_import(bundle: Path, dry_run: bool, owner: str, force: bool) -> int:
     manifest = json.loads((bundle / "MANIFEST.json").read_text(encoding="utf-8"))
     source_root = manifest["source"]
@@ -206,7 +220,7 @@ def do_import(bundle: Path, dry_run: bool, owner: str, force: bool) -> int:
             print(f"[dry-run] {src.relative_to(bundle)} -> {dst}")
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        _atomic_copy(src, dst)
 
     # Path map + state scrub on the placed copies.
     changes: list[str] = []
@@ -232,16 +246,15 @@ def do_import(bundle: Path, dry_run: bool, owner: str, force: bool) -> int:
     if dry_run:
         return 0
 
-    text = json.dumps(config, indent=4)
-    config_path.write_text(text, encoding="utf-8")
+    _atomic_write(config_path, json.dumps(config, indent=4))
     if shadow.exists():
         shadow_cfg = rewrite_paths(json.loads(shadow.read_text(encoding="utf-8")), source_root, [], "shadow")
         if (shadow_cfg.get("mt5") or {}).get("terminal_path"):
             shadow_cfg["mt5"]["terminal_path"] = None
-        shadow.write_text(json.dumps(shadow_cfg, indent=4), encoding="utf-8")
+        _atomic_write(shadow, json.dumps(shadow_cfg, indent=4))
     if control_src.exists():
         state = scrub_control_state(json.loads(control_src.read_text(encoding="utf-8")))
-        (storage / "control_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+        _atomic_write(storage / "control_state.json", json.dumps(state, indent=2))
     for name in RUNTIME_FILES_TO_DROP:
         (storage / name).unlink(missing_ok=True)
     for lock in storage.rglob("*.lock"):

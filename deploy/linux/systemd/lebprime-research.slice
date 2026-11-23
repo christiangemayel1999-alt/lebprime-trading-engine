@@ -1,0 +1,13 @@
+[Unit]
+Description=LebPrime research/backtests sandbox (never starves the live bot)
+Before=slices.target
+
+[Slice]
+# 6 vCPU server: research may use at most 3 cores and 6 GB, and loses every CPU contest
+# against the terminal, gateway and bot (CPUWeight 20 vs 1000).
+CPUQuota=300%
+CPUWeight=20
+MemoryMax=6G
+MemorySwapMax=0
+IOWeight=10
+TasksMax=512

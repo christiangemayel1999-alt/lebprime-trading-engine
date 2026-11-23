@@ -5,6 +5,8 @@ After=lebprime-mt5-terminal.service
 PartOf=lebprime.target
 
 [Service]
+# Wins every CPU contest against research jobs (lebprime-research.slice has CPUWeight 20).
+CPUWeight=1000
 User=lebprime-mt5
 Group=lebprime-mt5
 SupplementaryGroups=lebprime-gw

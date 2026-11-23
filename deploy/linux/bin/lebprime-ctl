@@ -4,6 +4,7 @@
 #   lebprime-ctl health                 gateway health as JSON
 #   lebprime-ctl reconcile              broker positions/orders (this magic number) + execution journal problems
 #   lebprime-ctl gate disabled|reduce_only|enabled   set the gateway trading gate and restart the gateway
+#   lebprime-ctl arm | disarm           allow / block new trades at the gateway until the next reboot
 #   lebprime-ctl logs [unit]            follow logs (default: bot + gateway)
 #   lebprime-ctl restart-mt5            restart terminal (gateway follows)
 set -euo pipefail
@@ -57,9 +58,18 @@ PYEOF
     systemctl restart lebprime-mt5-gateway
     echo "gateway trading gate is now $mode"
     ;;
+  arm)
+    install -d -o root -g lebprime-mt5 -m 750 /run/lebprime-gateway
+    date -u +%FT%TZ > /run/lebprime-gateway/armed; chmod 640 /run/lebprime-gateway/armed; chgrp lebprime-mt5 /run/lebprime-gateway/armed
+    echo "gateway armed: new trades allowed (demo-only and the trading gate still apply)"
+    ;;
+  disarm)
+    rm -f /run/lebprime-gateway/armed
+    echo "gateway disarmed: only stop changes, cancels and closes go through"
+    ;;
   logs)
     if [[ -n "${2:-}" ]]; then journalctl -fu "$2"; else journalctl -fu lebprime-bot -u lebprime-mt5-gateway; fi
     ;;
   restart-mt5) systemctl restart lebprime-mt5-terminal ;;
-  *) sed -n '2,9p' "$0"; exit 2 ;;
+  *) sed -n '2,10p' "$0"; exit 2 ;;
 esac

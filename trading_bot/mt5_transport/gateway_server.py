@@ -56,7 +56,7 @@ class GatewayConfig:
     def __init__(self) -> None:
         self.bind = _env("LEBPRIME_MT5_GATEWAY_BIND", protocol.DEFAULT_HOST)
         self.port = int(_env("LEBPRIME_MT5_GATEWAY_PORT", str(protocol.DEFAULT_PORT)))
-        self.key_file = _env("LEBPRIME_MT5_GATEWAY_KEY_FILE", r"Z:\etc\lebprime\gateway.key")
+        self.key_file = _env("LEBPRIME_MT5_GATEWAY_KEY_FILE", "Z:/etc/lebprime/gateway.key")
         self.terminal_path = _env("LEBPRIME_MT5_TERMINAL_PATH") or None
         self.expected_login = int(_env("LEBPRIME_MT5_EXPECTED_LOGIN", "0") or 0) or None
         self.expected_server = _env("LEBPRIME_MT5_EXPECTED_SERVER") or None
@@ -70,7 +70,11 @@ class GatewayConfig:
         self.symbols = {s.strip() for s in _env("LEBPRIME_GATEWAY_SYMBOLS", "XAUUSD").split(",") if s.strip()}
         # "1.0" caps every symbol; "XAUUSD=1,XAGUSD=1,US30=5,USTEC=5,*=1" caps per symbol ("*" = default).
         self.max_volume, self.max_volume_by_symbol = _parse_volume_caps(_env("LEBPRIME_GATEWAY_MAX_VOLUME", "1.0"))
-        self.journal_path = Path(_env("LEBPRIME_GATEWAY_JOURNAL", r"Z:\var\lib\lebprime\gateway\executions.jsonl"))
+        # Optional reboot-safe arm switch: when set, new risk needs this file to exist. It lives on a tmpfs
+        # (/run), so every reboot disarms the gateway until an operator resumes (lebprime-ctl arm, or a
+        # dashboard Resume picked up by the watchdog). Risk-reducing requests are always allowed.
+        self.arm_file = Path(_env("LEBPRIME_GATEWAY_ARM_FILE")) if _env("LEBPRIME_GATEWAY_ARM_FILE") else None
+        self.journal_path = Path(_env("LEBPRIME_GATEWAY_JOURNAL", "Z:/var/lib/lebprime-mt5/gateway/executions.jsonl"))
         if self.bind not in {"127.0.0.1", "::1", "localhost"} and _env("LEBPRIME_GATEWAY_ALLOW_NON_LOOPBACK") != "1":
             raise SystemExit("Refusing to bind the MT5 gateway to a non-loopback address")
 
@@ -362,6 +366,9 @@ class Gateway:
             raise Rejected(protocol.ERR_REQUEST_REJECTED, "login needs an account number")
         return bool(mt5.login(login, **session))
 
+    def armed(self) -> bool:
+        return self.config.arm_file is None or self.config.arm_file.exists()
+
     def health(self) -> dict[str, Any]:
         terminal = mt5.terminal_info()
         account = mt5.account_info()
@@ -381,6 +388,7 @@ class Gateway:
             "account_is_demo": getattr(account, "trade_mode", None) == mt5.ACCOUNT_TRADE_MODE_DEMO,
             "expected_login_ok": (self.config.expected_login is None) or (getattr(account, "login", None) == self.config.expected_login),
             "trading_gate": self.config.trading,
+            "armed": self.armed(),
             "demo_only": self.config.demo_only,
             "ticks": ticks,
             "executions": self.journal.counts(),
@@ -397,6 +405,8 @@ class Gateway:
             raise Rejected(protocol.ERR_TRADING_DISABLED, "trading is disabled at the gateway (LEBPRIME_GATEWAY_TRADING=disabled)")
         if self.config.trading == "reduce_only" and not (action in reduce_only_actions or closes_position):
             raise Rejected(protocol.ERR_TRADING_DISABLED, "gateway is reduce-only: only stop changes, cancels and closes are allowed")
+        if not self.armed() and not (action in reduce_only_actions or closes_position):
+            raise Rejected(protocol.ERR_TRADING_DISABLED, "gateway is not armed (paused since boot or by the operator): only stop changes, cancels and closes are allowed")
         symbol = request.get("symbol")
         if symbol is not None and symbol not in self.config.symbols:
             raise Rejected(protocol.ERR_REQUEST_REJECTED, f"symbol {symbol!r} is not allow-listed at the gateway")

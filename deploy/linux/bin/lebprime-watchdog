@@ -191,6 +191,40 @@ def check_bot_heartbeat(state: dict[str, Any]) -> None:
         restart(state, "lebprime-bot.service", f"bot heartbeat is {int(age)}s old")
 
 
+ARM_FILE = Path(os.environ.get("LEBPRIME_GATEWAY_ARM_PATH", "/run/lebprime-gateway/armed"))
+ARM_COMMANDS = {"resume_execution"}
+DISARM_COMMANDS = {"pause_execution", "kill_switch_on"}
+
+
+def follow_dashboard_commands(state: dict[str, Any]) -> None:
+    """Mirror the dashboard/Telegram Pause, Resume and kill switch onto the gateway arm switch.
+
+    The bot's own pause flag can be overwritten by its heartbeat, so the gateway enforces the operator's
+    last command instead. Only a Resume given after the latest boot arms the gateway.
+    """
+    try:
+        control = json.loads((APP / "storage" / "control_state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    command = str(control.get("last_command") or "")
+    try:
+        when = datetime.fromisoformat(str(control.get("last_command_at")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return
+    boot_time = time.time() - float(Path("/proc/uptime").read_text().split()[0])
+    armed = ARM_FILE.exists()
+    armed_at = ARM_FILE.stat().st_mtime if armed else 0.0
+    if command in ARM_COMMANDS and not armed and when > boot_time and not control.get("kill_switch"):
+        ARM_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ARM_FILE.write_text(datetime.now(timezone.utc).isoformat() + " watchdog: dashboard resume", encoding="utf-8")
+        shutil.chown(ARM_FILE, group="lebprime-mt5")
+        os.chmod(ARM_FILE, 0o640)
+        alert(state, "armed", f"execution resumed by {control.get('last_command_by')}: gateway armed for new trades")
+    elif armed and (control.get("kill_switch") or (command in DISARM_COMMANDS and when > armed_at)):
+        ARM_FILE.unlink(missing_ok=True)
+        alert(state, "disarmed", f"{command or 'kill switch'} by {control.get('last_command_by')}: gateway disarmed, only closes and stop changes go through")
+
+
 def check_host(state: dict[str, Any]) -> None:
     usage = shutil.disk_usage("/var/lib")
     if usage.free / usage.total < 0.10:
@@ -202,7 +236,7 @@ def check_host(state: dict[str, Any]) -> None:
 def main() -> int:
     state = load_state()
     now = datetime.now(timezone.utc)
-    for check in (check_services, check_host, check_bot_heartbeat):
+    for check in (follow_dashboard_commands, check_services, check_host, check_bot_heartbeat):
         try:
             check(state)
         except Exception as exc:  # noqa: BLE001

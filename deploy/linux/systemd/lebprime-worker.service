@@ -12,10 +12,8 @@ WorkingDirectory=/opt/lebprime/app
 ExecStart=/opt/lebprime/venv/bin/python /opt/lebprime/app/scripts/run_worker.py
 Restart=always
 RestartSec=30
-# Leave headroom for MT5 + bot: at most 2 of 4 vCPUs and 4 GB, lowest priority.
-CPUQuota=200%
-MemoryMax=4G
-MemorySwapMax=0
+# Runs inside the capped research sandbox (lebprime-research.slice): it can never starve MT5 or the bot.
+Slice=lebprime-research.slice
 Nice=15
 IOSchedulingClass=idle
 NoNewPrivileges=yes
