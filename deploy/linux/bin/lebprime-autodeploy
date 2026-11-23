@@ -64,12 +64,13 @@ done
 if ! cmp -s "$stage/deploy/linux/requirements-linux.txt" "$APP/deploy/linux/requirements-linux.txt"; then
   "$VENV/bin/pip" install --disable-pip-version-check -q -r "$stage/deploy/linux/requirements-linux.txt" || reject "pip install failed"
 fi
-(cd "$stage" && sudo -u lebprime env LEBPRIME_MT5_TRANSPORT=auto PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -c \
-  "import mt5_connector, risk_manager, trading_bot.mt5_transport.client, services.lebprime_live, dashboard.app" ) \
-  || reject "the bot's modules do not import"
+# Checks run as the deploy user: it owns the staging copy and has no access to secrets or live data.
+(cd "$stage" && sudo -u lebprime-deploy env HOME="$STATE" LEBPRIME_MT5_TRANSPORT=auto PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -c \
+  "import main, mt5_connector, risk_manager, trading_bot.mt5_transport.client, services.lebprime_live, dashboard.routes" \
+  >"$STATE/last-import.log" 2>&1) || reject "the bot's modules do not import (see $STATE/last-import.log)"
 if [[ -f "$stage/tests/test_mt5_gateway_transport.py" ]]; then
-  (cd "$stage" && sudo -u lebprime env PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -m pytest -q -p no:cacheprovider \
-    tests/test_mt5_gateway_transport.py >/tmp/lebprime-deploy-tests.log 2>&1) || reject "gateway contract tests failed"
+  (cd "$stage" && sudo -u lebprime-deploy env HOME="$STATE" PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -m pytest -q -p no:cacheprovider \
+    tests/test_mt5_gateway_transport.py >"$STATE/last-tests.log" 2>&1) || reject "gateway contract tests failed (see $STATE/last-tests.log)"
 fi
 
 # --- 2. config.json: apply git changes only if nobody edited the live file since the last deploy.

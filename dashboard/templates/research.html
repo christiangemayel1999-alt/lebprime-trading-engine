@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LebPrime Research</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1c2230;--muted:#5f6878;--line:#e2e5ea;--accent:#2563eb;--good:#15803d;--bad:#b42318;--soft:#eef2ff}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#171b23;--fg:#e6e9ef;--muted:#9aa3b2;--line:#2a303b;--accent:#6b9bff;--good:#4ade80;--bad:#ff8a7a;--soft:#1e2533}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+header h1{font-size:17px;margin:0}header a{color:var(--accent);text-decoration:none;font-size:13px}
+main{display:grid;grid-template-columns:minmax(240px,320px) 1fr;gap:16px;padding:16px;max-width:1500px;margin:0 auto}
+@media (max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.card h2{font-size:14px;margin:0 0 10px}.muted{color:var(--muted);font-size:12px}
+input[type=search]{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;margin-bottom:8px}
+.files{max-height:72vh;overflow:auto}.file{padding:7px 8px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:8px}
+.file:hover,.file.active{background:var(--soft)}.file span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag{font-size:11px;padding:1px 6px;border-radius:9px;background:var(--soft);color:var(--accent);flex:none}
+.tablewrap{overflow:auto;max-height:46vh}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{position:sticky;top:0;background:var(--card);cursor:pointer;font-weight:600}
+td:first-child,th:first-child{text-align:left;max-width:420px;overflow:hidden;text-overflow:ellipsis}
+tr.row:hover{background:var(--soft);cursor:pointer}tr.sel{background:var(--soft)}
+.pos{color:var(--good)}.neg{color:var(--bad)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:10px 0}
+.kpi{border:1px solid var(--line);border-radius:8px;padding:8px 10px}.kpi b{display:block;font-size:18px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media (max-width:900px){.grid2{grid-template-columns:1fr}}
+svg{width:100%;height:220px;display:block}pre{white-space:pre-wrap;max-height:60vh;overflow:auto;font-size:12px}
+.empty{color:var(--muted);padding:24px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>Research results <span class="muted">read-only</span></h1>
+  <a href="/">← Dashboard</a>
+</header>
+<main>
+  <section class="card">
+    <h2>Result files</h2>
+    <input type="search" id="filter" placeholder="Filter files…">
+    <div class="muted" style="margin-bottom:6px">“trades” files get full statistics; others show a preview.</div>
+    <div class="files" id="files"><div class="empty">Loading…</div></div>
+  </section>
+  <section style="display:grid;gap:16px;min-width:0">
+    <div class="card" id="overview"><div class="empty">Pick a file on the left.</div></div>
+    <div class="card" id="detail" hidden></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : Number(v).toFixed(d);
+const cls = (v) => v > 0 ? "pos" : (v < 0 ? "neg" : "");
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let files = [], current = null, groups = [], sortKey = "net_r", sortDir = -1;
+
+async function api(url) {
+  const res = await fetch(url, {credentials: "same-origin"});
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  return res.json();
+}
+function renderFiles() {
+  const q = $("filter").value.toLowerCase();
+  const shown = files.filter((f) => f.path.toLowerCase().includes(q));
+  $("files").innerHTML = shown.length ? shown.map((f) =>
+    `<div class="file${current === f.path ? " active" : ""}" data-path="${esc(f.path)}" title="${esc(f.path)}">
+       <span>${esc(f.path)}</span><span class="tag">${esc(f.kind)}</span></div>`).join("") : '<div class="empty">No files.</div>';
+  for (const el of $("files").querySelectorAll(".file")) el.onclick = () => openFile(el.dataset.path);
+}
+async function openFile(path) {
+  current = path; renderFiles(); $("detail").hidden = true;
+  const f = files.find((x) => x.path === path);
+  $("overview").innerHTML = '<div class="empty">Analysing…</div>';
+  try {
+    if (f && f.kind === "trades") {
+      const data = await api(`/api/research/trades?path=${encodeURIComponent(path)}`);
+      groups = data.groups; renderGroups(data);
+      if (groups.length) openGroup(groups[0].group);
+    } else {
+      const data = await api(`/api/research/preview?path=${encodeURIComponent(path)}`);
+      $("overview").innerHTML = `<h2>${esc(path)}</h2>` + (data.type === "table"
+        ? `<div class="tablewrap"><table><tr>${data.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>${data.rows.map((r) => `<tr>${r.map((v) => `<td>${esc(v ?? "")}</td>`).join("")}</tr>`).join("")}</table></div><div class="muted">First ${data.rows.length} rows.</div>`
+        : `<pre>${esc(data.text)}</pre>${data.truncated ? '<div class="muted">Truncated.</div>' : ""}`);
+    }
+  } catch (e) { $("overview").innerHTML = `<div class="empty">Could not read this file: ${esc(e.message)}</div>`; }
+}
+function renderGroups(data) {
+  const cols = [["group","Setting"],["trades","Trades"],["win_rate","Win %"],["net_r","Net R"],["avg_r","Avg R"],["max_dd_r","Max DD R"],["profitable_years","Green yrs"],["buys","Buys R"],["sells","Sells R"]];
+  const val = (g, k) => (k === "buys" || k === "sells") ? g[k].net_r : g[k];
+  const rows = [...groups].sort((a, b) => { const x = val(a, sortKey), y = val(b, sortKey); return (typeof x === "string" ? x.localeCompare(y) : (x ?? -1e18) - (y ?? -1e18)) * sortDir; });
+  $("overview").innerHTML = `<h2>${esc(data.path)}</h2>
+    <div class="muted">${data.total_groups} setting(s)${data.total_groups > groups.length ? `, best ${groups.length} by net R shown` : ""}. Click a column to sort, a row for details.</div>
+    <div class="tablewrap"><table><tr>${cols.map(([k, l]) => `<th data-k="${k}">${l}${sortKey === k ? (sortDir < 0 ? " ▾" : " ▴") : ""}</th>`).join("")}</tr>
+    ${rows.map((g) => `<tr class="row" data-g="${esc(g.group)}"><td title="${esc(g.group)}">${esc(g.group)}</td><td>${g.trades}</td><td>${fmt(g.win_rate,1)}</td>
+      <td class="${cls(g.net_r)}">${fmt(g.net_r)}</td><td>${fmt(g.avg_r,3)}</td><td>${fmt(g.max_dd_r)}</td><td>${g.profitable_years}</td>
+      <td class="${cls(g.buys.net_r)}">${fmt(g.buys.net_r)}</td><td class="${cls(g.sells.net_r)}">${fmt(g.sells.net_r)}</td></tr>`).join("")}</table></div>`;
+  data.groups = groups;
+  for (const th of $("overview").querySelectorAll("th")) th.onclick = () => { const k = th.dataset.k; sortDir = sortKey === k ? -sortDir : -1; sortKey = k; renderGroups(data); };
+  for (const tr of $("overview").querySelectorAll("tr.row")) tr.onclick = () => openGroup(tr.dataset.g);
+}
+function equitySvg(points) {
+  if (!points.length) return '<div class="empty">No trades.</div>';
+  const W = 800, H = 220, P = 28, min = Math.min(0, ...points), max = Math.max(0, ...points), span = (max - min) || 1;
+  const x = (i) => P + (i / Math.max(1, points.length - 1)) * (W - 2 * P), y = (v) => H - P - ((v - min) / span) * (H - 2 * P);
+  const d = points.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const last = points[points.length - 1];
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Equity curve in R">
+    <line x1="${P}" x2="${W - P}" y1="${y(0)}" y2="${y(0)}" stroke="currentColor" stroke-opacity=".25" stroke-dasharray="4 4"/>
+    <path d="${d}" fill="none" stroke="${last >= 0 ? "var(--good)" : "var(--bad)"}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <text x="${P}" y="14" fill="currentColor" font-size="12" opacity=".7">max ${fmt(max)}R · min ${fmt(min)}R · end ${fmt(last)}R</text></svg>`;
+}
+function sideRow(label, s) { return `<tr><td>${label}</td><td>${s.trades}</td><td>${fmt(s.win_rate,1)}</td><td class="${cls(s.net_r)}">${fmt(s.net_r)}</td><td>${fmt(s.avg_r,3)}</td><td>${fmt(s.max_dd_r)}</td></tr>`; }
+async function openGroup(group) {
+  for (const tr of $("overview").querySelectorAll("tr.row")) tr.classList.toggle("sel", tr.dataset.g === group);
+  const box = $("detail"); box.hidden = false; box.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const g = await api(`/api/research/trades/detail?path=${encodeURIComponent(current)}&group=${encodeURIComponent(group)}`);
+    box.innerHTML = `<h2>${esc(g.group)}</h2>
+      <div class="kpis">
+        <div class="kpi"><span class="muted">Trades</span><b>${g.trades}</b></div>
+        <div class="kpi"><span class="muted">Win rate</span><b>${fmt(g.win_rate,1)}%</b></div>
+        <div class="kpi"><span class="muted">Net R</span><b class="${cls(g.net_r)}">${fmt(g.net_r)}</b></div>
+        <div class="kpi"><span class="muted">Avg R / trade</span><b>${fmt(g.avg_r,3)}</b></div>
+        <div class="kpi"><span class="muted">Max drawdown</span><b>${fmt(g.max_dd_r)}R</b></div>
+        <div class="kpi"><span class="muted">Profitable years</span><b>${g.profitable_years}/${g.years.length}</b></div>
+      </div>
+      <h2>Equity curve (cumulative R)</h2>${equitySvg(g.equity)}
+      <div class="grid2">
+        <div><h2>Year by year</h2><div class="tablewrap"><table><tr><th>Year</th><th>Trades</th><th>Win %</th><th>Net R</th><th>Avg R</th><th>Max DD R</th></tr>
+          ${g.years.map((y) => `<tr><td>${y.year}</td><td>${y.trades}</td><td>${fmt(y.win_rate,1)}</td><td class="${cls(y.net_r)}">${fmt(y.net_r)}</td><td>${fmt(y.avg_r,3)}</td><td>${fmt(y.max_dd_r)}</td></tr>`).join("") || '<tr><td colspan="6" class="muted">No year information in this file.</td></tr>'}</table></div></div>
+        <div><h2>Buys vs sells</h2><table><tr><th>Side</th><th>Trades</th><th>Win %</th><th>Net R</th><th>Avg R</th><th>Max DD R</th></tr>${sideRow("Buys", g.buys)}${sideRow("Sells", g.sells)}</table></div>
+      </div>`;
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+$("filter").oninput = renderFiles;
+api("/api/research/files").then((d) => { files = d.files; renderFiles(); }).catch((e) => { $("files").innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+</script>
+</body>
+</html>

@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dashboard.auth import DashboardAuth  # noqa: E402
+from dashboard.research import create_research_router  # noqa: E402
 from dashboard.routes import create_router  # noqa: E402
 from dashboard.services import DashboardDataService  # noqa: E402
 from services.audit_service import AuditService  # noqa: E402
@@ -86,6 +87,9 @@ def create_app() -> FastAPI:
             templates,
         )
     )
+
+    # Read-only Research page (backtest results); every route needs the dashboard login.
+    app.include_router(create_research_router(PROJECT_ROOT, dashboard_auth.dependency, templates))
 
     @app.on_event("startup")
     async def startup_remote_control() -> None:
