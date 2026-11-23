@@ -31,6 +31,16 @@ def is_forex_symbol(ticker: str) -> bool:
     return len(letters) >= 6 and letters[:3] in FOREX_CURRENCIES and letters[3:6] in FOREX_CURRENCIES
 
 
+FOMC_DATES = {
+    "2020-01-29", "2020-03-03", "2020-03-15", "2020-04-29", "2020-06-10", "2020-07-29", "2020-09-16", "2020-11-05", "2020-12-16",
+    "2021-01-27", "2021-03-17", "2021-04-28", "2021-06-16", "2021-07-28", "2021-09-22", "2021-11-03", "2021-12-15",
+    "2022-01-26", "2022-03-16", "2022-05-04", "2022-06-15", "2022-07-27", "2022-09-21", "2022-11-02", "2022-12-14",
+    "2023-02-01", "2023-03-22", "2023-05-03", "2023-06-14", "2023-07-26", "2023-09-20", "2023-11-01", "2023-12-13",
+    "2024-01-31", "2024-03-20", "2024-05-01", "2024-06-12", "2024-07-31", "2024-09-18", "2024-11-07", "2024-12-18",
+    "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10",
+    "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17", "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+}
+
 TRADER_ENTRIES = {"Close confirmation", "Sweep reclaim", "Rejection candle", "Break of structure"}
 
 
@@ -258,10 +268,25 @@ class LebPrimeEngine(IndicatorEngine):
     def _entry_stop_target(self, demand: bool, top: float, bottom: float, source_bar_index: int) -> tuple[float, float, float, float, dict]:
         entry = top if demand else bottom
         stop, swing = self._structural_stop(demand, top, bottom, source_bar_index)
+        if self._live_mode():
+            mode = str(self.parameters.get("sl_mode", "Structural swing"))
+            atr = self._atr(int(self.parameters["atr_len"]))
+            if mode == "ATR stop" and atr:
+                k = float(self.parameters.get("sl_atr_mult", 1.0) or 1.0)
+                stop = entry - k * float(atr) if demand else entry + k * float(atr)
+            elif mode == "Zone edge + ATR buffer" and atr:
+                k = float(self.parameters.get("zone_stop_buffer_atr", 0.25) or 0.0)
+                stop = bottom - k * float(atr) if demand else top + k * float(atr)
         risk = abs(entry - stop)
         tp1_r, tp2_r = self._tp_multiples()
         tp1 = entry + risk * tp1_r if demand else entry - risk * tp1_r
         tp2 = entry + risk * tp2_r if demand else entry - risk * tp2_r
+        if self._live_mode() and str(self.parameters.get("tp_mode", "Fixed R")) == "Opposing zone" and risk > 0:
+            # TP2 at the near edge of the nearest live opposing zone, if it is at least tp_min_r away.
+            gaps = [(float(z.zone_bottom) - entry) if demand else (entry - float(z.zone_top)) for z in self._zones if z.terminal_state is None and z.side == ("SUPPLY" if demand else "DEMAND")]
+            gaps = [g for g in gaps if g > 0]
+            if gaps and min(gaps) / risk >= float(self.parameters.get("tp_min_r", 1.5) or 0.0):
+                tp2 = entry + min(gaps) if demand else entry - min(gaps)
         return entry, stop, tp1, tp2, swing
 
     @staticmethod
@@ -862,6 +887,45 @@ class LebPrimeEngine(IndicatorEngine):
             return TP1_R, TP2_R
         return float(self.parameters.get("tp1_r", TP1_R)), float(self.parameters.get("tp2_r", TP2_R))
 
+    @staticmethod
+    def _nfp_fomc_blackout(ts: str, minutes: int) -> bool:
+        """True within +-minutes of NFP (first Friday, 08:30 New York) or an FOMC decision (14:00 New York, Wednesdays listed below)."""
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        try:
+            t = datetime.fromisoformat(ts)
+        except ValueError:
+            return False
+        ny = t.astimezone(ZoneInfo("America/New_York"))
+        events = []
+        if ny.weekday() == 4 and ny.day <= 7:
+            events.append(ny.replace(hour=8, minute=30, second=0, microsecond=0))
+        if ny.strftime("%Y-%m-%d") in FOMC_DATES:
+            events.append(ny.replace(hour=14, minute=0, second=0, microsecond=0))
+        return any(abs((ny - e).total_seconds()) <= minutes * 60 for e in events)
+
+    @staticmethod
+    def _near_rollover(ts: str, minutes: int) -> bool:
+        """Within +-minutes of the daily close / reopen at 17:00 New York (FX/CFD rollover)."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            ny = datetime.fromisoformat(ts).astimezone(ZoneInfo("America/New_York"))
+        except ValueError:
+            return False
+        m = ny.hour * 60 + ny.minute
+        return abs(m - 17 * 60) <= minutes
+
+    @staticmethod
+    def _friday_close(ts: str) -> bool:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            ny = datetime.fromisoformat(ts).astimezone(ZoneInfo("America/New_York"))
+        except ValueError:
+            return False
+        return ny.weekday() == 4 and (ny.hour * 60 + ny.minute) >= 16 * 60 + 30
+
     def _in_blocked_beirut_window(self, bar: Candle) -> bool:
         """Optional no-trade window 15:00-17:00 Beirut time (Asia/Beirut, so summer time is handled)."""
         if str(self.parameters.get("block_beirut_window", "Off")) != "15:00-17:00":
@@ -884,9 +948,10 @@ class LebPrimeEngine(IndicatorEngine):
         snap = self._features.snapshot()
         if bool(self.parameters.get("require_compact_base", False)) and context.get("base_mode") == "FALLBACK_IMMEDIATE":
             return "no_real_base"
+        htf_key = {"M5": "m5_trend", "M15": "m15_trend", "H1": "h1_trend", "H4": "h4_trend", "D1": "d1_trend"}.get(str(self.parameters.get("trend_tf", "H4")), "h4_trend")
         regime = str(self.parameters.get("regime_filter", "All"))
         if regime != "All":
-            h4 = snap.get("h4_trend")
+            h4 = snap.get(htf_key)
             if (regime == "Bullish only" and h4 != "UP") or (regime == "Bearish only" and h4 != "DOWN"):
                 return "regime_filter"
         side_rule = str(self.parameters.get("side_filter", "Both"))
@@ -921,6 +986,12 @@ class LebPrimeEngine(IndicatorEngine):
             gaps = [g for g in gaps if g > 0]
             if risk > 0 and gaps and min(gaps) / risk < min_room:
                 return "no_room_to_opposing_zone"
+        min_risk_atr = float(self.parameters.get("min_risk_atr", 0.0) or 0.0)
+        if min_risk_atr > 0.0:
+            entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
+            atr = snap.get("atr14")
+            if atr and abs(entry - stop) / float(atr) < min_risk_atr:
+                return "risk_too_narrow"
         max_risk_atr = float(self.parameters.get("max_risk_atr", 0.0) or 0.0)
         if max_risk_atr > 0.0:
             entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
@@ -929,8 +1000,42 @@ class LebPrimeEngine(IndicatorEngine):
                 return "risk_too_wide"
         if self._in_blocked_beirut_window(self._bars[-1]):
             return "blocked_time_window"
+        blocked = self.parameters.get("blocked_hours_utc") or ""
+        if blocked:
+            from datetime import datetime
+            try:
+                hr = datetime.fromisoformat(self._bars[-1].timestamp).hour
+            except ValueError:
+                hr = None
+            if hr is not None and str(hr) in [x.strip() for x in str(blocked).split(",")]:
+                return "blocked_hour"
+        blocked_days = self.parameters.get("blocked_weekdays") or ""
+        if blocked_days:
+            from datetime import datetime
+            try:
+                wd = datetime.fromisoformat(self._bars[-1].timestamp).weekday()
+            except ValueError:
+                wd = None
+            if wd is not None and str(wd) in [x.strip() for x in str(blocked_days).split(",")]:
+                return "blocked_weekday"
+        roll = int(self.parameters.get("rollover_blackout_min", 0) or 0)
+        if roll > 0 and self._near_rollover(self._bars[-1].timestamp, roll):
+            return "rollover_blackout"
+        news = int(self.parameters.get("news_blackout_min", 0) or 0)
+        if news > 0 and self._nfp_fomc_blackout(self._bars[-1].timestamp, news):
+            return "news_blackout"
         trend = str(self.parameters.get("trend_filter", "None"))
-        if trend == "With H4 trend":
+        if trend == "With chosen-TF trend":
+            if snap.get(htf_key) != ("UP" if demand else "DOWN"):
+                return "trend_filter"
+        elif trend == "With D1 trend":
+            d1 = snap.get("d1_trend")
+            if d1 != ("UP" if demand else "DOWN"):
+                return "trend_filter"
+        elif trend == "With H4 + D1 trend":
+            if snap.get("d1_trend") != ("UP" if demand else "DOWN") or snap.get("h4_trend") != ("UP" if demand else "DOWN"):
+                return "trend_filter"
+        elif trend == "With H4 trend":
             h4 = snap.get("h4_trend")
             if h4 != ("UP" if demand else "DOWN"):
                 return "trend_filter"
@@ -1125,6 +1230,14 @@ class LebPrimeEngine(IndicatorEngine):
         if zone.activated_bar_index is None:
             if bar.index <= int(zone.limit_created_bar_index):
                 return
+            if bool(self.parameters.get("close_friday", False)) and self._friday_close(bar.timestamp):
+                zone.terminal_state = "CANCELED"
+                zone.terminal_bar_index = bar.index
+                zone.terminal_time = bar.timestamp
+                zone.result_r = 0.0
+                zone.terminal_reason = "Pending order cancelled before the weekend"
+                self._emit(zone, bar, "CANCELED", reason=zone.terminal_reason)
+                return
             if bool(self.parameters.get("cancel_on_weekend", False)) and len(self._bars) > 1:
                 from datetime import datetime
                 try:
@@ -1236,6 +1349,9 @@ class LebPrimeEngine(IndicatorEngine):
 
         if bar.index <= int(zone.activated_bar_index):
             return
+        if bool(self.parameters.get("close_friday", False)) and self._friday_close(bar.timestamp):
+            self._finish_live(zone, bar, "TP1_FINAL" if zone.tp1_hit_bar_index is not None else "EARLY_EXIT", bar.close, bar.close, "Closed before the weekend")
+            return
         if zone.metadata.get("be_armed_after_bar") is not None and bar.index > int(zone.metadata["be_armed_after_bar"]):
             zone.metadata["be_armed"] = True
         self._update_excursions(zone, bar, demand)
@@ -1244,6 +1360,34 @@ class LebPrimeEngine(IndicatorEngine):
             exit_price = self._stop_exit_price(bar, demand, entry1)
             self._finish_live(zone, bar, "TP1_FINAL" if zone.tp1_hit_bar_index is not None else "BE_EXIT", exit_price, entry1, "Entry 2 stopped at Entry 1 after recovery")
             return
+        # Rule: stepped profit lock. Once price has reached lock_at_r, the stop sits at Entry 1 + lock_r (broker stop).
+        lock_at = float(self.parameters.get("lock_at_r", 0.0) or 0.0)
+        if lock_at > 0.0:
+            risk1 = abs(entry1 - stop)
+            if zone.metadata.get("lock_level") is not None and touched(float(zone.metadata["lock_level"]), True):
+                lvl = float(zone.metadata["lock_level"])
+                self._finish_live(zone, bar, "TP1_FINAL" if zone.tp1_hit_bar_index is not None else "BE_EXIT", self._stop_exit_price(bar, demand, lvl), lvl, "Profit lock stop")
+                return
+            if float(zone.mfe_r or 0.0) >= lock_at and risk1 > 0:
+                lr = float(self.parameters.get("lock_r", 0.0) or 0.0)
+                zone.metadata["lock_level"] = entry1 + lr * risk1 if demand else entry1 - lr * risk1
+        # Rule: confluence exit. Before TP1, cut the trade at a candle close when enough signals point to the SL.
+        need = int(self.parameters.get("exit_score", 0) or 0)
+        if need > 0 and zone.tp1_hit_bar_index is None:
+            snap = self._features.snapshot()
+            score = 0
+            rsi = snap.get("rsi14")
+            if rsi is not None and ((float(rsi) if demand else 100.0 - float(rsi)) < 40.0): score += 1
+            mh = snap.get("macd_hist")
+            if mh is not None and ((float(mh) < 0) if demand else (float(mh) > 0)): score += 1
+            pdi, mdi = snap.get("plus_di14"), snap.get("minus_di14")
+            if pdi is not None and mdi is not None and ((float(mdi) > float(pdi)) if demand else (float(pdi) > float(mdi))): score += 1
+            atr_now = snap.get("atr14")
+            if atr_now and ((bar.open - bar.close) if demand else (bar.close - bar.open)) >= float(atr_now): score += 1
+            if (bar.close < float(zone.zone_bottom)) if demand else (bar.close > float(zone.zone_top)): score += 1
+            if score >= need:
+                self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, f"Confluence exit (score {score})")
+                return
         # Rule: break-even. Once a candle has reached be_trigger_r, the stop sits at Entry 1 from the next candle.
         if zone.metadata.get("be_armed") and touched(entry1, True):
             exit_price = self._stop_exit_price(bar, demand, entry1)
@@ -1287,6 +1431,10 @@ class LebPrimeEngine(IndicatorEngine):
                 # Pine rule: a candle closes with at least half its body beyond the SL; the bot exits at that close.
                 self._finish_live(zone, bar, "SL_HIT", bar.close, stop, "Candle closed beyond SL")
             if zone.terminal_state is None and zone.tp1_hit_bar_index is None:
+                tstop = int(self.parameters.get("time_stop_bars", 0) or 0)
+                if tstop > 0 and bar.index - int(zone.activated_bar_index) >= tstop and float(zone.mfe_r or 0.0) < float(self.parameters.get("time_stop_min_r", 0.5) or 0.0):
+                    self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, f"Time stop: no progress after {tstop} candles")
+                    return
                 window = int(self.parameters.get("early_exit_bars", 1) or 0)
                 if window > 0 and bar.index - int(zone.activated_bar_index) < window and self._momentum_against(demand):
                     self._finish_live(zone, bar, "EARLY_EXIT", bar.close, bar.close, "Failed retest: momentum against after the fill")
@@ -1299,6 +1447,26 @@ class LebPrimeEngine(IndicatorEngine):
 
         if bar.index <= int(zone.tp1_hit_bar_index):
             return
+        if bool(self.parameters.get("trail_swing", False)):
+            piv = (self._swing_lows[-1][2] if self._swing_lows else None) if demand else (self._swing_highs[-1][2] if self._swing_highs else None)
+            if piv is not None:
+                prev = zone.metadata.get("swing_trail")
+                lvl = max(float(piv), entry1, prev if prev is not None else entry1) if demand else min(float(piv), entry1, prev if prev is not None else entry1)
+                if prev is not None and ((bar.close < float(prev)) if demand else (bar.close > float(prev))):
+                    self._finish_live(zone, bar, "TP1_FINAL", bar.close, tp1, "Runner closed by swing trail")
+                    return
+                zone.metadata["swing_trail"] = lvl
+        trail = float(self.parameters.get("trail_atr", 0.0) or 0.0)
+        if trail > 0.0:
+            atr_now = self._features.snapshot().get("atr14")
+            if atr_now:
+                level = bar.close - trail * float(atr_now) if demand else bar.close + trail * float(atr_now)
+                prev = zone.metadata.get("trail_level")
+                level = max(level, entry1, prev if prev is not None else entry1) if demand else min(level, entry1, prev if prev is not None else entry1)
+                if prev is not None and ((bar.close < float(prev)) if demand else (bar.close > float(prev))):
+                    self._finish_live(zone, bar, "TP1_FINAL", bar.close, tp1, "Runner closed by ATR trail")
+                    return
+                zone.metadata["trail_level"] = level
         broker_stop = hard_stop if close_mode else stop
         if broker_stop is not None and touched(broker_stop, True):
             exit_price = self._stop_exit_price(bar, demand, broker_stop)

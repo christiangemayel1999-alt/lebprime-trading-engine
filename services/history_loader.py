@@ -105,6 +105,10 @@ class HistoricalDataLoader:
             "5m": "M5",
             "5min": "M5",
             "m5": "M5",
+            "10": "M10",
+            "10m": "M10",
+            "10min": "M10",
+            "m10": "M10",
             "15": "M15",
             "15m": "M15",
             "15min": "M15",
@@ -131,7 +135,7 @@ class HistoricalDataLoader:
         }
         if normalized in canonical_map:
             return canonical_map[normalized]
-        if normalized.upper() in {"M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1"}:
+        if normalized.upper() in {"M1", "M3", "M5", "M10", "M15", "M30", "H1", "H4", "D1"}:
             return normalized.upper()
         return str(timeframe_label).strip().upper()
 

@@ -120,6 +120,9 @@ class FeatureTracker:
         self._atr_sorted: list[float] = []
         self._h1 = _HigherTimeframeTrend(60)
         self._h4 = _HigherTimeframeTrend(240)
+        self._d1 = _HigherTimeframeTrend(1440, 20)
+        self._m5 = _HigherTimeframeTrend(5)
+        self._m15 = _HigherTimeframeTrend(15)
         self._last: Candle | None = None
         self._values: dict[str, Any] = {}
 
@@ -176,6 +179,9 @@ class FeatureTracker:
         if ts is not None:
             self._h1.update(ts, close)
             self._h4.update(ts, close)
+            self._d1.update(ts, close)
+            self._m5.update(ts, close)
+            self._m15.update(ts, close)
         # Bollinger width, volume ratio
         self._closes20.append(close)
         bb_width = None
@@ -208,6 +214,9 @@ class FeatureTracker:
             "ema50_slope_atr": per_atr(self._ema50_hist[-1] - self._ema50_hist[0]) if len(self._ema50_hist) == 6 else None,
             "h1_trend": self._h1.trend(),
             "h4_trend": self._h4.trend(),
+            "d1_trend": self._d1.trend(),
+            "m5_trend": self._m5.trend(),
+            "m15_trend": self._m15.trend(),
             "bb_width_atr": per_atr(bb_width),
             "tick_volume_ratio": _r(vol_ratio, 3),
             "spread": bar.spread,

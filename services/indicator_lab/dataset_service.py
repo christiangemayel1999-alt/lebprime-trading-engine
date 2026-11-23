@@ -19,7 +19,7 @@ from utils import ensure_directory, utc_now, validate_ohlc_dataframe
 DATASET_SOURCE_MT5 = "MT5"
 DATASET_SOURCE_CSV = "CSV"
 DATASET_STATES = {"CREATING", "READY", "FAILED"}
-TIMEFRAME_MINUTES = {"M1": 1, "M2": 2, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60, "H4": 240, "D1": 1440}
+TIMEFRAME_MINUTES = {"M1": 1, "M2": 2, "M3": 3, "M5": 5, "M10": 10, "M15": 15, "M30": 30, "M45": 45, "H1": 60, "H4": 240, "D1": 1440}
 
 
 def drop_unclosed_bars(frame: pd.DataFrame, timeframe: str, now: datetime) -> pd.DataFrame:
