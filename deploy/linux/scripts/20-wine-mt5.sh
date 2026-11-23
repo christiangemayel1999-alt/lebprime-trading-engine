@@ -16,7 +16,11 @@ install -d -m 755 /etc/apt/keyrings
 curl -fsSL https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor --yes -o /etc/apt/keyrings/winehq-archive.key
 curl -fsSL -o /etc/apt/sources.list.d/winehq-noble.sources https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
 apt-get update
-apt-get -y install --install-recommends winehq-stable
+# Pinned: MT5 refuses to run under Wine 11 ("A debugger has been found running in your system",
+# WineHQ bug 57950 / MQL5 forum 503128). Wine 10.0 stable works.
+WINE_VERSION="${WINE_VERSION:-10.0.0.0~noble-1}"
+apt-mark unhold winehq-stable wine-stable wine-stable-amd64 wine-stable-i386 >/dev/null 2>&1 || true
+apt-get -y install --install-recommends --allow-downgrades   "winehq-stable=$WINE_VERSION" "wine-stable=$WINE_VERSION" "wine-stable-amd64=$WINE_VERSION" "wine-stable-i386:i386=$WINE_VERSION"
 apt-get -y install xvfb x11vnc xauth cabextract winbind fonts-dejavu-core
 # Hold Wine at the tested version; upgrade by hand (RUNBOOK.md, "Upgrading Wine").
 apt-mark hold winehq-stable wine-stable wine-stable-amd64 wine-stable-i386 >/dev/null 2>&1 || true
@@ -30,10 +34,20 @@ install -d -o lebprime-mt5 -g lebprime-mt5 -m 750 "$HOME_MT5" "$HOME_MT5/gateway
 # Every Wine step is time-limited so a stuck dialog fails the install instead of hanging it.
 as_mt5() { sudo -u lebprime-mt5 -H env WINEPREFIX="$PREFIX" WINEDEBUG=-all WINEARCH=win64 TZ=UTC WINEDLLOVERRIDES="mscoree=d;mshtml=d" timeout "${WINE_STEP_TIMEOUT:-1200}" "$@"; }
 
+# A prefix created by another Wine version is rebuilt (RESET_PREFIX=1 forces it).
+if [[ -f "$PREFIX/.wine-version" && "$(cat "$PREFIX/.wine-version")" != "$(wine --version)" || "${RESET_PREFIX:-0}" == "1" ]]; then
+  echo "rebuilding Wine prefix for $(wine --version)"
+  pkill -u lebprime-mt5 -f wine || true
+  rm -rf "$PREFIX"
+fi
+if [[ -f "$PREFIX/system.reg" && ! -f "$PREFIX/.wine-version" ]]; then
+  echo "prefix has no version stamp: rebuilding it"; pkill -u lebprime-mt5 -f wine || true; rm -rf "$PREFIX"
+fi
 if [[ ! -f "$PREFIX/system.reg" ]]; then
   as_mt5 xvfb-run -a wineboot --init
   as_mt5 xvfb-run -a winecfg -v win10 || true
   as_mt5 wineserver -w
+  wine --version | sudo -u lebprime-mt5 tee "$PREFIX/.wine-version" >/dev/null
 fi
 
 download() {  # url dest [expected-sha256]

@@ -1,0 +1,9 @@
+[Unit]
+Description=LebPrime auto-deploy from GitHub main (pull, test, install, health-check, roll back)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lebprime/deploy/bin/lebprime-autodeploy
+TimeoutStartSec=20min

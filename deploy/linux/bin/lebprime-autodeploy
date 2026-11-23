@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Pull-based auto-deploy: every 2 minutes (lebprime-autodeploy.timer) check GitHub `main`; when it moves,
+# test the new commit in a staging copy, install it, restart services, health-check, roll back on failure.
+#
+# Why pull and not push: GitHub never holds a key that can log into this server. The server only has a
+# read-only deploy key for the repository.
+#
+#   lebprime-autodeploy            normal run (timer)
+#   lebprime-autodeploy --force    redeploy origin/main even if it is already deployed
+#   lebprime-autodeploy status     show deployed and remote commits
+set -euo pipefail
+BRANCH="${LEBPRIME_DEPLOY_BRANCH:-main}"
+STATE=/var/lib/lebprime-deploy
+REPO="$STATE/repo"
+APP=/opt/lebprime/app
+VENV=/opt/lebprime/venv
+LOCK=/run/lebprime-autodeploy.lock
+DEPLOYED_FILE="$STATE/deployed-sha"
+as_deploy() { sudo -u lebprime-deploy -H "$@"; }
+log() { echo "[autodeploy] $*"; }
+
+notify() {
+  log "$*"
+  [[ -r /etc/lebprime/lebprime.env ]] || return 0
+  local token chat
+  token=$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' /etc/lebprime/lebprime.env)
+  chat=$(sed -n 's/^TELEGRAM_CHAT_ID=//p' /etc/lebprime/lebprime.env)
+  [[ -n "$token" && -n "$chat" ]] || return 0
+  curl -fsS -m 10 "https://api.telegram.org/bot${token}/sendMessage" --data-urlencode "chat_id=${chat}" \
+    --data-urlencode "text=LebPrime VPS deploy: $*" >/dev/null || true
+}
+
+exec 9>"$LOCK"
+flock -n 9 || { log "another deploy is running"; exit 0; }
+
+REPO_URL="${LEBPRIME_DEPLOY_REPO:-$(cat "$STATE/repo-url" 2>/dev/null)}"
+if [[ ! -d "$REPO/.git" ]]; then
+  as_deploy git clone --quiet --no-checkout "$REPO_URL" "$REPO" 2>/dev/null || {
+    log "cannot clone $REPO_URL yet: is the deploy key added in GitHub (Settings > Deploy keys)?"; exit 0; }
+fi
+as_deploy git -C "$REPO" fetch --quiet origin "$BRANCH" || { log "fetch failed (network or deploy key)"; exit 0; }
+remote=$(as_deploy git -C "$REPO" rev-parse "origin/$BRANCH")
+deployed=$(cat "$DEPLOYED_FILE" 2>/dev/null || true)
+
+if [[ "${1:-}" == "status" ]]; then
+  echo "branch:   $BRANCH"; echo "remote:   $remote"; echo "deployed: ${deployed:-none}"
+  as_deploy git -C "$REPO" log -1 --format='latest:   %h %s (%an, %cr)' "$remote"
+  exit 0
+fi
+if [[ "$remote" == "$deployed" && "${1:-}" != "--force" ]]; then exit 0; fi
+if [[ -f "$STATE/rejected-sha" && "$(cat "$STATE/rejected-sha")" == "$remote" && "${1:-}" != "--force" ]]; then exit 0; fi
+
+subject=$(as_deploy git -C "$REPO" log -1 --format='%h %s' "$remote")
+stage="$STATE/staging/$remote"
+reject() { echo "$remote" > "$STATE/rejected-sha"; notify "NOT deployed $subject: $*. The server keeps running ${deployed:0:7}."; rm -rf "$stage"; exit 1; }
+
+# --- 1. Stage and test the new commit (nothing live is touched yet).
+rm -rf "$stage"; install -d -o lebprime-deploy -g lebprime-deploy "$stage"
+as_deploy sh -c "git -C '$REPO' archive '$remote' | tar -x -C '$stage'"
+for required in main.py mt5_connector.py trading_bot/mt5_transport/client.py deploy/linux/bin/lebprime-autodeploy deploy/linux/requirements-linux.txt; do
+  [[ -f "$stage/$required" ]] || reject "missing $required (is the Linux deployment code merged into $BRANCH?)"
+done
+"$VENV/bin/python" -m compileall -q "$stage" >/dev/null || reject "Python syntax errors"
+if ! cmp -s "$stage/deploy/linux/requirements-linux.txt" "$APP/deploy/linux/requirements-linux.txt"; then
+  "$VENV/bin/pip" install --disable-pip-version-check -q -r "$stage/deploy/linux/requirements-linux.txt" || reject "pip install failed"
+fi
+(cd "$stage" && sudo -u lebprime env LEBPRIME_MT5_TRANSPORT=auto PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -c \
+  "import mt5_connector, risk_manager, trading_bot.mt5_transport.client, services.lebprime_live, dashboard.app" ) \
+  || reject "the bot's modules do not import"
+if [[ -f "$stage/tests/test_mt5_gateway_transport.py" ]]; then
+  (cd "$stage" && sudo -u lebprime env PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -m pytest -q -p no:cacheprovider \
+    tests/test_mt5_gateway_transport.py >/tmp/lebprime-deploy-tests.log 2>&1) || reject "gateway contract tests failed"
+fi
+
+# --- 2. config.json: apply git changes only if nobody edited the live file since the last deploy.
+config_note=""
+new_cfg="$stage/config.json"; base_cfg="$STATE/config.deployed.json"; live_cfg="$APP/config.json"
+normalize() { "$VENV/bin/python" - "$1" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+c.setdefault("mt5", {})["terminal_path"] = None
+print(json.dumps(c, sort_keys=True))
+PY
+}
+if [[ -f "$new_cfg" ]]; then
+  if [[ ! -f "$base_cfg" ]]; then
+    cp "$new_cfg" "$base_cfg"; config_note="config baseline recorded (live config kept)"
+  elif ! cmp -s "$new_cfg" "$base_cfg"; then
+    if [[ "$(normalize "$live_cfg")" == "$(normalize "$base_cfg")" ]]; then
+      config_apply=1; config_note="config.json updated from git"
+    else
+      config_note="config.json changed in git but the live config was edited on the server: kept the live one, review by hand"
+    fi
+  fi
+fi
+
+# --- 3. Install: stop app services, swap code, start again.
+prev_stage="$STATE/staging/${deployed:-none}"
+install_code() {  # $1 = source tree
+  rsync -a --delete \
+    --exclude '/storage' --exclude '/logs' --exclude '/reports' --exclude '/backtests' --exclude '/LebPrime_Results' \
+    --exclude '/config.json' --exclude '.git/' --exclude '__pycache__/' --exclude '*.bat' --exclude '*.ps1' \
+    --exclude '/LebPrime AI Research/' --exclude '.env' --exclude '.env.*' \
+    "$1/" "$APP/"
+  chown -R root:root "$APP" && chown root:lebprime "$APP" && chmod 1775 "$APP"
+  find "$APP" -path "$APP/storage" -prune -o -path "$APP/logs" -prune -o -type f -exec chmod go-w {} + 2>/dev/null || true
+  chmod 755 "$APP"/deploy/linux/bin/* "$APP"/deploy/linux/*.sh "$APP"/deploy/linux/scripts/*.sh 2>/dev/null || true
+  chown lebprime:lebprime "$APP/config.json"
+  for d in storage reports backtests LebPrime_Results; do ln -sfn "/var/lib/lebprime/$d" "$APP/$d"; done
+  ln -sfn /var/log/lebprime "$APP/logs"
+  "$VENV/bin/python" -m compileall -q "$APP" >/dev/null || true
+  for unit in "$1"/deploy/linux/systemd/*.service "$1"/deploy/linux/systemd/*.timer "$1"/deploy/linux/systemd/*.target; do
+    cmp -s "$unit" "/etc/systemd/system/$(basename "$unit")" || install -m 644 "$unit" /etc/systemd/system/
+  done
+  systemctl daemon-reload
+}
+gateway_changed=0
+cmp -s "$stage/trading_bot/mt5_transport/gateway_server.py" "$APP/trading_bot/mt5_transport/gateway_server.py" || gateway_changed=1
+cmp -s "$stage/trading_bot/mt5_transport/protocol.py" "$APP/trading_bot/mt5_transport/protocol.py" || gateway_changed=1
+
+bot_enabled=$(systemctl is-enabled lebprime-bot 2>/dev/null || true)
+systemctl stop lebprime-bot lebprime-worker lebprime-dashboard
+install_code "$stage"
+if [[ "${config_apply:-0}" == "1" ]]; then
+  "$VENV/bin/python" - "$new_cfg" "$live_cfg" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c.setdefault("mt5", {})["terminal_path"] = None
+json.dump(c, open(sys.argv[2], "w"), indent=4)
+PY
+  chown lebprime:lebprime "$live_cfg"; chmod 640 "$live_cfg"
+  cp "$new_cfg" "$base_cfg"
+fi
+(( gateway_changed )) && systemctl restart lebprime-mt5-gateway
+systemctl start lebprime-dashboard lebprime-worker
+[[ "$bot_enabled" == "enabled" ]] && systemctl start lebprime-bot
+
+# --- 4. Health check; roll back if the bot does not stay up.
+healthy=1
+sleep 75
+for unit in lebprime-dashboard lebprime-worker; do systemctl is-active --quiet "$unit" || healthy=0; done
+if [[ "$bot_enabled" == "enabled" ]]; then
+  systemctl is-active --quiet lebprime-bot || healthy=0
+  # NRestarts counts automatic restarts since our start: any crash in the first 75 s fails the deploy.
+  (( $(systemctl show -p NRestarts --value lebprime-bot) == 0 )) || healthy=0
+fi
+if (( healthy )); then
+  echo "$remote" > "$DEPLOYED_FILE"
+  rm -f "$STATE/rejected-sha"
+  notify "deployed $subject${config_note:+ ($config_note)}"
+  find "$STATE/staging" -mindepth 1 -maxdepth 1 -type d ! -name "$remote" ! -name "${deployed:-none}" -exec rm -rf {} +
+  exit 0
+fi
+
+if [[ -d "$prev_stage" ]]; then
+  systemctl stop lebprime-bot lebprime-worker lebprime-dashboard
+  install_code "$prev_stage"
+  systemctl start lebprime-dashboard lebprime-worker
+  [[ "$bot_enabled" == "enabled" ]] && systemctl start lebprime-bot
+  echo "$remote" > "$STATE/rejected-sha"
+  notify "ROLLED BACK $subject: services were not healthy after the update. Back on ${deployed:0:7}. Check: journalctl -u lebprime-bot"
+else
+  notify "deployed $subject but services are NOT healthy and there is no previous version to roll back to. Check: journalctl -u lebprime-bot"
+fi
+exit 1

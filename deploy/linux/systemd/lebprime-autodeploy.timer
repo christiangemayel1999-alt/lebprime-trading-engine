@@ -1,0 +1,10 @@
+[Unit]
+Description=Check GitHub main for a new LebPrime version every 2 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
