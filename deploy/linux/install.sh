@@ -22,6 +22,7 @@ if [[ "${ID}-${VERSION_ID}" != "ubuntu-24.04" ]]; then
   echo "warning: tested for Ubuntu 24.04, this is ${PRETTY_NAME}" >&2
 fi
 export ADMIN_USER APP_SOURCE
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 export LEBPRIME_DOMAIN="${LEBPRIME_DOMAIN:-}" LEBPRIME_ACME_EMAIL="${LEBPRIME_ACME_EMAIL:-}" ADMIN_SSH_CIDR="${ADMIN_SSH_CIDR:-}"
 for step in 10-harden 20-wine-mt5 30-app 40-services; do
   echo "==================== $step ===================="

@@ -26,7 +26,9 @@ getent group lebprime-gw >/dev/null || groupadd --system lebprime-gw
 id lebprime-mt5 >/dev/null 2>&1 || useradd --system --create-home --home-dir "$HOME_MT5" --shell /usr/sbin/nologin lebprime-mt5
 install -d -o lebprime-mt5 -g lebprime-mt5 -m 750 "$HOME_MT5" "$HOME_MT5/gateway" "$DL" "$HOME_MT5/.vnc"
 
-as_mt5() { sudo -u lebprime-mt5 -H env WINEPREFIX="$PREFIX" WINEDEBUG=-all WINEARCH=win64 TZ=UTC "$@"; }
+# No Mono/Gecko install prompts (they would wait forever on the invisible display); MT5 needs neither.
+# Every Wine step is time-limited so a stuck dialog fails the install instead of hanging it.
+as_mt5() { sudo -u lebprime-mt5 -H env WINEPREFIX="$PREFIX" WINEDEBUG=-all WINEARCH=win64 TZ=UTC WINEDLLOVERRIDES="mscoree=d;mshtml=d" timeout "${WINE_STEP_TIMEOUT:-1200}" "$@"; }
 
 if [[ ! -f "$PREFIX/system.reg" ]]; then
   as_mt5 xvfb-run -a wineboot --init
