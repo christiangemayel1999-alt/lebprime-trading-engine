@@ -9,10 +9,16 @@ detach=0
 [[ "${1:-}" == "--detach" ]] && { detach=1; shift; }
 [[ $# -gt 0 ]] || { sed -n '2,8p' "$0"; exit 2; }
 [[ "$1" == "python" || "$1" == "python3" ]] && { shift; set -- /opt/lebprime/venv/bin/python "$@"; }
+# No secrets and no trading controls inside the sandbox: /etc/lebprime (credentials, gateway key) is hidden,
+# and the live control state and config are read-only, so a research job can never place, pause or resume trades.
 common=(--slice=lebprime-research.slice --uid=lebprime --gid=lebprime --working-directory=/opt/lebprime/app
-        -p Nice=19 -p IOSchedulingClass=idle -p EnvironmentFile=/etc/lebprime/lebprime.env
+        -p Nice=19 -p IOSchedulingClass=idle -p NoNewPrivileges=yes -p PrivateTmp=yes
+        -p ProtectSystem=strict -p ProtectHome=yes
+        -p "ReadWritePaths=/opt/lebprime/app /var/lib/lebprime /var/log/lebprime"
+        -p "InaccessiblePaths=/etc/lebprime /var/lib/lebprime-mt5 /var/lib/lebprime-deploy"
+        -p "ReadOnlyPaths=/var/lib/lebprime/storage/control_state.json /opt/lebprime/app/config.json"
         -E LEBPRIME_MT5_TRANSPORT=auto -E PYTHONDONTWRITEBYTECODE=1 -E TZ=UTC -E HOME=/var/lib/lebprime
-        -p ProtectSystem=strict -p ReadWritePaths="/opt/lebprime/app /var/lib/lebprime /var/log/lebprime" -p NoNewPrivileges=yes)
+        -E PATH=/opt/lebprime/venv/bin:/usr/local/bin:/usr/bin:/bin)
 if (( detach )); then
   unit="lebprime-research-$(date +%Y%m%d-%H%M%S)"
   systemd-run --unit="$unit" "${common[@]}" -p SyslogIdentifier=lebprime-research "$@"

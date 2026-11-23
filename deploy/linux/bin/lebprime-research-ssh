@@ -1,0 +1,14 @@
+#!/bin/bash
+# Forced command for the `research` SSH account: whatever command the client sends runs inside the
+# capped research sandbox (lebprime-research), never as a normal shell on the server.
+#   ssh research@VPS 'python scripts/phase4_search.py --help'
+#   ssh research@VPS '--detach python scripts/phase4_search.py ...'
+set -euo pipefail
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+if [[ -z "$cmd" ]]; then
+  echo "usage: ssh research@<vps> '<command>'   (runs in /opt/lebprime/app inside the research sandbox)" >&2
+  exit 2
+fi
+detach=()
+if [[ "$cmd" == "--detach "* ]]; then detach=(--detach); cmd="${cmd#--detach }"; fi
+exec sudo -n /usr/local/sbin/lebprime-research "${detach[@]}" /bin/bash -c "$cmd"
