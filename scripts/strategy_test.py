@@ -182,6 +182,14 @@ def main(folder: Path) -> None:
         from services.indicator_lab.parameter_registry import validate_parameters
 
         req = job.request
+        if req.get("kind") == "time_machine":  # odds for one zone (Indicator Lab "Time Machine" panel)
+            from time_machine_job import run_job
+
+            summary = {"request": req, **run_job(job, ROOT), "finished_at": now()}
+            (folder / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
+            job.status["state"] = "COMPLETED"
+            job.note("done")
+            return
         symbols = [s for s in req["symbols"] if s in SYMBOLS]
         timeframe, start, end = req["timeframe"], req["start"], req["end"]
         if timeframe not in TIMEFRAMES or not symbols:
