@@ -1,0 +1,10 @@
+[Unit]
+Description=LebPrime: check for dashboard-queued strategy tests every 15 s
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

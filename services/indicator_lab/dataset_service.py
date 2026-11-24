@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ from utils import ensure_directory, utc_now, validate_ohlc_dataframe
 DATASET_SOURCE_MT5 = "MT5"
 DATASET_SOURCE_CSV = "CSV"
 DATASET_STATES = {"CREATING", "READY", "FAILED"}
+# Closed M1 candles pulled from the VPS MT5 terminal by lebprime-mt5-pull (hourly), same columns as datasets.
+MT5_STORE_DIR = Path(os.environ.get("LEBPRIME_MT5_STORE", "/var/lib/lebprime/mt5_data/M1"))
+STORE_SYMBOL_ALIASES = {"NAS100": "USTEC", "US100": "USTEC", "GOLD": "XAUUSD", "SILVER": "XAGUSD"}
 TIMEFRAME_MINUTES = {"M1": 1, "M2": 2, "M3": 3, "M5": 5, "M15": 15, "M30": 30, "M45": 45, "H1": 60, "H4": 240, "D1": 1440}
 
 
@@ -161,6 +165,11 @@ class IndicatorDatasetService:
             }
         )
         try:
+            store_file = self._store_file(symbol) if connector is None else None
+            if store_file is not None:
+                # No MT5 in this process (the VPS dashboard and worker): build it from the M1 store instead.
+                frozen = self._frame_from_store(store_file, timeframe, start_dt, end_dt)
+                return self._finish_dataset(dataset_id, symbol, timeframe, frozen, source_note=f"mt5_data store {store_file.name}")
             if connector is None:
                 from logger import BotLogger
                 from mt5_connector import MT5Connector
@@ -179,28 +188,83 @@ class IndicatorDatasetService:
             frozen = drop_unclosed_bars(self.normalize_frame(frame), timeframe, utc_now())
             if frozen.empty:
                 raise ValueError("MT5 returned no closed bars for requested range")
-            valid, reason = validate_ohlc_dataframe(frozen.rename(columns={"timestamp_utc": "time"}), min_rows=1)
-            if not valid:
-                raise ValueError(reason)
-            path = self.storage_dir / f"dataset_{dataset_id:06d}_{symbol}_{timeframe}.csv"
-            frozen.to_csv(path, index=False, lineterminator="\n")
-            digest = self.content_hash(path)
-            self._update_dataset(
-                dataset_id,
-                {
-                    "effective_start": str(frozen.iloc[0]["timestamp_utc"]),
-                    "effective_end": str(frozen.iloc[-1]["timestamp_utc"]),
-                    "bar_count": int(len(frozen)),
-                    "file_path": str(path.relative_to(self.base_dir)),
-                    "content_hash": digest,
-                    "status": "READY",
-                    "metadata_json": {"columns": list(frozen.columns), "immutable": True},
-                },
-            )
+            return self._finish_dataset(dataset_id, symbol, timeframe, frozen)
         except Exception as exc:
             self._update_dataset(dataset_id, {"status": "FAILED", "metadata_json": {"error": str(exc)}})
             raise
+
+    def _finish_dataset(self, dataset_id: int, symbol: str, timeframe: str, frozen: pd.DataFrame, source_note: str | None = None) -> dict[str, Any]:
+        valid, reason = validate_ohlc_dataframe(frozen.rename(columns={"timestamp_utc": "time"}), min_rows=1)
+        if not valid:
+            raise ValueError(reason)
+        path = self.storage_dir / f"dataset_{dataset_id:06d}_{symbol}_{timeframe}.csv"
+        frozen.to_csv(path, index=False, lineterminator="\n")
+        digest = self.content_hash(path)
+        metadata: dict[str, Any] = {"columns": list(frozen.columns), "immutable": True}
+        if source_note:
+            metadata["source_detail"] = source_note
+        self._update_dataset(
+            dataset_id,
+            {
+                "effective_start": str(frozen.iloc[0]["timestamp_utc"]),
+                "effective_end": str(frozen.iloc[-1]["timestamp_utc"]),
+                "bar_count": int(len(frozen)),
+                "file_path": path.relative_to(self.base_dir).as_posix(),
+                "content_hash": digest,
+                "status": "READY",
+                "metadata_json": metadata,
+            },
+        )
         return self.get_dataset(dataset_id) or {}
+
+    @staticmethod
+    def _store_file(symbol: str) -> Path | None:
+        """The M1 store file to use when this process has no MT5 of its own, else None."""
+        from mt5_connector import MT5_IMPORT_ERROR
+
+        if MT5_IMPORT_ERROR is None:
+            return None
+        path = MT5_STORE_DIR / f"{STORE_SYMBOL_ALIASES.get(symbol, symbol)}.csv"
+        if not path.is_file():
+            raise ValueError(
+                f"Could not connect to the MT5 terminal for history download, and there is no stored M1 history for {symbol} in {MT5_STORE_DIR}"
+            )
+        return path
+
+    @staticmethod
+    def _frame_from_store(path: Path, timeframe: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+        """Closed ``timeframe`` candles in [start, end] built from the stored closed M1 candles."""
+        minutes = TIMEFRAME_MINUTES.get(str(timeframe).upper())
+        if not minutes:
+            raise ValueError(f"Unsupported timeframe for stored history: {timeframe}")
+        start_key = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        end_key = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        parts, last_m1 = [], None
+        for chunk in pd.read_csv(path, chunksize=500_000, dtype={"timestamp_utc": str}):
+            if len(chunk):
+                last_m1 = chunk["timestamp_utc"].iloc[-1]
+            keep = chunk[(chunk["timestamp_utc"] >= start_key) & (chunk["timestamp_utc"] <= end_key + "+99")]
+            if len(keep):
+                parts.append(keep)
+        if not parts:
+            raise ValueError(f"No stored M1 candles in the requested range (store ends {last_m1})")
+        frame = pd.concat(parts, ignore_index=True)
+        if minutes > 1:
+            opened = pd.to_datetime(frame["timestamp_utc"], utc=True)
+            epoch = pd.Timestamp("1970-01-01", tz="UTC")
+            frame["bucket"] = (opened - epoch) // pd.Timedelta(minutes=minutes)
+            frame = frame.groupby("bucket").agg(
+                timestamp_utc=("timestamp_utc", "first"), open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                close=("close", "last"), tick_volume=("tick_volume", "sum"), spread=("spread", "last"), real_volume=("real_volume", "sum"),
+            )
+            frame["timestamp_utc"] = pd.to_datetime(frame.index * minutes, unit="m", utc=True).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            frame = frame.reset_index(drop=True)
+        # A candle counts only once its last M1 candle is in the store.
+        store_now = pd.Timestamp(parts[-1]["timestamp_utc"].iloc[-1]) + pd.Timedelta(minutes=1)
+        frozen = drop_unclosed_bars(frame[["timestamp_utc", "open", "high", "low", "close", "tick_volume", "spread", "real_volume"]], timeframe, store_now.to_pydatetime())
+        if frozen.empty:
+            raise ValueError("No closed candles in the requested range")
+        return frozen
 
     @staticmethod
     def _load_mt5_in_chunks(loader: Any, connector: Any, symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime, chunk_days: int = 120) -> pd.DataFrame:
@@ -244,13 +308,17 @@ class IndicatorDatasetService:
             item["metadata_json"] = {}
         return item
 
+    def _dataset_path(self, dataset: dict[str, Any]) -> Path:
+        # Datasets created on the Windows PC store paths like storage\\indicator_datasets\\x.csv.
+        return self.base_dir / str(dataset.get("file_path") or "").replace("\\", "/")
+
     def load_frame(self, dataset_id: int) -> pd.DataFrame:
         dataset = self.get_dataset(dataset_id)
         if not dataset:
             raise ValueError(f"Dataset {dataset_id} not found")
         if dataset.get("status") != "READY":
             raise ValueError(f"Dataset {dataset_id} is not READY")
-        path = self.base_dir / str(dataset.get("file_path") or "")
+        path = self._dataset_path(dataset)
         if not path.exists():
             raise ValueError(f"Dataset file missing: {path}")
         if self.content_hash(path) != dataset.get("content_hash"):
@@ -261,7 +329,7 @@ class IndicatorDatasetService:
         dataset = self.get_dataset(dataset_id)
         if not dataset:
             raise ValueError(f"Dataset {dataset_id} not found")
-        path = self.base_dir / str(dataset.get("file_path") or "")
+        path = self._dataset_path(dataset)
         actual = self.content_hash(path) if path.exists() else ""
         return {"dataset_id": int(dataset_id), "ok": bool(actual and actual == dataset.get("content_hash")), "expected": dataset.get("content_hash"), "actual": actual}
 

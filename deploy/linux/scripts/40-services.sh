@@ -44,7 +44,7 @@ install -m 644 "$HERE"/systemd/*.service "$HERE"/systemd/*.timer "$HERE"/systemd
 ln -sfn /opt/lebprime/deploy/bin/lebprime-research /usr/local/sbin/lebprime-research
 systemctl daemon-reload
 # Safe to enable now: display, terminal, gateway (trading gate disabled), dashboard, worker, watchdog.
-systemctl enable lebprime.target lebprime-xvfb lebprime-mt5-terminal lebprime-mt5-gateway lebprime-dashboard lebprime-worker lebprime-watchdog.timer
+systemctl enable lebprime.target lebprime-xvfb lebprime-mt5-terminal lebprime-mt5-gateway lebprime-dashboard lebprime-worker lebprime-watchdog.timer lebprime-research-dispatch.timer
 # Enabled later, on purpose: lebprime-bot (phase 6b) and lebprime-backup.timer (once backup.env is filled in).
 systemctl disable lebprime-bot >/dev/null 2>&1 || true
 if [[ -n "${LEBPRIME_DOMAIN:-}" ]]; then
