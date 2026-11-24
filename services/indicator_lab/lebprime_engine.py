@@ -55,6 +55,12 @@ class LebPrimeEngine(IndicatorEngine):
         self._last_day = ""
         self._swing_highs: list[tuple[int, str, float]] = []
         self._swing_lows: list[tuple[int, str, float]] = []
+        # Zones that still need work each candle (live on the chart or holding a trade). Same order as
+        # self._zones; kept short so long backtests do not rescan every zone ever created.
+        self._open_zones: list[ZoneRecord] = []
+        self._pool_source: list[ZoneRecord] | None = None
+        self._pool_len = 0
+        self._scan_from_index: int | None = None
 
     def _zone_id(self, demand: bool, bar: Candle) -> str:
         day = bar.timestamp[5:10].replace("-", "")
@@ -191,13 +197,43 @@ class LebPrimeEngine(IndicatorEngine):
             bottom += excess / 2.0
         return top, bottom
 
+    def _tv_parity(self) -> bool:
+        """Live model with TradingView zone parity: the zone itself follows the Pine lifecycle."""
+        return self._live_mode() and bool(self.parameters.get("tv_zone_parity", False))
+
+    def _pine_zone_rules(self) -> bool:
+        """Zone creation follows Pine exactly (Pine model, or Live model with TradingView parity)."""
+        return not self._live_mode() or bool(self.parameters.get("tv_zone_parity", False))
+
+    def _zone_on_chart(self, zone: ZoneRecord) -> bool:
+        """Is this zone still live on the TradingView chart (blocks overlaps, uses a capacity slot)?"""
+        if self._tv_parity():
+            return zone.metadata.get("pine_state") is None
+        return zone.terminal_state is None
+
+    def _zone_needs_work(self, zone: ZoneRecord) -> bool:
+        return zone.terminal_state is None or (self._tv_parity() and zone.metadata.get("pine_state") is None)
+
+    def _sync_open_zones(self) -> list[ZoneRecord]:
+        # Rebuild if the zone list was replaced or grown from outside (tests, restored state).
+        if self._pool_source is not self._zones or self._pool_len != len(self._zones):
+            self._open_zones = [zone for zone in self._zones if self._zone_needs_work(zone)]
+            self._pool_source = self._zones
+            self._pool_len = len(self._zones)
+        return self._open_zones
+
+    def _live_side_count(self, demand: bool) -> int:
+        self._sync_open_zones()
+        side = "DEMAND" if demand else "SUPPLY"
+        return sum(1 for zone in self._open_zones if zone.side == side and self._zone_on_chart(zone))
+
     def _has_overlap(self, demand: bool, top: float, bottom: float) -> bool:
         if bool(self.parameters["allow_overlap"]):
             return False
         tol = float(self.parameters["overlap_tolerance"])
         side = "DEMAND" if demand else "SUPPLY"
-        for zone in self._zones:
-            if zone.side == side and zone.terminal_state is None:
+        for zone in self._sync_open_zones():
+            if zone.side == side and self._zone_on_chart(zone):
                 if top >= zone.zone_bottom - tol and bottom <= zone.zone_top + tol:
                     return True
         return False
@@ -245,6 +281,11 @@ class LebPrimeEngine(IndicatorEngine):
             # Tighter stop: just beyond the zone's far edge (plus the symbol buffer), ignoring older swings.
             stop = bottom - buffer if demand else top + buffer
             return stop, {"structural_swing_price": None, "structural_swing_bar_index": None, "structural_swing_time": None, "structural_swing_kind": "ZONE_EDGE"}
+        return self._pine_structural_stop(demand, top, bottom, source_bar_index)
+
+    def _pine_structural_stop(self, demand: bool, top: float, bottom: float, source_bar_index: int) -> tuple[float, dict]:
+        """Pine ``f_structuralStop``: first swing after the zone (within 60 bars) or the far edge, plus the buffer."""
+        buffer = self._buffer()
         if demand:
             swing, swing_bar, swing_time = self._first_swing_low_after_zone(source_bar_index, bottom)
             stop = min(swing, bottom) - buffer
@@ -399,7 +440,7 @@ class LebPrimeEngine(IndicatorEngine):
             "old_enough": old_enough,
             "confirmation_complete": bar.index >= int(pending["due"]),
             "overlap_at_creation": not bool((pending.get("diagnostic") or {}).get("initial_overlap_ok", True)),
-            "live_capacity_available": sum(1 for zone in self._zones if zone.side == ("DEMAND" if demand else "SUPPLY") and zone.terminal_state is None) < int(self.parameters["max_zones"]),
+            "live_capacity_available": self._live_side_count(demand) < int(self.parameters["max_zones"]),
         }
 
     @staticmethod
@@ -527,7 +568,7 @@ class LebPrimeEngine(IndicatorEngine):
     def _create_zone(self, demand: bool, top: float, bottom: float, source_index: int, zone_id: str, bar: Candle, start_armed: bool, atr: float, avg_body: float | None = None, context: dict | None = None, candidate: Candle | None = None) -> bool:
         diagnostic = (context or {}).get("candidate_diagnostic")
         context = {key: value for key, value in (context or {}).items() if key != "candidate_diagnostic"}
-        live_count = sum(1 for zone in self._zones if zone.side == ("DEMAND" if demand else "SUPPLY") and zone.terminal_state is None)
+        live_count = self._live_side_count(demand)
         if top <= bottom or live_count >= int(self.parameters["max_zones"]):
             self._emit_orphan(zone_id, bar, "ZONE_REJECTED", reason="invalid_bounds_or_capacity")
             self._set_candidate_outcome(diagnostic, "CAPACITY_REJECTED" if live_count >= int(self.parameters["max_zones"]) else "OTHER", "invalid_bounds_or_capacity")
@@ -649,7 +690,21 @@ class LebPrimeEngine(IndicatorEngine):
             creation_reason="momentum_boundary_zone",
             metadata=metadata,
         )
+        if self._tv_parity():
+            # The chart's own levels (Pine): used only to run the zone's Pine lifecycle next to the trade.
+            pine_stop, _ = self._pine_structural_stop(demand, top, bottom, source.index)
+            pine_entry = top if demand else bottom
+            pine_risk = abs(pine_entry - pine_stop)
+            zone.metadata["pine_levels"] = {
+                "entry1": pine_entry,
+                "stop": pine_stop,
+                "tp1": pine_entry + pine_risk * TP1_R if demand else pine_entry - pine_risk * TP1_R,
+                "tp2": pine_entry + pine_risk * TP2_R if demand else pine_entry - pine_risk * TP2_R,
+            }
+        self._sync_open_zones()
         self._zones.append(zone)
+        self._open_zones.append(zone)
+        self._pool_len = len(self._zones)
         self._emit(zone, bar, "ZONE_CREATED")
         if start_armed:
             boundary = top if demand else bottom
@@ -708,6 +763,12 @@ class LebPrimeEngine(IndicatorEngine):
                 if filter_reason is not None:
                     self._set_candidate_outcome(diagnostic, "FILTERED", filter_reason)
                 elif not self._has_overlap(demand, float(pending["top"]), float(pending["bottom"])):
+                    blocked = self._live_side_count(demand) >= int(self.parameters["max_zones"]) or not self._valid_width(float(pending["top"]) - float(pending["bottom"]), atr)
+                    if blocked and self._pine_zone_rules():
+                        # Pine f_processPending only deletes the hidden candidate once f_createZone succeeds:
+                        # a full side (30 live zones) or a width that fails at today's ATR is retried next candle.
+                        remaining.append(pending)
+                        continue
                     self._create_zone(demand, pending["top"], pending["bottom"], pending["source_index"], pending["id"], bar, True, atr, pending.get("avg_body"), pending.get("context"), candidate=pending.get("candidate"))
                 else:
                     self._set_candidate_outcome(diagnostic, "OVERLAP_REJECTED", "overlap_at_limit_creation")
@@ -917,7 +978,7 @@ class LebPrimeEngine(IndicatorEngine):
             entry, stop, _, _, _ = self._entry_stop_target(demand, top, bottom, self._bars[source_index].index)
             risk = abs(entry - stop)
             gaps = [(float(z.zone_bottom) - entry) if demand else (entry - float(z.zone_top))
-                    for z in self._zones if z.terminal_state is None and z.side == ("SUPPLY" if demand else "DEMAND")]
+                    for z in self._sync_open_zones() if z.terminal_state is None and z.side == ("SUPPLY" if demand else "DEMAND")]
             gaps = [g for g in gaps if g > 0]
             if risk > 0 and gaps and min(gaps) / risk < min_room:
                 return "no_room_to_opposing_zone"
@@ -951,7 +1012,76 @@ class LebPrimeEngine(IndicatorEngine):
         return str(self.parameters.get("entry_mode", "Limit")) in TRADER_ENTRIES
 
     def _single_entry(self) -> bool:
-        return self._confirm_entry() or str(self.parameters.get("entry2_mode", "Far edge")) == "Off"
+        return self._confirm_entry() or self._trail_exit() or str(self.parameters.get("entry2_mode", "Far edge")) == "Off"
+
+    def _trail_exit(self) -> bool:
+        return self._live_mode() and str(self.parameters.get("exit_mode", "Targets")) == "Trail"
+
+    def trail_stop_price(self, zone: ZoneRecord) -> float | None:
+        """Current protective stop of a Trail-exit trade (starts at the zone SL), or None."""
+        if not self._trail_exit():
+            return None
+        value = zone.metadata.get("trail_stop")
+        return float(value) if value is not None else (float(zone.sl_price) if zone.sl_price is not None else None)
+
+    def _manage_trail(self, zone: ZoneRecord, bar: Candle, demand: bool, legs: dict, touched) -> None:
+        """Trail exit: one Entry 1, broker SL at the zone SL (1R), no take profit.
+
+        At each candle close, using only that candle and earlier ones (the new stop applies from the next candle):
+          * best price reached >= be_trigger_r x risk  -> stop to Entry 1 + be_lock_r x risk (break-even);
+          * best price reached >= trail_start_r x risk -> stop trails the best price (R distance, ATR, or the
+            last N candles' extreme). The stop only ever moves in the trade's favour.
+        The stop is a broker stop, so a touch closes the trade (at the open when price gaps through it)."""
+        fill = float(legs["1"]["fill_price"])
+        original = float(zone.sl_price)
+        risk = abs(fill - original)
+        md = zone.metadata
+        current = float(md.get("trail_stop", original))
+        if touched(current, True):
+            exit_price = self._stop_exit_price(bar, demand, current)
+            moved = (current - original) * (1 if demand else -1) > 1e-12
+            gain = (exit_price - fill) if demand else (fill - exit_price)
+            if not moved:
+                self._finish_live(zone, bar, "SL_HIT", exit_price, exit_price, "SL touched")
+            elif gain <= 0.25 * risk:
+                self._finish_live(zone, bar, "BE_EXIT", exit_price, current, "Stop at break-even")
+            else:
+                self._finish_live(zone, bar, "TRAIL_EXIT", exit_price, current, "Trailing stop")
+            return
+        if risk <= 0.0:
+            return
+        best = md.get("trail_best")
+        price = bar.high if demand else bar.low
+        best = price if best is None else (max(float(best), price) if demand else min(float(best), price))
+        md["trail_best"] = best
+        mfe_r = ((best - fill) if demand else (fill - best)) / risk
+        direction = 1.0 if demand else -1.0
+        new = current
+        be_r = float(self.parameters.get("be_trigger_r", 0.0) or 0.0)
+        if be_r > 0.0 and mfe_r >= be_r:
+            level = fill + direction * float(self.parameters.get("be_lock_r", 0.0) or 0.0) * risk
+            if (level - new) * direction > 0:
+                new = level
+        start = float(self.parameters.get("trail_start_r", 0.0) or 0.0)
+        if start > 0.0 and mfe_r >= start:
+            mode = str(self.parameters.get("trail_mode", "Distance R"))
+            if mode == "ATR":
+                atr = self._atr(14) or 0.0
+                level = best - direction * float(self.parameters.get("trail_atr_mult", 2.0)) * float(atr)
+            elif mode == "Candle swing":
+                n = max(1, int(self.parameters.get("trail_swing_bars", 3)))
+                recent = self._bars[-n:]
+                level = min(item.low for item in recent) if demand else max(item.high for item in recent)
+            else:
+                level = best - direction * float(self.parameters.get("trail_distance_r", 1.0)) * risk
+            # A stop must stay on the losing side of the current price.
+            if (bar.close - level) * direction > 0 and (level - new) * direction > 0:
+                new = level
+        if (new - current) * direction > 1e-12:
+            md["trail_stop"] = new
+            md["trail_stop_moves"] = int(md.get("trail_stop_moves", 0)) + 1
+            self._emit(zone, bar, "STOP_MOVED", price=new, reason="Break-even" if abs(new - fill) <= 0.3 * risk else "Trailing stop",
+                       metadata={"stop": new, "best_price": best, "mfe_r": mfe_r})
 
     def _apply_recovery(self, zone: ZoneRecord, bar: Candle, demand: bool, legs: dict, entry1: float, touched) -> None:
         """Recovery rule: both entries filled and price climbs back to Entry 1.
@@ -1087,6 +1217,8 @@ class LebPrimeEngine(IndicatorEngine):
         return (bar.close > entry1) if demand else (bar.close < entry1)
 
     def _close_stop_mode(self) -> bool:
+        if self._trail_exit():
+            return False  # the trail exit always uses a touch-triggered broker SL at the zone SL
         return str(self.parameters.get("stop_rule", STOP_CLOSE)) == STOP_CLOSE
 
     def hard_stop_price(self, zone: ZoneRecord) -> float | None:
@@ -1236,6 +1368,10 @@ class LebPrimeEngine(IndicatorEngine):
 
         if bar.index <= int(zone.activated_bar_index):
             return
+        if self._trail_exit():
+            self._update_excursions(zone, bar, demand)
+            self._manage_trail(zone, bar, demand, legs, touched)
+            return
         if zone.metadata.get("be_armed_after_bar") is not None and bar.index > int(zone.metadata["be_armed_after_bar"]):
             zone.metadata["be_armed"] = True
         self._update_excursions(zone, bar, demand)
@@ -1313,13 +1449,100 @@ class LebPrimeEngine(IndicatorEngine):
         elif touched(entry1, True) or (close_mode and self._stop_confirmed(bar, demand, stop)):
             self._finish_live(zone, bar, "TP1_FINAL", bar.close, tp1, "Price returned to Entry 1 after TP1; closed at candle close")
 
+    def _prune_open_zones(self) -> None:
+        self._open_zones = [zone for zone in self._sync_open_zones() if self._zone_needs_work(zone)]
+
+    def _expire_outside_window(self, bar: Candle) -> None:
+        """Zone window: a freshly loaded TradingView chart only detects zones in its last N candles
+        (Pine ``inScanRange``), so a zone found N or more candles ago is not on the chart any more."""
+        window = int(self.parameters.get("zone_window_bars", 0) or 0)
+        if window <= 0:
+            return
+        cutoff = bar.index - window
+        self._sync_open_zones()
+        self._pending = [item for item in self._pending if int(item["candidate"].index) > cutoff]
+        for zone in self._open_zones:
+            found = zone.candidate_bar_index if zone.candidate_bar_index is not None else zone.created_bar_index
+            if found is None or int(found) > cutoff:
+                continue
+            reason = f"Zone found more than {window} candles ago (outside the chart window)"
+            if self._tv_parity() and zone.metadata.get("pine_state") is None:
+                zone.metadata["pine_state"] = "EXPIRED"
+                zone.metadata["pine_state_bar_index"] = bar.index
+            if zone.terminal_state is None and (not self._live_mode() or zone.activated_bar_index is None):
+                # An unfilled LIMIT leaves with its zone; an open trade keeps running under its own exit rules.
+                zone.terminal_state = "EXPIRED"
+                zone.terminal_bar_index = bar.index
+                zone.terminal_time = bar.timestamp
+                zone.result_r = 0.0
+                zone.terminal_reason = reason
+                self._emit(zone, bar, "EXPIRED", reason=reason)
+        self._prune_open_zones()
+
+    def _pine_lifecycle(self, zone: ZoneRecord, bar: Candle) -> None:
+        """Pine SECTION 12 for one armed zone, kept apart from the trade (TradingView parity in the Live model).
+
+        Only decides when the chart's zone ends: CANCELED (close beyond before the retest), SL (half the body
+        closes beyond the Pine SL), TP2, or TP1 FINAL (back to Entry 1 / Pine SL after TP1)."""
+        if zone.metadata.get("pine_state") is not None or zone.limit_created_bar_index is None:
+            return
+        demand = zone.side == "DEMAND"
+        top, bottom = float(zone.zone_top), float(zone.zone_bottom)
+        levels = zone.metadata.get("pine_levels") or {}
+        state = zone.metadata.setdefault("pine", {"activated_bar": None, "tp1_bar": None})
+
+        def finish(result: str) -> None:
+            zone.metadata["pine_state"] = result
+            zone.metadata["pine_state_bar_index"] = bar.index
+            zone.metadata["pine_state_time"] = bar.timestamp
+
+        if state["activated_bar"] is None:
+            old_enough = bar.index - int(zone.source_bar_index) >= int(self.parameters["min_bars_after_source"])
+            after_arming = bar.index > int(zone.limit_created_bar_index)
+            overlaps = bar.high >= bottom and bar.low <= top
+            prev = self._bars[-2] if len(self._bars) >= 2 else None
+            approached = (prev.low > top if demand else prev.high < bottom) if prev else False
+            if old_enough and after_arming and overlaps and approached:
+                state["activated_bar"] = bar.index
+            elif self._post_limit_invalidated(bar, demand, top, bottom):
+                finish("CANCELED")
+            return
+        if bar.index <= int(state["activated_bar"]):
+            return
+        entry1, stop = float(levels["entry1"]), float(levels["stop"])
+        tp1, tp2 = float(levels["tp1"]), float(levels["tp2"])
+        tp1_touched = bar.high >= tp1 if demand else bar.low <= tp1
+        tp2_touched = bar.high >= tp2 if demand else bar.low <= tp2
+        if state["tp1_bar"] is None:
+            if tp2_touched:
+                finish("TP2_HIT")
+            elif tp1_touched:
+                state["tp1_bar"] = bar.index
+            elif self._stop_confirmed(bar, demand, stop):
+                finish("SL_HIT")
+        elif bar.index > int(state["tp1_bar"]):
+            returned = bar.low <= entry1 if demand else bar.high >= entry1
+            if tp2_touched:
+                finish("TP2_HIT")
+            elif returned or self._stop_confirmed(bar, demand, stop):
+                finish("TP1_FINAL")
+
     def _manage_zones(self, bar: Candle) -> None:
+        self._sync_open_zones()
         if self._live_mode():
-            for zone in self._zones:
+            parity = self._tv_parity()
+            for zone in list(self._open_zones):
+                if parity:
+                    self._pine_lifecycle(zone, bar)
                 if not zone.terminal_state and zone.limit_created_bar_index is not None:
                     self._manage_zone_live(zone, bar)
+            self._prune_open_zones()
             return
-        for zone in self._zones:
+        self._manage_zones_pine(bar)
+        self._prune_open_zones()
+
+    def _manage_zones_pine(self, bar: Candle) -> None:
+        for zone in list(self._open_zones):
             if zone.terminal_state:
                 continue
             demand = zone.side == "DEMAND"
@@ -1463,6 +1686,9 @@ class LebPrimeEngine(IndicatorEngine):
 
     def _in_scan_range(self, bar: Candle) -> bool:
         """Pine ``inScanRange``: only the last ``history_bars`` chart bars may create zones (opt-in)."""
+        scan_from = getattr(self, "_scan_from_index", None)
+        if scan_from is not None and bar.index < int(scan_from):
+            return False
         last = getattr(self, "_last_bar_index", None)
         if not bool(self.parameters.get("apply_history_window", False)) or last is None:
             return True
@@ -1478,6 +1704,7 @@ class LebPrimeEngine(IndicatorEngine):
         atr = self._atr(atr_len)
         if avg_body is None or atr is None:
             return
+        self._expire_outside_window(bar)
         history_required = int(self.parameters["momentum_count"]) + int(self.parameters["compact_search_bars"]) + 2
         recent = self._bars[-int(self.parameters["momentum_count"]):]
         bull_count = sum(1 for item in recent if self._is_momentum(item, avg_body, True)) if bar.index >= int(self.parameters["momentum_count"]) - 1 else 0

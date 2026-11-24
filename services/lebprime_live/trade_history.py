@@ -27,8 +27,10 @@ def _exit_reason(comment: str) -> str:
     if text.startswith("[sl"):
         return "Emergency stop (broker)"
     match = re.match(r"LP340-(\w+)", text)
-    if match and match.group(1) in {"SL_HIT", "TP1_FINAL", "TP2_HIT", "TP1"}:
-        return {"SL_HIT": "Candle closed beyond SL", "TP1_FINAL": "Back to Entry 1 after TP1", "TP2_HIT": "TP2", "TP1": "TP1 half close"}[match.group(1)]
+    labels = {"SL_HIT": "Candle closed beyond SL", "TP1_FINAL": "Back to Entry 1 after TP1", "TP2_HIT": "TP2", "TP1": "TP1 half close",
+              "BE_EXIT": "Break-even stop", "TRAIL_EXIT": "Trailing stop", "EARLY_EXIT": "Early exit"}
+    if match and match.group(1) in labels:
+        return labels[match.group(1)]
     return text or "Closed"
 
 

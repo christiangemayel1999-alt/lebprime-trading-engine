@@ -40,6 +40,10 @@ AUDIT_EVENTS = {
     "TP2_HIT",
     "TP1_FINAL",
     "SL_HIT",
+    "BE_EXIT",
+    "TRAIL_EXIT",
+    "EARLY_EXIT",
+    "STOP_MOVED",
     "CANCELED",
     "EXPIRED",
     "ORDER_REJECTED",
@@ -47,6 +51,10 @@ AUDIT_EVENTS = {
     "BLOCKED_PRECHECK",
     "RISK_BLOCKED",
 }
+
+
+# Engine events that end a trade (the bot closes whatever is still open at the broker).
+TRADE_EXIT_EVENTS = {"TP2_HIT", "TP1_FINAL", "SL_HIT", "BE_EXIT", "TRAIL_EXIT", "EARLY_EXIT"}
 
 
 class LiveLebPrimeEngine(LebPrimeEngine):
@@ -299,6 +307,11 @@ class LebPrimeLiveService:
         if context.last_closed_candle:
             source = source[source["time"] > pd.Timestamp(context.last_closed_candle)]
         initial_bootstrap = not context.bootstrapped
+        window = int(context.engine.parameters.get("zone_window_bars", 0) or 0)
+        if initial_bootstrap and window > 0:
+            # Like a freshly loaded TradingView chart: the older candles only warm up ATR / averages / swings,
+            # zones are searched for in the last `window` candles.
+            context.engine._scan_from_index = len(context.engine._bars) + max(0, len(source) - window)
         for _, row in source.iterrows():
             index = len(context.engine._bars)
             candle = Candle.from_row(index, {**row.to_dict(), "timestamp": row["time"].isoformat()})
@@ -595,10 +608,17 @@ class LebPrimeLiveService:
         hard_stop = context.engine.hard_stop_price(zone)
         return float(hard_stop) if hard_stop is not None else float(zone.sl_price)
 
-    @staticmethod
-    def _entry_specs(zone: ZoneRecord) -> list[tuple[int, str, float]]:
+    def _entry_specs(self, zone: ZoneRecord) -> list[tuple[int, str, float]]:
         values = [(1, "ENTRY1", zone.entry1), (2, "ENTRY2", zone.entry2)]
+        context = next((item for item in self.contexts.values() if item.logical_symbol == zone.symbol and item.timeframe == zone.timeframe), None)
+        if context is not None and context.engine._single_entry():
+            values = values[:1]  # Entry 2 off (Trail exit or entry2_mode Off): only Entry 1 goes to the broker
         return [(number, label, float(value)) for number, label, value in values if value is not None]
+
+    @staticmethod
+    def _broker_target(context: LiveContext, zone: ZoneRecord) -> float:
+        """TP sent to MT5: none (0) for the Trail exit, else TP2."""
+        return 0.0 if context.engine._trail_exit() else float(zone.tp2_price)
 
     @staticmethod
     def _idempotency_key(context_key: str, zone_id: str, entry_number: int) -> str:
@@ -633,7 +653,7 @@ class LebPrimeLiveService:
             "normalized_price": existing.get("normalized_price"),
             "volume": existing.get("volume"),
             "sl": existing.get("sl", self._broker_stop(context, zone)),
-            "tp": existing.get("tp", zone.tp2_price),
+            "tp": existing.get("tp", self._broker_target(context, zone)),
             "mt5_order_ticket": existing.get("mt5_order_ticket"),
             "mt5_deal_ticket": existing.get("mt5_deal_ticket"),
             "mt5_position_ticket": existing.get("mt5_position_ticket"),
@@ -836,7 +856,7 @@ class LebPrimeLiveService:
                 live_requested=True,
                 reduced_risk=reduced_risk,
                 entry_mode="limit",
-                risk_adjustment=0.5,
+                risk_adjustment=1.0 if context.engine._single_entry() else 0.5,
             )
             sizing = self._round_up_to_min_lot(context, zone, entry_number, sizing, trade_plan, symbol_spec, account)
             if not sizing.get("valid"):
@@ -891,7 +911,7 @@ class LebPrimeLiveService:
                 volume=float(margin["volume"]),
                 entry_price=entry,
                 sl=broker_stop,
-                tp=float(zone.tp2_price),
+                tp=self._broker_target(context, zone),
                 comment=self._order_comment(zone.engine_zone_id, label),
             )
             if request is None:
@@ -1116,8 +1136,8 @@ class LebPrimeLiveService:
             )
         broker_actions: list[dict[str, Any]] = []
         if not historical and payload["execution_primary"] and payload["execution_status"] not in {"DRY_RUN_PRIMARY", "HISTORICAL_REPLAY", "EXECUTION_SKIPPED", "RISK_BLOCKED", "ORDER_REJECTED", "BROKER_PENDING_NOT_PLACED"}:
-            broker_actions = self._manage_broker_lifecycle(context, zone, event_type, payload)
-        if event_type in {"TP2_HIT", "TP1_FINAL", "SL_HIT", "CANCELED", "EXPIRED"}:
+            broker_actions = self._manage_broker_lifecycle(context, zone, event_type, {**payload, "stop_moved_to": event.price})
+        if event_type in TRADE_EXIT_EVENTS | {"CANCELED", "EXPIRED"}:
             cancellation_confirmed = event_type not in {"CANCELED", "EXPIRED"} or all(action.get("ok", True) for action in broker_actions)
             payload["execution_status"] = ("CLOSED" if cancellation_confirmed else "CANCEL_PENDING_FAILED") if payload["execution_primary"] else payload["execution_status"]
             if payload["execution_primary"]:
@@ -1338,7 +1358,24 @@ class LebPrimeLiveService:
                 if entry.get("broker_status") in {"PLACING", "PENDING"} and entry.get("mt5_order_ticket"):
                     actions.append(self._cancel_broker_entry(context, zone, entry, event_type))
             return actions
-        if event_type in {"TP2_HIT", "TP1_FINAL", "SL_HIT"}:
+        if event_type == "STOP_MOVED":
+            # Trail exit: move the broker SL of the open Entry 1 position (break-even, then trailing).
+            stop = float(event_price) if (event_price := payload.get("stop_moved_to")) is not None else None
+            if stop is None:
+                return actions
+            spec = connector.get_symbol_spec() if positions else {}
+            tick = float(spec.get("trade_tick_size") or spec.get("point") or 0.0) if spec else 0.0
+            digits = int(spec.get("digits", 5)) if spec else 5
+            if tick > 0:
+                stop = round(round(stop / tick) * tick, digits)
+            for position in positions:
+                try:
+                    ok, result = connector.modify_position_sltp(getattr(position, "ticket"), sl=stop, tp=None, comment="LP340-TRAIL")
+                    actions.append({"action": "move_stop", "ticket": str(getattr(position, "ticket", "")), "sl": stop, "ok": bool(ok), "result": str(result)})
+                except Exception as exc:
+                    actions.append({"action": "move_stop", "ticket": str(getattr(position, "ticket", "")), "sl": stop, "ok": False, "error": str(exc)})
+            return actions
+        if event_type in TRADE_EXIT_EVENTS:
             for position in positions:
                 try:
                     ok, result = connector.close_position(getattr(position, "ticket"), comment=f"LP340-{event_type}")
