@@ -1,0 +1,6 @@
+[Unit]
+Description=LebPrime: start dashboard-queued strategy tests in the research sandbox (one at a time)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lebprime/deploy/bin/lebprime-research-dispatch

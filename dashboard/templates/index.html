@@ -34,6 +34,7 @@
     <div id="section-overview" class="dashboard-section" data-dashboard-section="overview"></div>
     <div id="section-strategies" class="dashboard-section d-none" data-dashboard-section="strategies"></div>
     <div id="section-indicator-lab" class="dashboard-section d-none" data-dashboard-section="indicator-lab"></div>
+    <div id="strategy-test-panel" class="d-none"></div>
     <div id="section-trades" class="dashboard-section d-none" data-dashboard-section="trades"></div>
     <div id="section-performance" class="dashboard-section d-none" data-dashboard-section="performance"></div>
     <div id="section-risk" class="dashboard-section d-none" data-dashboard-section="risk"></div>
@@ -44,4 +45,5 @@
         <div id="section-logs"></div>
     </div>
 </main>
+<script src="{{ url_for('static', path='/strategy_tests.js') }}" defer></script>
 {% endblock %}

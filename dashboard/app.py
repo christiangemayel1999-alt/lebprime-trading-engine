@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from dashboard.auth import DashboardAuth  # noqa: E402
 from dashboard.research import create_research_router  # noqa: E402
 from dashboard.routes import create_router  # noqa: E402
+from dashboard.strategy_tests import create_strategy_test_router  # noqa: E402
 from dashboard.services import DashboardDataService  # noqa: E402
 from services.audit_service import AuditService  # noqa: E402
 from services.bot_control_service import BotControlService  # noqa: E402
@@ -92,6 +93,8 @@ def create_app() -> FastAPI:
 
     # Read-only Research page (backtest results); every route needs the dashboard login.
     app.include_router(create_research_router(PROJECT_ROOT, dashboard_auth.dependency, templates))
+    # Strategy tests from the Indicator Lab tab: queued here, run by the root dispatcher in the research sandbox.
+    app.include_router(create_strategy_test_router(PROJECT_ROOT, dashboard_auth.dependency, audit_service))
 
     @app.on_event("startup")
     async def startup_remote_control() -> None:
