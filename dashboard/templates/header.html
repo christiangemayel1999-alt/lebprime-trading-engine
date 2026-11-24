@@ -1,0 +1,7 @@
+<header class="app-header">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">L</span><div><strong>LebPrime</strong><span class="brand-caption">{{ 'Research library' if research_page else 'Trading workspace' }} · DEMO</span></div></div>
+    <nav aria-label="Workspace"><span class="environment-label">{{ 'Read-only research' if research_page else 'Demo account' }}</span>
+        {% if not research_page %}<a href="/research" class="header-link">Research ↗</a>{% endif %}
+        <form action="/auth/logout" method="post" data-logout><button type="submit" class="header-link">Log out</button></form>
+    </nav>
+</header>

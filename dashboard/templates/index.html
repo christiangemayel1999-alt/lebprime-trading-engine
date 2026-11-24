@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block body %}
-<div class="container-fluid py-3">
+<main class="container-fluid py-3 workspace">
+    <div id="connection-banner" role="status" class="connection-banner" hidden>Connection lost, retrying…</div>
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
         <div>
-            <h1 class="h3 mb-1">Trading Bot Control Dashboard</h1>
-            <div class="text-secondary">Live operations, controls, strategy tuning, and audit history</div>
+            <h1 class="h3 mb-1">Your trading workspace</h1>
+            <div class="text-secondary">Monitor execution, review results and manage your demo workspace.</div>
         </div>
         <div class="d-flex flex-wrap gap-2 align-items-center" id="top-status-bar"></div>
     </div>
@@ -12,12 +13,14 @@
         <div class="col-12">
             <div class="card shadow-sm border-0">
                 <div class="card-body d-flex flex-wrap gap-2 justify-content-between align-items-center">
-                    <div class="d-flex flex-wrap gap-2" id="quick-actions"></div>
+                    <button class="btn btn-outline-light" id="open-controls">Controls</button>
+                    <dialog id="controls-sheet"><div class="sheet-heading"><h2>Demo controls</h2><button id="close-controls" class="btn btn-outline-light">Close</button></div><p>Actions affect the demo bot. Review each confirmation.</p><div id="quick-actions" class="controls-grid"></div></dialog>
                     <div class="small text-secondary" id="save-feedback">Ready.</div>
                 </div>
             </div>
         </div>
     </div>
+    <button id="mobile-navigation" class="btn btn-outline-light" aria-controls="dashboard-tabs" aria-expanded="false">Menu · Overview</button>
     <ul class="nav nav-pills mb-3 flex-wrap gap-2" id="dashboard-tabs">
         <li class="nav-item"><button class="nav-link active" id="tab-overview" data-section="overview">Overview</button></li>
         <li class="nav-item"><button class="nav-link" id="tab-strategies" data-section="strategies">Strategies</button></li>
@@ -40,5 +43,5 @@
         <div id="section-alerts" class="mb-3"></div>
         <div id="section-logs"></div>
     </div>
-</div>
+</main>
 {% endblock %}

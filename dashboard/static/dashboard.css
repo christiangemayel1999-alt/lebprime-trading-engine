@@ -3,6 +3,7 @@ body {
     min-height: 100vh;
 }
 
+
 .status-chip {
     border-radius: 999px;
     padding: 0.55rem 0.9rem;
@@ -364,4 +365,63 @@ body {
     .replay-hero {
         grid-template-columns: 1fr;
     }
+}
+
+/* Shared LebPrime workspace; no build step or external fonts. */
+:root { color-scheme: dark; --lp-bg:#0b111b; --lp-card:#121e2b; --lp-line:#293a4d; --lp-ink:#e9eef6; --lp-muted:#a3b3c5; --lp-accent:#73d9c3; }
+body { background:var(--lp-bg); color:var(--lp-ink); min-height:100dvh; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+* { box-sizing:border-box; }
+.app-header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:18px max(20px,env(safe-area-inset-right)) 18px max(20px,env(safe-area-inset-left)); border-bottom:1px solid var(--lp-line); background:#101a27; }
+.brand { display:flex; align-items:center; gap:12px; min-width:0; }
+.brand strong { display:block; font-size:20px; letter-spacing:-.5px; }
+.brand-mark { display:grid; place-items:center; height:40px; width:40px; background:var(--lp-accent); color:#102128; border-radius:12px; font-weight:800; font-size:24px; }
+.brand-caption { display:block; font-size:12px; color:var(--lp-muted); }
+.app-header nav { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
+.app-header form { margin:0; }
+.header-link { display:inline-flex; align-items:center; min-height:44px; padding:8px 12px; border:1px solid var(--lp-line); border-radius:10px; color:var(--lp-ink); background:transparent; text-decoration:none; font:inherit; cursor:pointer; }
+.environment-label { color:var(--lp-accent); font-size:12px; }
+.workspace { max-width:1560px; padding:24px!important; }
+.card { background:var(--lp-card); border:1px solid var(--lp-line)!important; border-radius:16px; box-shadow:none!important; }
+.text-secondary { color:var(--lp-muted)!important; }
+.nav-pills .nav-link { color:var(--lp-muted); border-radius:10px; min-height:44px; }
+.nav-pills .nav-link.active { background:#203b43; color:#a1f2de; }
+.btn { min-height:44px; border-radius:10px; }
+.btn-primary { background:#25695d; border-color:#368779; }
+.metric-card .metric-value { font-size:30px; font-variant-numeric:tabular-nums; letter-spacing:-1px; }
+.market-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+.market-card { background:#0e1824; padding:18px; border:1px solid var(--lp-line); border-radius:12px; min-width:0; }
+.market-card h3 { font-size:18px; }.market-card p { color:var(--lp-muted); font-size:13px; }
+.market-card dl { display:grid; grid-template-columns:1fr auto; gap:8px; font-size:13px; }.market-card dt { color:var(--lp-muted); font-weight:400; }.market-card dd { margin:0; }
+.time-age { display:block; color:var(--lp-muted); font-size:12px; }
+.connection-banner { background:#473623; color:#ffe1aa; border:1px solid #a1773a; padding:12px; margin-bottom:16px; border-radius:10px; }
+dialog { width:min(94vw,540px); background:var(--lp-card); color:var(--lp-ink); border:1px solid var(--lp-line); border-radius:18px; padding:24px; max-height:85dvh; overflow:auto; }
+dialog::backdrop { background:rgb(0 0 0 / .7); }.sheet-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; }.sheet-heading h2 { font-size:20px; }
+.controls-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.controls-grid [data-runtime-action="kill"] { grid-column:1/-1; margin-top:20px; min-height:52px; }
+pre,.config-editor { white-space:pre-wrap!important; overflow-wrap:anywhere; max-width:100%; max-height:40dvh; overflow:auto; }
+details > summary { min-height:44px; padding:10px 0; cursor:pointer; }
+#mobile-navigation,.card-details { display:none; }
+.dashboard-section,.row > *,main > * { min-width:0; }
+.dashboard-section h2,.dashboard-section p,.dashboard-section .small { overflow-wrap:anywhere; }
+@media (max-width:1023px) { .market-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.section-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width:767px) {
+    .app-header { padding:12px; flex-wrap:wrap; }.app-header nav { gap:8px; }.environment-label { display:none; }
+    .brand-caption { font-size:11px; }.header-link { padding:8px; font-size:13px; }
+    .workspace { padding:16px 12px calc(20px + env(safe-area-inset-bottom))!important; }
+    #mobile-navigation { display:block; width:100%; text-align:left; margin-bottom:12px; }
+    #dashboard-tabs { display:none; }#dashboard-tabs.mobile-open { display:grid; grid-template-columns:1fr 1fr; padding:12px; border:1px solid var(--lp-line); border-radius:12px; }#dashboard-tabs button { width:100%; text-align:left; }
+    .market-grid { grid-template-columns:1fr; }.section-grid { gap:10px; }.metric-card .card-body { padding:14px; }.metric-card .metric-value { font-size:24px; }
+    input,select,textarea,.form-control,.form-select { font-size:16px!important; max-width:100%; }
+    .status-chip { font-size:11px; padding:6px 9px; }.card-body { padding:16px; }
+    .mobile-cards,.mobile-cards tbody { display:block; width:100%; }
+    .mobile-cards thead { display:none; }.mobile-cards tr:has(>th) { display:none; }
+    .mobile-cards tr { display:block; margin:12px 0; border:1px solid var(--lp-line); border-radius:12px; padding:12px; }
+    .mobile-cards td { display:flex; justify-content:space-between; gap:12px; text-align:right; white-space:normal!important; overflow-wrap:anywhere; max-width:none!important; border:0; padding:6px 0; }
+    .mobile-cards td::before { content:attr(data-label); color:var(--lp-muted); font-weight:500; text-align:left; flex:0 0 32%; }
+    .mobile-cards td:first-child { flex-wrap:wrap; font-weight:600; }
+    .mobile-cards td.card-secondary { display:none; }.mobile-cards tr.card-expanded td.card-secondary { display:flex; }
+    .mobile-cards .card-details { display:block; min-height:44px; width:100%; border:1px solid var(--lp-line); border-radius:8px; background:transparent; color:var(--lp-accent); margin-top:8px; }
+    .table-responsive { overflow:visible; }.sticky-log { max-height:50dvh; }
+    [class*="replay"] canvas,[class*="replay"] svg,.indicator-chart { max-width:100%; }
+    .il-replay-chart,.il-chart,.replay-chart { height:clamp(220px,40dvh,360px)!important; min-height:0!important; }
 }

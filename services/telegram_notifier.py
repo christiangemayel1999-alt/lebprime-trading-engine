@@ -1,277 +1,194 @@
-"""Telegram notification service for operational bot alerts."""
-
+"""Secure, bounded Telegram presentation. No broker or order operations."""
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+import html
+import json
+import math
+import threading
+import time
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
-import urllib3
+from services.alert_throttle import AlertThrottle
+from utils import UTC, utc_now, load_json, to_utc
 
-from utils import UTC, utc_now
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def number(value: Any, digits: int = 2, signed: bool = False) -> str:
+    try:
+        n = float(value)
+        if value is None or isinstance(value, bool) or not math.isfinite(n):
+            return "—"
+        return format(n, f"{'+' if signed else ''},.{digits}f")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def money(value: Any) -> str:
+    text = number(value, signed=True)
+    return "—" if text == "—" else text[0] + "$" + text[1:]
+
+
+def price(value: Any, data: dict[str, Any]) -> str:
+    spec = data.get("symbol_info") or {}
+    digits = data.get("digits", spec.get("digits") if isinstance(spec, dict) else getattr(spec, "digits", None))
+    if digits is None:
+        digits = {"XAUUSD":2, "XAGUSD":3, "US30":1, "USTEC":1, "NAS100":1, "WTI":3, "EURUSD":5}.get(str(data.get("symbol", "")).upper(), 5)
+    try:
+        digits = max(0, min(10, int(digits)))
+    except (ValueError, TypeError):
+        digits = 5
+    return number(value, digits)
+
+
+def bounded_html(text: str, limit: int = 4000) -> str:
+    """Bound UTF-16 length and escaped payload without splitting HTML entities."""
+    parts, size = [], 0
+    for char in text:
+        escaped = html.escape(char, quote=True)
+        cost = len(escaped.encode("utf-16-le")) // 2
+        if size + cost > limit - 1:
+            return "".join(parts) + "…"
+        parts.append(escaped)
+        size += cost
+    return "".join(parts)
 
 
 class TelegramNotifier:
-    """Send concise operational alerts via the Telegram Bot API."""
+    _throttle = AlertThrottle()
+    _repeats: dict[str, int] = {}
+    _retry_at: dict[str, float] = {}
+    _lock = threading.Lock()
 
-    def __init__(
-        self,
-        token: str | None,
-        chat_id: str | None,
-        timeout_seconds: int = 5,
-        enabled: bool = False,
-    ) -> None:
-        self.token = token or ""
-        self.chat_id = chat_id or ""
+    def __init__(self, token: str | None, chat_id: str | None, timeout_seconds: int = 5,
+                 enabled: bool = False, display_timezone: str | None = None, dry_print: bool = False) -> None:
+        self.token, self.chat_id = token or "", chat_id or ""
         self.timeout_seconds = timeout_seconds
         self.enabled = enabled and bool(self.token and self.chat_id)
-        self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage" if self.token else ""
-        self.api_host = "api.telegram.org"
+        self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         self.last_error: str | None = None
-
-    def _resolve_fallback_ip(self) -> str | None:
-        """Resolve Telegram through public DNS-over-HTTPS when local DNS is broken."""
-        if not self.token:
-            return None
-
-        headers = {"accept": "application/dns-json"}
-        doh_endpoints = [
-            "https://1.1.1.1/dns-query?name=api.telegram.org&type=A",
-            "https://dns.google/resolve?name=api.telegram.org&type=A",
-        ]
-        for endpoint in doh_endpoints:
+        self.last_message = ""
+        self.dry_print = dry_print
+        # Existing main.py caller stays untouched. Only read the presentation key.
+        if display_timezone is None:
             try:
-                response = requests.get(endpoint, headers=headers, timeout=self.timeout_seconds, verify=True)
-                response.raise_for_status()
-                payload = response.json()
-                for answer in payload.get("Answer", []):
-                    if int(answer.get("type", 0)) == 1 and answer.get("data"):
-                        return str(answer["data"])
-            except (requests.RequestException, ValueError, TypeError):
-                continue
-        return None
-
-    def _send_via_ip_fallback(self, title: str, lines: list[str]) -> bool:
-        """Send using a DNS-over-HTTPS-resolved IP when local DNS cannot resolve Telegram."""
-        fallback_ip = self._resolve_fallback_ip()
-        if not fallback_ip:
-            return False
-
-        message = "\n".join([f"{title}", f"Time: {self._timestamp()}"] + lines)
-        fallback_url = f"https://{fallback_ip}/bot{self.token}/sendMessage"
+                cfg = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8"))
+                display_timezone = cfg.get("telegram", {}).get("display_timezone", "UTC")
+            except (OSError, ValueError, AttributeError):
+                display_timezone = "UTC"
         try:
-            response = requests.post(
-                fallback_url,
-                headers={"Host": self.api_host},
-                data={
-                    "chat_id": self.chat_id,
-                    "text": message,
-                    "disable_web_page_preview": True,
-                },
-                timeout=self.timeout_seconds,
-                verify=False,
-            )
-            if response.ok:
-                self.last_error = None
-                return True
-            self.last_error = f"Telegram fallback HTTP {response.status_code}: {response.text[:200]}"
-            return False
-        except requests.RequestException:
-            return False
+            self.timezone = ZoneInfo(display_timezone or "UTC")
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            self.timezone = ZoneInfo("UTC")
 
     def _timestamp(self) -> str:
-        """Return a consistent UTC timestamp string."""
-        return utc_now().astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        now = utc_now()
+        return f"{now.astimezone(self.timezone):%d %b %H:%M} ({self.timezone.key}) · {now.astimezone(UTC):%H:%M} UTC"
 
     def _send(self, title: str, lines: list[str]) -> bool:
-        """Send a message without allowing failures to bubble out."""
-        if not self.enabled:
+        text = "\n".join([title + " · DEMO", *[str(s).replace("\n", " · ") for s in lines[:4]], self._timestamp()])
+        self.last_message = bounded_html(text)
+        if self.dry_print:
+            print(self.last_message)
+            return True
+        if not self.enabled or time.monotonic() < self._retry_at.get(self.token, 0):
             return False
-        message = "\n".join([f"{title}", f"Time: {self._timestamp()}"] + lines)
         try:
-            response = requests.post(
-                self.base_url,
-                data={
-                    "chat_id": self.chat_id,
-                    "text": message,
-                    "disable_web_page_preview": True,
-                },
-                timeout=self.timeout_seconds,
-            )
+            response = requests.post(self.base_url, data={"chat_id":self.chat_id, "text":self.last_message,
+                "parse_mode":"HTML", "disable_web_page_preview":True}, timeout=self.timeout_seconds, verify=True)
             if response.ok:
                 self.last_error = None
                 return True
-            self.last_error = f"Telegram HTTP {response.status_code}: {response.text[:200]}"
-            return self._send_via_ip_fallback(title, lines)
+            if response.status_code == 429:
+                try:
+                    delay = max(1, float(response.json().get("parameters", {}).get("retry_after", 60)))
+                    if not math.isfinite(delay): delay = 60
+                except (ValueError, TypeError, AttributeError):
+                    delay = 60
+                self._retry_at[self.token] = time.monotonic() + delay
+            self.last_error = f"Telegram HTTP {response.status_code}"
         except requests.RequestException as exc:
-            self.last_error = str(exc)
-            return self._send_via_ip_fallback(title, lines)
+            self.last_error = f"Telegram transport unavailable ({type(exc).__name__})"
+        return False
+
+    def _alert(self, severity: str, message: str) -> bool:
+        fingerprint = hashlib.sha256(str(message).encode()).hexdigest()
+        key = hashlib.sha256(f"{self.token}:{self.chat_id}:{severity}:{fingerprint}".encode()).hexdigest()
+        with self._lock:
+            if not self._throttle.should_emit(key, fingerprint=fingerprint, severity=severity, cooldown_seconds=900):
+                self._repeats[key] = self._repeats.get(key, 0) + 1
+                return False
+            repeats = self._repeats.pop(key, 0)
+        lines = [str(message)] + ([f"Repeated {repeats} additional times since the last alert"] if repeats else [])
+        sent = self._send("⚠️ Warning" if severity == "WARNING" else "❌ Error", lines)
+        if not sent:
+            with self._lock:
+                self._throttle.clear(key)
+                self._repeats[key] = repeats
+        return sent
 
     def send_info(self, message: str) -> bool:
-        """Send a low-severity informational message."""
-        return self._send("INFO", [message])
+        if str(message).startswith("Bot started |"):
+            fields = dict(part.split("=", 1) for part in str(message).split(" | ")[1:] if "=" in part)
+            cfg = load_json(Path(__file__).resolve().parents[1]/"config.json", {})
+            symbols = cfg.get("lebprime_v3_4_0", {}).get("symbols", [])
+            if isinstance(symbols, dict): symbols = [s for s,v in symbols.items() if v]
+            return self._send("ℹ️ Bot started", [
+                "Symbols: " + (", ".join(map(str,symbols)) or fields.get("symbol", "not supplied")),
+                "MT5: " + ("connected" if fields.get("connection_ok") == "True" else "unavailable"),
+                "Trading permission: " + ("available" if fields.get("trade_allowed") == "True" else "unavailable"),
+                "Execution pause remains controlled by the operator"])
+        return self._send("ℹ️ Info", [str(message).replace(" | ", " · ")])
 
     def send_warning(self, message: str) -> bool:
-        """Send a warning message."""
-        return self._send("WARNING", [message])
+        return self._alert("WARNING", message)
 
     def send_error(self, message: str) -> bool:
-        """Send a critical error message."""
-        return self._send("ERROR", [message])
+        return self._alert("ERROR", message)
 
-    def send_trade_open(self, trade_data: dict[str, Any]) -> bool:
-        """Send a trade-open alert."""
-        extra_lines: list[str] = []
-        if trade_data.get("setup_family"):
-            extra_lines.append(f"Setup: {trade_data.get('setup_family')}")
-        if trade_data.get("regime_at_entry"):
-            extra_lines.append(f"Regime: {trade_data.get('regime_at_entry')}")
-        if trade_data.get("session_at_entry"):
-            extra_lines.append(f"Session: {trade_data.get('session_at_entry')}")
-        if trade_data.get("entry_mode"):
-            extra_lines.append(f"Entry Mode: {trade_data.get('entry_mode')}")
-        if trade_data.get("score") is not None:
-            extra_lines.append(f"Entry Score: {float(trade_data.get('score', 0.0)):.1f}")
-        if trade_data.get("volume_adjusted"):
-            extra_lines.append(
-                f"Requested Volume: {float(trade_data.get('requested_volume', trade_data.get('volume', 0.0))):.2f}"
-            )
-            extra_lines.append(f"Executed Volume: {float(trade_data.get('executed_volume', trade_data.get('volume', 0.0))):.2f}")
-        if trade_data.get("note"):
-            extra_lines.append(f"Note: {trade_data.get('note', '')}")
-        return self._send(
-            "TRADE OPEN",
-            [
-                f"Mode: {trade_data.get('mode', 'UNKNOWN')}",
-                f"Symbol: {trade_data.get('symbol', '')}",
-                f"Side: {trade_data.get('side', '')}",
-                f"Entry: {trade_data.get('entry', 0):.5f}",
-                f"SL: {trade_data.get('sl', 0):.5f}",
-                f"TP: {trade_data.get('tp', 0):.5f}",
-                f"Volume: {float(trade_data.get('executed_volume', trade_data.get('volume', 0.0))):.2f}",
-                f"Ticket: {trade_data.get('ticket', '')}",
-            ]
-            + extra_lines,
-        )
+    def send_trade_open(self, data: dict[str, Any]) -> bool:
+        return self._send(f"🟢 {data.get('side') or 'Trade'} filled · {data.get('symbol') or 'Unknown symbol'} {data.get('timeframe') or ''}", [
+            f"Entry {price(data.get('entry'), data)} · SL {price(data.get('sl'), data)} · TP {price(data.get('tp'), data)}",
+            f"Lot {number(data.get('executed_volume') or data.get('volume'))} · Risk {money(data.get('risk_usd'))}",
+            f"Zone {data.get('zone_id') or data.get('setup_family') or 'not supplied'} · {data.get('entry_label') or ''} · #{data.get('ticket') or '—'}"])
 
-    def send_trade_close(self, trade_data: dict[str, Any]) -> bool:
-        """Send a trade-close alert."""
-        extra_lines: list[str] = []
-        if trade_data.get("setup_family"):
-            extra_lines.append(f"Setup: {trade_data.get('setup_family')}")
-        if trade_data.get("close_reason"):
-            extra_lines.append(f"Reason: {trade_data.get('close_reason')}")
-        return self._send(
-            "TRADE CLOSE",
-            [
-                f"Mode: {trade_data.get('mode', 'UNKNOWN')}",
-                f"Symbol: {trade_data.get('symbol', '')}",
-                f"Side: {trade_data.get('side', '')}",
-                f"Exit: {trade_data.get('exit_price', 0):.5f}",
-                f"PnL: {trade_data.get('pnl', 0):.2f}",
-                f"Status: {trade_data.get('status', '')}",
-                f"Ticket: {trade_data.get('ticket', '')}",
-            ]
-            + extra_lines,
-        )
+    def send_trade_close(self, data: dict[str, Any]) -> bool:
+        pnl = data.get("pnl")
+        try: n = float(pnl) if pnl is not None else None
+        except (ValueError, TypeError): n = None
+        label = "Closed · P&L unavailable" if n is None or not math.isfinite(n) else "✅ WIN" if n > 0 else "❌ LOSS" if n < 0 else "➖ BREAKEVEN"
+        r = data.get("net_r", data.get("r_multiple"))
+        multiple = f" ({number(r, 1, True)}R)" if r is not None else ""
+        return self._send(f"{label} {money(pnl)}{multiple} · {data.get('symbol') or 'Unknown symbol'} {data.get('side') or ''}", [
+            f"Exit {price(data.get('exit_price'), data)} · {data.get('close_reason') or 'Close reason unavailable'}",
+            f"Zone {data.get('zone_id') or data.get('setup_family') or 'not supplied'} · #{data.get('ticket') or '—'}"])
 
-    def send_signal(self, signal_data: dict[str, Any]) -> bool:
-        """Send a signal-detected alert."""
-        extra_lines: list[str] = []
-        if signal_data.get("setup_family"):
-            extra_lines.append(f"Setup: {signal_data.get('setup_family')}")
-        if signal_data.get("regime_name"):
-            extra_lines.append(f"Regime: {signal_data.get('regime_name')}")
-        if signal_data.get("session_name"):
-            extra_lines.append(f"Session: {signal_data.get('session_name')}")
-        if signal_data.get("entry_mode"):
-            extra_lines.append(f"Entry Mode: {signal_data.get('entry_mode')}")
-        if signal_data.get("score") is not None:
-            extra_lines.append(f"Score: {float(signal_data.get('score', 0.0)):.1f}")
-        if signal_data.get("execution_reason"):
-            extra_lines.append(f"Execution Reason: {signal_data.get('execution_reason')}")
-        if signal_data.get("execution_blocked_reason"):
-            extra_lines.append(f"Blocked Reason: {signal_data.get('execution_blocked_reason')}")
-        if signal_data.get("volume") is not None:
-            extra_lines.append(f"Volume: {float(signal_data.get('volume', 0.0)):.2f}")
-        if signal_data.get("entry") is not None:
-            extra_lines.append(f"Entry: {float(signal_data.get('entry', 0.0)):.5f}")
-        if signal_data.get("sl") is not None:
-            extra_lines.append(f"SL: {float(signal_data.get('sl', 0.0)):.5f}")
-        if signal_data.get("tp") is not None:
-            extra_lines.append(f"TP: {float(signal_data.get('tp', 0.0)):.5f}")
-        return self._send(
-            "SIGNAL",
-            [
-                f"Symbol: {signal_data.get('symbol', '')}",
-                f"Side: {signal_data.get('side', '')}",
-                f"Reason: {signal_data.get('reason', '')}",
-                f"Executed: {signal_data.get('executed', False)}",
-            ]
-            + extra_lines,
-        )
+    def send_signal(self, data: dict[str, Any]) -> bool:
+        return self._send(f"📍 {data.get('symbol') or 'Unknown symbol'} {data.get('side') or ''} signal", [
+            "Executed" if data.get("executed") else "Not executed",
+            str(data.get("execution_blocked_reason") or data.get("execution_reason") or data.get("reason") or "No reason supplied"),
+            f"Entry {price(data.get('entry'), data)} · SL {price(data.get('sl'), data)} · TP {price(data.get('tp'), data)}"])
 
-    def send_daily_summary(self, summary_data: dict[str, Any]) -> bool:
-        """Send a compact daily summary."""
-        return self._send(
-            "DAILY SUMMARY",
-            [
-                f"Trades: {summary_data.get('trades', 0)}",
-                f"Wins: {summary_data.get('wins', 0)}",
-                f"Losses: {summary_data.get('losses', 0)}",
-                f"PnL: {summary_data.get('pnl', 0):.2f}",
-                f"Win Rate: {summary_data.get('win_rate', 0):.2f}%",
-            ],
-        )
+    def send_daily_summary(self, data: dict[str, Any]) -> bool:
+        if data.get("source") != "mt5_deals":
+            cached = load_json(Path(__file__).resolve().parents[1]/"storage/telegram_trade_summary.json", {})
+            try: stamp = to_utc(cached.get("updated_at"))
+            except (ValueError, TypeError): stamp = None
+            if stamp and 0 <= (utc_now()-stamp).total_seconds() <= 120 and cached.get("day") == utc_now().date().isoformat():
+                data = cached
+        verified = data.get("source") == "mt5_deals"
+        return self._send("📊 Daily summary" if verified else "📊 Legacy daily snapshot (not broker reconciled)", [
+            f"Trades {data.get('trades', '—')} · {data.get('wins', '—')}W {data.get('losses', '—') if verified else 'unknown'}L {data.get('breakevens', '—')}BE",
+            f"Net {money(data.get('pnl'))} · Win rate {number(data.get('win_rate'),1)}%",
+            f"Execution: {data.get('execution_state') or 'not supplied'}"])
 
-    def send_dashboard_action(
-        self,
-        actor: str,
-        action: str,
-        target: str,
-        details: dict[str, Any] | None = None,
-        severity: str = "INFO",
-    ) -> bool:
-        """Send a dashboard control or config-change alert."""
-        payload = details or {}
-        lines = [
-            f"Actor: {actor}",
-            f"Action: {action}",
-            f"Target: {target}",
-        ]
-        changes = payload.get("changes")
-        if isinstance(changes, list) and changes:
-            preview_parts: list[str] = []
-            for change in changes[:5]:
-                path = str(change.get("path", ""))
-                before = change.get("before")
-                after = change.get("after")
-                preview_parts.append(f"{path}: {before} -> {after}")
-            lines.append(f"Changes: {'; '.join(preview_parts)}")
-            if len(changes) > 5:
-                lines.append(f"More Changes: +{len(changes) - 5} more")
-        for key in ["enabled", "reason", "preset", "pid", "trading_mode"]:
-            if key in payload:
-                lines.append(f"{key.replace('_', ' ').title()}: {payload.get(key)}")
-        title = "DASHBOARD ALERT"
-        severity_name = severity.upper()
-        if severity_name in {"ERROR", "CRITICAL"}:
-            return self._send("DASHBOARD ERROR", lines)
-        if severity_name == "WARNING":
-            return self._send("DASHBOARD WARNING", lines)
-        return self._send(title, lines)
+    def send_dashboard_action(self, actor: str, action: str, target: str, details: dict[str, Any] | None = None, severity: str = "INFO") -> bool:
+        body = f"{actor} · {action} · {target}"
+        if severity.upper() in {"ERROR", "CRITICAL", "WARNING"}:
+            return self._alert("WARNING" if severity.upper() == "WARNING" else "ERROR", body)
+        return self._send("ℹ️ Dashboard action", [body, str((details or {}).get("reason") or "Recorded in audit history")])
 
-    def send_heartbeat(self, status_data: dict[str, Any]) -> bool:
-        """Send a heartbeat or health status message."""
-        return self._send(
-            "HEARTBEAT",
-            [
-                f"Status: {status_data.get('status', '')}",
-                f"Symbol: {status_data.get('symbol', '')}",
-                f"Spread: {status_data.get('spread', 0)}",
-                f"Trend: {status_data.get('trend', '')}",
-                f"Setup: {status_data.get('setup', '')}",
-            ],
-        )
+    def send_heartbeat(self, data: dict[str, Any]) -> bool:
+        return self._send("💓 Health", [f"Status: {data.get('status') or 'unknown'}", f"Symbol: {data.get('symbol') or 'not supplied'}", f"Spread: {number(data.get('spread'))}"])

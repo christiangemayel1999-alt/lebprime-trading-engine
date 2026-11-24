@@ -32,9 +32,10 @@ def test_indicator_lab_edit_lock_does_not_skip_other_dashboard_sections() -> Non
     assert "preserveBacktestEditing" not in render_all
     for removed in ("section-backtest", "section-oos", "section-manual-trading", "section-sessions", "section-symbols"):
         assert removed not in render_all
-    assert 'if (!preserveIndicatorLabEditing) {\n            safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab);' in render_all
-    assert "restoreUiState();" in render_all
-    assert "activateSection(state.activeSection);" in render_all
+    # Only the active tab renders now; the Indicator Lab edit lock skips only its own tab.
+    assert 'case "indicator-lab": if (!preserveIndicatorLabEditing) safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab); break;' in render_all
+    for section in ("section-overview", "section-strategies", "section-risk", "section-config", "section-trades", "section-performance", "section-health", "section-alerts", "section-logs"):
+        assert f'safeRenderSection("{section}"' in render_all
 
 
 def test_indicator_lab_preserves_all_parameters_and_native_date_inputs() -> None:
