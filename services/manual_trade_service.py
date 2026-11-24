@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from logger import BotLogger
+import json
+import os
 import threading
 import time
+from types import SimpleNamespace
 
 from mt5_connector import MT5_IMPORT_ERROR, MT5Connector, mt5
 from services.audit_service import AuditService
@@ -39,6 +42,10 @@ class ManualActionResult:
 # After a failed MT5 connection, answer "unavailable" straight away for this long instead of
 # running the connector's reconnect loop (3 attempts with 5 s pauses) on every dashboard poll.
 MT5_FAILURE_COOLDOWN_SECONDS = 60.0
+# Without MT5 in this process (the VPS dashboard), positions and deals come from the read-only snapshot
+# that `lebprime-mt5-pull account` writes every 30 s (lebprime-mt5-account.timer). No orders, ever.
+MT5_ACCOUNT_SNAPSHOT = Path(os.environ.get("LEBPRIME_MT5_ACCOUNT_SNAPSHOT", "/var/lib/lebprime/mt5_data/account/snapshot.json"))
+SNAPSHOT_STALE_SECONDS = 300
 
 
 class ManualTradeService:
@@ -62,10 +69,42 @@ class ManualTradeService:
         self._mt5_failed_at: float | None = None
         self._mt5_failure_reason = ""
 
+    def _snapshot(self) -> dict[str, Any] | None:
+        """The read-only MT5 account snapshot, when this process has no MT5 of its own."""
+        if MT5_IMPORT_ERROR is None:
+            return None
+        try:
+            data = json.loads(MT5_ACCOUNT_SNAPSHOT.read_text())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "MT5 is not available in this process and there is no positions/deals snapshot yet "
+                f"({MT5_ACCOUNT_SNAPSHOT}); install it with the mt5-data install.sh"
+            ) from exc
+        age = time.time() - datetime.fromisoformat(str(data.get("taken_at"))).timestamp()
+        data["age_seconds"] = round(age)
+        data["stale"] = age > SNAPSHOT_STALE_SECONDS
+        return data
+
+    @staticmethod
+    def _snapshot_note(snapshot: dict[str, Any]) -> str:
+        note = f"From the MT5 snapshot taken {snapshot['age_seconds']} s ago"
+        if snapshot.get("stale"):
+            note += " (stale: the snapshot timer may be stopped or MT5 unreachable)"
+        return note
+
     def list_positions(self, actor: str, source: str) -> dict[str, Any]:
         """Return current bot-managed positions for the configured symbol."""
         try:
             config = self.config_manager.load_runtime()
+            snapshot = self._snapshot()
+            if snapshot is not None:
+                if snapshot.get("positions") is None:
+                    raise RuntimeError(f"Positions unavailable in the MT5 snapshot: {snapshot.get('errors')}")
+                magic = int(config["mt5"]["magic_number"])
+                raw = [SimpleNamespace(**p) for p in snapshot["positions"] if int(p.get("magic", 0)) == magic]
+                positions = [self._format_position(position) for position in raw]
+                return {"ok": True, "positions": positions, "count": len(positions), "source": source,
+                        "snapshot_at": snapshot.get("taken_at"), "stale": snapshot.get("stale"), "message": self._snapshot_note(snapshot)}
             connector = self._connector(config)
             self._ensure_connection(connector)
             positions = [self._format_position(position) for position in connector.get_all_bot_positions()]
@@ -91,6 +130,14 @@ class ManualTradeService:
         from utils import utc_now
 
         config = self.config_manager.load_runtime()
+        snapshot = self._snapshot()
+        if snapshot is not None:
+            if snapshot.get("deals") is None:
+                raise RuntimeError(f"Deals unavailable in the MT5 snapshot: {snapshot.get('errors')}")
+            return self._trade_history_from(
+                config, [SimpleNamespace(**d) for d in snapshot["deals"]], int(snapshot.get("server_time_offset_seconds") or 0), days,
+                extra={"snapshot_at": snapshot.get("taken_at"), "stale": snapshot.get("stale"), "message": self._snapshot_note(snapshot)},
+            )
         connector = self._connector(config)
         self._ensure_connection(connector)
         # MT5 stamps deals in broker server time (ahead of UTC), so query a day past "now" or the
@@ -99,14 +146,24 @@ class ManualTradeService:
 
         start = utc_now() - timedelta(days=max(1, int(days)))
         raw = connector._call_mt5("history_deals_get", mt5.history_deals_get, start, utc_now() + timedelta(days=1)) or []
+        return self._trade_history_from(config, raw, int(getattr(connector, "server_time_offset_seconds", 0) or 0), days)
+
+    def _trade_history_from(self, config: dict[str, Any], raw: list[Any], offset_seconds: int, days: int, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        from datetime import timedelta
+
+        from services.lebprime_live.trade_history import build_trades, summarize
+        from utils import utc_now
+
         magic = int(config["mt5"]["magic_number"])
-        deals = [deal for deal in raw if int(getattr(deal, "magic", 0)) == magic]
+        # Deal times are broker server time (epoch seconds); keep the requested window in that clock.
+        since = (utc_now() - timedelta(days=max(1, int(days)))).timestamp() + offset_seconds
+        deals = [deal for deal in raw if int(getattr(deal, "magic", 0)) == magic and float(getattr(deal, "time", 0) or 0) >= since]
         rows = self.database._query_dataframe(
             "SELECT mt5_order_ticket, zone_id, context_key FROM lebprime_broker_entries WHERE mt5_order_ticket IS NOT NULL;", ()
         )
         entries = {str(row["mt5_order_ticket"]): row for row in rows}
-        trades = build_trades(deals, entries, offset_seconds=int(getattr(connector, "server_time_offset_seconds", 0) or 0))
-        return {"ok": True, "days": int(days), "trades": trades, "summary": summarize(trades, utc_now().date().isoformat())}
+        trades = build_trades(deals, entries, offset_seconds=offset_seconds)
+        return {"ok": True, "days": int(days), "trades": trades, "summary": summarize(trades, utc_now().date().isoformat()), **(extra or {})}
 
     def open_market_trade(
         self,
