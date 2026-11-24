@@ -1,0 +1,16 @@
+{
+  "_comment": "Merge into config.json -> lebprime_v3_4_0 to trade TradingView-identical zones with Christian's exit. Not active until merged into the live config AND the bot is resumed. Backtest 2020-26 (all 6 symbols, M1-M30) is negative: see docs/TV_PARITY_TRAIL_REPORT.md.",
+  "lebprime_v3_4_0": {
+    "bars_to_fetch": 1000,
+    "parameters": {
+      "tv_zone_parity": true,
+      "zone_window_bars": 500,
+      "exit_mode": "Trail",
+      "be_trigger_r": 0.5,
+      "be_lock_r": 0.05,
+      "trail_start_r": 1.0,
+      "trail_mode": "Distance R",
+      "trail_distance_r": 1.0
+    }
+  }
+}
