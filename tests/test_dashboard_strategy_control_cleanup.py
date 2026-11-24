@@ -64,7 +64,11 @@ def test_polling_does_not_replace_controls_or_dirty_values() -> None:
     assert "updateLebprimeStrategyStatus();" in active_renderer
     assert ".innerHTML" not in active_renderer
     assert "if (state.strategiesUi.dirty) return;" in source
-    assert "setInterval(refreshStatus" in source
+    # One self-scheduling poller (setTimeout after completion, paused in background tabs)
+    # replaced the overlapping setInterval pollers.
+    assert "setInterval(" not in source
+    assert "pollTimer = setTimeout(poll" in source
+    assert "if (polling || document.hidden) return;" in source
     for _ in range(10):
         assert "state.strategiesUi.mounted" in source
 
@@ -77,12 +81,14 @@ def test_runtime_buttons_are_stable_guarded_and_fully_wired() -> None:
     assert 'container.addEventListener("click", handleRuntimeActionClick);' in source
     assert "if (state.runtimeActionsUi.pending) return false;" in source
     assert 'button.setAttribute("aria-busy"' in source
-    for action in ("start", "stop", "pause", "resume", "dry", "live", "kill", "safe"):
+    for action in ("start", "stop", "pause", "resume", "dry", "kill", "safe"):
         assert f'data-runtime-action="{action}"' in source
+    # Demo only: no one-tap route to LIVE from the quick actions.
+    assert 'data-runtime-action="live"' not in source
     for endpoint in ("start", "stop", "pause", "resume", "kill-switch"):
         assert f'runControl("/api/control/{endpoint}"' in source
     assert 'switchMode("DRY_RUN")' in source
-    assert 'switchMode("LIVE")' in source
+    assert 'switchMode("LIVE")' not in source
     assert 'applyPreset("SAFE_MODE")' in source
 
 

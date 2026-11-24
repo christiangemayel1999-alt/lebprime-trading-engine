@@ -507,12 +507,20 @@
         if (!button || state.runtimeActionsUi.pending) return;
         const action = button.dataset.runtimeAction;
         await executeRuntimeAction(action, async () => {
-            if (action === "start") return runControl("/api/control/start", { enabled: true });
-            if (action === "stop" && window.confirm("Stop the demo bot? Monitoring will stop until it is restarted.")) return runControl("/api/control/stop", { enabled: true });
+            if (action === "start") {
+                if (!window.confirm("Start the demo bot process? Execution stays paused until you press Resume.")) return false;
+                return runControl("/api/control/start", { enabled: true });
+            }
+            if (action === "stop") {
+                if (!window.confirm("Stop the demo bot? Monitoring will stop until it is restarted.")) return false;
+                return runControl("/api/control/stop", { enabled: true });
+            }
             if (action === "pause") return runControl("/api/control/pause", { enabled: true });
-            if (action === "resume") return runControl("/api/control/resume", { enabled: true });
+            if (action === "resume") {
+                if (!window.confirm("Resume execution on the demo account? The bot can place new orders again.")) return false;
+                return runControl("/api/control/resume", { enabled: true });
+            }
             if (action === "dry") return switchMode("DRY_RUN");
-            if (action === "live") return switchMode("LIVE");
             if (action === "safe") return applyPreset("SAFE_MODE");
             if (action === "kill") {
                 const enabled = !(state.status.control?.kill_switch);
@@ -1954,7 +1962,8 @@ const brokerEntries = asArray(status.broker_entries);
             const section = event.target.closest("[data-dashboard-section]");
             if (!section) return;
             if (event.target.setCustomValidity) event.target.setCustomValidity("");
-            if (["config","risk","system"].includes(section.dataset.dashboardSection)) dirtySections.add(section.dataset.dashboardSection);
+            // Only real settings forms count as unsaved edits; log filters and other search boxes do not.
+            if (event.target.closest("#section-risk, #section-config, #section-alerts")) dirtySections.add(section.dataset.dashboardSection);
         });
         bindTabs();
         window.addEventListener("beforeunload", (event) => {
