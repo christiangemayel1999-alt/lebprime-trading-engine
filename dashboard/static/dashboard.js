@@ -3,6 +3,7 @@
     const state = {
         config: window.__INITIAL_CONFIG__ || {},
         configMetadata: {},
+        modeControl: { loading: false, error: null, mode: {}, options: [] },
         status: window.__INITIAL_STATUS__ || {},
         auth: window.__DASHBOARD_AUTH__ || {},
         logs: [],
@@ -67,7 +68,7 @@
     }
 
     async function api(path, options = {}) {
-        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const response = await fetch(path, { credentials: "same-origin", signal: AbortSignal.timeout(15000), headers: { "Content-Type": "application/json" }, ...options });
         const text = await response.text();
         let payload = {};
         try { payload = text ? JSON.parse(text) : {}; } catch { payload = { detail: text }; }
@@ -75,7 +76,8 @@
         return payload;
     }
 
-    const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const esc = window.LebPrimeUI.esc;
+    const formatTime = window.LebPrimeUI.time;
     const num = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
     const val = (id) => document.getElementById(id)?.value || "";
     const on = (id) => !!document.getElementById(id)?.checked;
@@ -146,7 +148,7 @@
     const safeSetHtml = (id, html) => {
         const container = ensureContainer(id);
         if (!container) return null;
-        container.innerHTML = html;
+        if (container.innerHTML !== html) container.innerHTML = html;
         return container;
     };
     const safeSetText = (id, value) => {
@@ -368,12 +370,14 @@
             setFeedback("Dashboard is in readonly mode.", true);
             return false;
         }
+        if (!validateNumbers(`section-${state.activeSection}`)) return false;
         try {
             const preview = await api("/api/config/preview", { method: "POST", body: JSON.stringify({ actor: "dashboard", updates, preview_only: true, reason }) });
             const summary = (preview.changes || []).slice(0, 12).map((entry) => `${entry.path}: ${JSON.stringify(entry.before)} -> ${JSON.stringify(entry.after)}`).join("\n");
             if (summary && !window.confirm(`Apply these config changes?\n\n${summary}`)) return false;
             const result = await api("/api/config", { method: "POST", body: JSON.stringify({ actor: "dashboard", updates, reason }) });
             setFeedback(`${applyPlanMessage(result)} Backup: ${result.backup_path}`);
+            dirtySections.delete(state.activeSection);
             await refreshConfig();
             await refreshStatus();
             return result;
@@ -431,7 +435,7 @@
         const mode = rawMode === "DRY_RUN" ? "DRY" : rawMode;
         const botRunning = Boolean(control.process_alive || control.bot_running);
         const mt5Connected = botRunning ? Boolean(runtimeControl.mt5_connected) : null;
-        const mt5Label = mt5Connected === null ? "DISCONNECTED" : (mt5Connected ? "CONNECTED" : "DISCONNECTED");
+        const mt5Label = mt5Connected === null ? "unknown (bot stopped)" : (mt5Connected ? "CONNECTED" : "DISCONNECTED");
         const mt5Tone = mt5Connected === null ? "secondary" : (mt5Connected ? "success" : "danger");
         const worker = currentWorkerStatus();
         document.getElementById("top-status-bar").innerHTML = `
@@ -442,7 +446,7 @@
             <div class="status-chip"><span class="badge text-bg-${control.kill_switch ? "danger" : state.config.bot?.force_reduced_risk_mode ? "warning" : "success"}">${control.kill_switch ? "KILL" : state.config.bot?.force_reduced_risk_mode ? "SAFE" : "NORMAL"}</span></div>
             ${control.pending_restart ? `<div class="status-chip"><span class="badge text-bg-warning">RESTART PENDING</span></div>` : ""}
             <div class="status-chip"><span class="badge text-bg-${isReadonly() ? "warning" : "secondary"}">${isReadonly() ? "READ-ONLY" : "READ-WRITE"}</span></div>
-            <div class="status-chip">Heartbeat: ${esc(runtimeControl.heartbeat_at || "N/A")}</div>`;
+            <div class="status-chip">Heartbeat: ${formatTime(runtimeControl.heartbeat_at)}</div>`;
     }
 
     function renderQuickActions() {
@@ -455,7 +459,7 @@
                 <button class="btn btn-outline-warning" data-runtime-action="pause">Pause</button>
                 <button class="btn btn-outline-info" data-runtime-action="resume">Resume</button>
                 <button class="btn btn-outline-primary" data-runtime-action="dry">Switch To Dry</button>
-                <button class="btn btn-danger" data-runtime-action="live">Switch To Live</button>
+
                 <button class="btn btn-outline-danger" data-runtime-action="kill">Kill Switch</button>
                 <button class="btn btn-outline-success" data-runtime-action="safe">Safe Mode</button>`;
             container.addEventListener("click", handleRuntimeActionClick);
@@ -477,6 +481,11 @@
             const pending = state.runtimeActionsUi.pending;
             button.disabled = isReadonly() || !!pending;
             button.textContent = pending === action ? runtimeActionLabels[action][1] : runtimeActionLabels[action][0];
+            if (action === "kill" && pending !== action) {
+                const active = !!state.status.control?.kill_switch;
+                button.textContent = active ? "Kill switch ON, tap to release" : "Enable kill switch";
+                button.classList.toggle("btn-danger", active);
+            }
             button.setAttribute("aria-busy", pending === action ? "true" : "false");
         });
     }
@@ -499,7 +508,7 @@
         const action = button.dataset.runtimeAction;
         await executeRuntimeAction(action, async () => {
             if (action === "start") return runControl("/api/control/start", { enabled: true });
-            if (action === "stop") return runControl("/api/control/stop", { enabled: true });
+            if (action === "stop" && window.confirm("Stop the demo bot? Monitoring will stop until it is restarted.")) return runControl("/api/control/stop", { enabled: true });
             if (action === "pause") return runControl("/api/control/pause", { enabled: true });
             if (action === "resume") return runControl("/api/control/resume", { enabled: true });
             if (action === "dry") return switchMode("DRY_RUN");
@@ -507,7 +516,7 @@
             if (action === "safe") return applyPreset("SAFE_MODE");
             if (action === "kill") {
                 const enabled = !(state.status.control?.kill_switch);
-                if (enabled && !window.confirm("Enable the kill switch? This will block all new trades.")) return false;
+                if (!window.confirm(enabled ? "Enable the kill switch? This will block all new trades." : "Release the kill switch? New trades may become eligible. Execution pause is unchanged.")) return false;
                 return runControl("/api/control/kill-switch", { enabled, reason: enabled ? "dashboard_kill_switch" : null });
             }
             return false;
@@ -563,6 +572,7 @@
     async function exportConfigText() {
         try {
             const response = await fetch("/api/config/export");
+            if (!response.ok) throw new Error(`Export failed: HTTP ${response.status}`);
             const text = await response.text();
             const node = document.getElementById("config-import-export");
             if (node) node.value = text;
@@ -610,11 +620,11 @@
                         <div class="card-body">
                             <h2 class="h5">Dashboard Settings</h2>
                             <div class="small text-secondary mb-3">These settings control the dashboard itself, not the trading strategy.</div>
-                            ${field("dashboard-host", "Dashboard Host", dashboard.host || "0.0.0.0", "text")}
-                            ${field("dashboard-port", "Dashboard Port", dashboard.default_port || dashboard.port || 8501, "number", "1")}
+                            <p>Host <code>${esc(dashboard.host)}</code></p>
+                            <p>Port <code>${esc(dashboard.default_port ?? dashboard.port)}</code></p><p class="small text-secondary">Managed on the server.</p>
                             ${field("dashboard-refresh", "Refresh Seconds", dashboard.refresh_seconds || 5, "number", "1")}
                             ${field("dashboard-stale", "Heartbeat Stale Seconds", dashboard.stale_heartbeat_seconds || 90, "number", "1")}
-                            ${toggle("dashboard-readonly-config", "Readonly Mode", !!dashboard.readonly_mode)}
+                            <button class="btn btn-outline-warning" id="dashboard-readonly-toggle">${isReadonly() ? "Turn read-only OFF" : "Turn read-only ON"}</button>
                             <div class="small text-secondary mt-3">Auth ${state.auth?.enabled ? `enabled for ${esc(state.auth.username || "configured user")}` : "disabled"}</div>
                             <button class="btn btn-primary mt-3" id="save-dashboard-settings">Save Dashboard Settings</button>
                         </div>
@@ -649,18 +659,25 @@
                     </div>
                 </div>
             </div>`;
+        document.getElementById("dashboard-readonly-toggle").onclick = async () => {
+            if (!window.confirm(`Turn read-only ${isReadonly() ? "OFF" : "ON"}? This does not resume execution.`)) return;
+            const button = document.getElementById("dashboard-readonly-toggle"); button.disabled = true;
+            try {
+                await api("/api/control/readonly", {method:"POST", body:JSON.stringify({actor:"dashboard", enabled:!isReadonly()})});
+                await refreshConfig(); await refreshStatus(); renderSignatures.clear(); renderAll();
+            } catch (error) { setFeedback(error.message, true); }
+            finally { button.disabled = false; }
+        };
         document.getElementById("export-config-button").onclick = () => exportConfigText();
         document.getElementById("import-config-button").onclick = () => importConfigText();
         document.getElementById("request-config-reload").onclick = () => runControl("/api/config/reload", { enabled: true });
         document.getElementById("clear-pending-restart").onclick = () => runControl("/api/config/clear-pending-restart", { enabled: true });
         document.getElementById("save-dashboard-settings").onclick = async () => {
+            if (!validateNumbers("section-config")) return;
             await saveConfigPatch({
                 dashboard: {
-                    host: val("dashboard-host"),
-                    default_port: num(val("dashboard-port"), 8501),
                     refresh_seconds: num(val("dashboard-refresh"), 5),
                     stale_heartbeat_seconds: num(val("dashboard-stale"), 90),
-                    readonly_mode: on("dashboard-readonly-config"),
                 },
             }, "dashboard_settings_update");
         };
@@ -671,51 +688,24 @@
     }
 
     function renderOverview() {
-        const runtime = state.status.runtime || {};
-        const metrics = runtime.metrics || {};
         const control = state.status.control || {};
-        const runtimeControl = control.runtime || {};
-        const blocked = runtime.blocked_setups || [];
-        const rejections = runtime.rejection_summary || [];
-        const familySummary = blockedFamilySummary(blocked);
+        const live = state.lebprimeLive?.status || state.lebprimeLive || {};
+        const summary = state.lebprimeTrades?.summary || {};
+        const contexts = asArray(live.contexts);
         document.getElementById("section-overview").innerHTML = `
-            <div class="row g-3 mb-3">
-                <div class="col-12 col-xl-8"><div class="section-grid">
-                    ${metric("Bot Status", metrics.bot_status || "N/A")}
-${metric("Current Mode", state.config.bot?.trading_mode || runtimeControl.mode || "N/A", (state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE")}
-                    ${metric("Open Positions", asArray(state.positions).length.toFixed(0))}
-                    ${metric("Today PnL", num(asObject((state.lebprimeTrades || {}).summary).today_pnl ?? metrics.today_pnl).toFixed(2))}
-                    ${metric("Daily Loss Used", `${num(metrics.daily_loss_used_pct).toFixed(1)}%`)}
-                    ${metric("Current Spread", num(metrics.spread).toFixed(2))}
-                    ${metric("Session", runtimeControl.session || "N/A")}
-                    ${metric("Regime", runtimeControl.regime || "N/A")}
-                    ${metric("Win Rate", `${num(asObject((state.lebprimeTrades || {}).summary).win_rate ?? metrics.win_rate).toFixed(1)}%`)}
-                    ${metric("Active Strategies", num(metrics.enabled_strategy_count).toFixed(0))}
-                    ${metric("Enabled Families", num(metrics.enabled_family_count).toFixed(0))}
-                </div></div>
-<div class="col-12 col-xl-4"><div class="card border-0 shadow-sm ${((state.config.bot?.trading_mode || runtimeControl.mode) === "LIVE") ? "live-warning" : ""}"><div class="card-body">
-                    <h2 class="h5">Live Monitoring</h2>
-                    <div>Last heartbeat: ${esc(runtimeControl.heartbeat_at || "N/A")}</div>
-                    <div>Last execution: ${esc(runtimeControl.last_execution_result || "N/A")}</div>
-                    <div>Broker login: ${esc(runtimeControl.account_login || "N/A")}</div>
-                    <div>Trade allowed: ${runtimeControl.trade_allowed ? "Yes" : "No"}</div>
-                    <div>Execution paused: ${control.execution_paused ? "Yes" : "No"}</div>
-                </div></div></div>
+            <div class="section-grid mb-4">
+                ${metric("Execution", control.execution_paused ? "Paused" : "Not paused", !control.execution_paused)}
+                ${metric("Pending LIMITs", live.pending_orders ?? "—")}
+                ${metric("Active trades", live.active_positions ?? "—")}
+                ${metric("Today · MT5 net P&L", summary.today_pnl == null ? "Unavailable" : `$${num(summary.today_pnl).toFixed(2)}`)}
             </div>
-            <div class="row g-3">
-                <div class="col-12 col-xl-4"><div class="card border-0 shadow-sm mb-3"><div class="card-body">
-                    <h2 class="h5">Top Rejections (24h)</h2>
-                    ${(rejections.length ? rejections : [{ reason_code: "none", count: 0 }]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item.reason_code)}</span><span class="badge text-bg-dark">${esc(item.count)}</span></div>`).join("")}
-                </div></div><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Blocked Families</h2>
-                    ${(familySummary.length ? familySummary : [["none", 0]]).map((item) => `<div class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle"><span>${esc(item[0])}</span><span class="badge text-bg-secondary">${esc(item[1])}</span></div>`).join("")}
-                </div></div></div>
-                <div class="col-12 col-xl-8"><div class="card border-0 shadow-sm"><div class="card-body">
-                    <h2 class="h5">Recently Blocked Setups</h2>
-                    <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Time</th><th>Family</th><th>Context</th><th>Reason</th><th>Scores</th></tr></thead>
-                    <tbody>${blocked.map((item) => `<tr><td>${esc(item.timestamp)}</td><td>${esc(item.setup_family)}</td><td>${esc(item.side)} | ${esc(item.session_name)} | ${esc(item.regime_name)}</td><td><span class="badge text-bg-secondary">${esc(item.reason_code)}</span><div class="small text-secondary mt-1">${esc(item.reason)}</div></td><td class="small">T ${num(item.trend_score).toFixed(0)} / S ${num(item.setup_score).toFixed(0)} / G ${num(item.trigger_score).toFixed(0)} / E ${num(item.entry_score).toFixed(1)}</td></tr>`).join("") || `<tr><td colspan="5" class="text-secondary">No blocked setups found.</td></tr>`}</tbody></table></div>
-                </div></div></div>
-            </div>`;
+            <div class="card"><div class="card-body"><h2 class="h5">Markets in focus</h2><p class="text-secondary">Closed-candle context and broker spreads. No signal is an instruction to trade.</p>
+            <div class="market-grid">${LEBPRIME_SYMBOLS.map(symbol => {
+                const rows = contexts.filter(r => r.logical_symbol === symbol.key || r.logical_symbol === symbol.broker);
+                const spread = asArray(live.spread_status).find(r => r.logical_symbol === symbol.key || r.broker_symbol === symbol.broker);
+                return `<article class="market-card"><div class="d-flex justify-content-between"><h3>${esc(symbol.broker)}</h3>${badge(rows.some(r => r.status === "ERROR") ? "Check context" : rows.length ? "Monitoring" : "Awaiting data", rows.length ? "info" : "secondary")}</div><p>${esc(symbol.name)}</p><dl><dt>Contexts</dt><dd>${rows.length}</dd><dt>Pending LIMITs</dt><dd>${rows.reduce((n,r)=>n+num(r.pending_limits),0)}</dd><dt>Active trades</dt><dd>${rows.reduce((n,r)=>n+num(r.active_trades),0)}</dd><dt>Spread / limit</dt><dd>${spread ? `${esc(spread.spread_points)} / ${esc(spread.max_spread_points)}` : "Unavailable"}</dd></dl>${rows.map(r=>`<div class="small">${esc(r.timeframe)} · ${esc(r.status)} ${r.last_error ? esc(r.last_error) : ""}</div>`).join("")}</article>`;
+            }).join("")}</div></div></div>
+            <div class="card mt-3"><div class="card-body"><h2 class="h5">Broker trade summary</h2>${state.lebprimeTrades?.ok === false ? `<p>${esc(state.lebprimeTrades.message)}</p>` : lebprimeTradeSummaryCards(summary)}<div class="small text-secondary">Heartbeat ${formatTime(control.runtime?.heartbeat_at)}</div></div></div>`;
     }
 
     function lebprimeConfigDraft() {
@@ -922,7 +912,7 @@ safeSetText("lebprime-historical-active-count", num(status.historical_active_sta
 safeSetText("lebprime-realtime-active-count", num(status.realtime_activated_trades).toFixed(0));
         safeSetText("lebprime-duplicate-count", num(status.duplicate_suppressed_zones).toFixed(0));
         const contexts = asArray(status.contexts);
- safeSetHtml("lebprime-context-status-body", contexts.map((row) => `<tr><td>${esc(row.logical_symbol)} ${esc(row.timeframe)}</td><td>${badge(row.status || "IDLE", row.status === "HEALTHY" ? "success" : row.status === "ERROR" ? "danger" : "secondary")}</td><td>${esc(row.last_closed_candle || "-")}</td><td>${esc(row.last_scan_time || "-")}</td><td>${num(row.candidate_count).toFixed(0)}</td><td>${num(row.live_zones).toFixed(0)}</td><td>${num(row.pending_limits).toFixed(0)}</td><td>${num(row.active_trades).toFixed(0)}</td><td>${esc(row.last_error || "-")}</td><td>${esc(row.heartbeat || "-")}</td></tr>`).join("") || `<tr><td colspan="10" class="text-secondary">Context status will appear after the runtime initializes.</td></tr>`);
+ safeSetHtml("lebprime-context-status-body", contexts.map((row) => `<tr><td>${esc(row.logical_symbol)} ${esc(row.timeframe)}</td><td>${badge(row.status || "IDLE", row.status === "HEALTHY" ? "success" : row.status === "ERROR" ? "danger" : "secondary")}</td><td>${formatTime(row.last_closed_candle || "-")}</td><td>${formatTime(row.last_scan_time || "-")}</td><td>${num(row.candidate_count).toFixed(0)}</td><td>${num(row.live_zones).toFixed(0)}</td><td>${num(row.pending_limits).toFixed(0)}</td><td>${num(row.active_trades).toFixed(0)}</td><td>${esc(row.last_error || "-")}</td><td>${formatTime(row.heartbeat || "-")}</td></tr>`).join("") || `<tr><td colspan="10" class="text-secondary">Context status will appear after the runtime initializes.</td></tr>`);
  const spreadStatus = asArray(status.spread_status);
  safeSetHtml("lebprime-spread-status-body", spreadStatus.map((row) => `<tr><td>${esc(row.logical_symbol)}</td><td>${esc(row.broker_symbol)}</td><td>${esc(row.bid ?? "-")}</td><td>${esc(row.ask ?? "-")}</td><td>${esc(row.point ?? "-")}</td><td>${num(row.spread_points).toFixed(2)}</td><td>${num(row.max_spread_points).toFixed(2)}</td><td>${badge(row.status || "UNKNOWN", row.status === "PASS" ? "success" : "warning")}</td><td>${esc(row.rejection_reason || "-")}</td></tr>`).join("") || `<tr><td colspan="9" class="text-secondary">Spread status will appear after the next runtime scan.</td></tr>`);
 const brokerEntries = asArray(status.broker_entries);
@@ -955,6 +945,7 @@ const brokerEntries = asArray(status.broker_entries);
                 <button class="btn btn-primary mt-3" id="save-risk">Save Risk Settings</button>
             </div></div>`;
         document.getElementById("save-risk").onclick = async () => {
+            if (!validateNumbers("section-risk")) return;
             await saveConfigPatch({
                 risk: {
                     risk_percent: num(val("risk-percent")),
@@ -1034,8 +1025,8 @@ const brokerEntries = asArray(status.broker_entries);
                 <h2 class="h5 mb-1">LebPrime Trades (last ${num(history.days, 30).toFixed(0)} days)</h2>
                 <div class="small text-secondary mb-3">From MT5 deals on this account (bot magic number), P&amp;L after commission and swap. Each row is one entry (Entry 1 or Entry 2).${history.ok === false ? ` <span class="text-warning">MT5: ${esc(history.message || "unavailable")}</span>` : ""}</div>
                 ${lebprimeTradeSummaryCards(summary)}
-                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Opened (UTC)</th><th>Closed (UTC)</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Lot</th><th>Open</th><th>Close</th><th>P&amp;L</th><th>Result</th><th>Exit</th><th>Zone</th></tr></thead>
-                <tbody>${trades.map((t) => `<tr><td>${esc(String(t.open_time || "").substring(0, 16).replace("T", " "))}</td><td>${esc(String(t.close_time || "").substring(0, 16).replace("T", " ") || "-")}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${esc(t.entry_label || "")}</td><td>${num(t.volume).toFixed(2)}</td><td>${esc(t.open_price)}</td><td>${t.close_price == null ? "-" : num(t.close_price).toFixed(2)}</td><td class="${num(t.pnl) >= 0 ? "text-success" : "text-danger"}">${num(t.pnl).toFixed(2)}</td><td>${t.result ? badge(t.result, t.result === "WIN" ? "success" : t.result === "LOSS" ? "danger" : "secondary") : badge(t.status, "warning")}</td><td>${esc(t.exit_reason || "-")}</td><td class="small">${esc(t.zone_id || (t.tracked_by_bot ? "" : "not in bot records"))}</td></tr>`).join("") || `<tr><td colspan="12" class="text-secondary">No LebPrime trades yet.</td></tr>`}</tbody></table></div>
+                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Opened (local)</th><th>Closed (local)</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Lot</th><th>Open</th><th>Close</th><th>P&amp;L</th><th>Result</th><th>Exit</th><th>Zone</th></tr></thead>
+                <tbody>${trades.map((t) => `<tr><td>${formatTime(t.open_time)}</td><td>${formatTime(t.close_time)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${esc(t.entry_label || "")}</td><td>${num(t.volume).toFixed(2)}</td><td>${esc(t.open_price)}</td><td>${t.close_price == null ? "-" : num(t.close_price).toFixed(2)}</td><td class="${num(t.pnl) >= 0 ? "text-success" : "text-danger"}">${num(t.pnl).toFixed(2)}</td><td>${t.result ? badge(t.result, t.result === "WIN" ? "success" : t.result === "LOSS" ? "danger" : "secondary") : badge(t.status, "warning")}</td><td>${esc(t.exit_reason || "-")}</td><td class="small">${esc(t.zone_id || (t.tracked_by_bot ? "" : "not in bot records"))}</td></tr>`).join("") || `<tr><td colspan="12" class="text-secondary">No LebPrime trades yet.</td></tr>`}</tbody></table></div>
             </div></div>
             <div class="card border-0 shadow-sm"><div class="card-body">
                 <h2 class="h5">Open Positions</h2>
@@ -1124,12 +1115,12 @@ const brokerEntries = asArray(status.broker_entries);
             <div class="row g-3">
                 <div class="col-12 col-xl-7"><div class="card border-0 shadow-sm"><div class="card-body">
                     <div class="row g-2 mb-3"><div class="col-md-3"><select class="form-select" id="log-level"><option value="">All Levels</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option></select></div><div class="col-md-3"><input class="form-control" id="log-source" placeholder="Source / event"></div><div class="col-md-3"><input class="form-control" id="log-date" type="date"></div><div class="col-md-3"><button class="btn btn-outline-light w-100" id="refresh-logs">Apply</button></div><div class="col-12"><input class="form-control" id="log-search" placeholder="Filter by message or details"></div></div>
-                    <div class="sticky-log">${(state.logs || []).map((entry) => `<div class="mb-3 border-bottom border-secondary-subtle pb-2"><div><span class="text-secondary">${esc(entry.timestamp || "")}</span> <span class="badge text-bg-dark">${esc(entry.level || "")}</span> <strong>${esc(entry.event_type || "")}</strong></div><div>${esc(entry.message || "")}</div><div class="small text-secondary">${esc(entry.reason_code || "")}</div></div>`).join("")}</div>
+                    <div class="sticky-log">${(state.logs || []).map((entry) => `<div class="mb-3 border-bottom border-secondary-subtle pb-2"><div><span class="text-secondary">${formatTime(entry.timestamp || "")}</span> <span class="badge text-bg-dark">${esc(entry.level || "")}</span> <strong>${esc(entry.event_type || "")}</strong></div><div>${esc(entry.message || "")}</div><div class="small text-secondary">${esc(entry.reason_code || "")}</div></div>`).join("")}</div>
                 </div></div></div>
                 <div class="col-12 col-xl-5">
-                    <div class="card border-0 shadow-sm mb-3"><div class="card-body"><h2 class="h5">Audit Trail</h2><div class="sticky-log">${(state.audit || []).map((entry) => `<div class="mb-3 border-bottom border-secondary-subtle pb-2"><div><span class="text-secondary">${esc(entry.timestamp || "")}</span> <span class="badge text-bg-secondary">${esc(entry.actor || "")}</span></div><div><strong>${esc(entry.action || "")}</strong></div><div>${esc(entry.target || "")}</div></div>`).join("")}</div></div></div>
-                    <div class="card border-0 shadow-sm mb-3"><div class="card-body"><h2 class="h5">Blocked Execution Detail</h2><div class="sticky-log">${blocked.map((entry) => `<div class="mb-3 border-bottom border-secondary-subtle pb-2"><div><span class="text-secondary">${esc(entry.timestamp || "")}</span> <span class="badge text-bg-secondary">${esc(entry.reason_code || "")}</span></div><div><strong>${esc(entry.setup_family || "")}</strong> ${esc(entry.side || "")}</div><div class="small text-secondary">${esc(entry.session_name || "")} | ${esc(entry.regime_name || "")} | spread ${num(entry.spread_points).toFixed(1)} / ${num(entry.spread_limit_used).toFixed(1)} (${esc(entry.spread_limit_source || "default")})</div><div class="small text-secondary">send_attempted=${entry.order_send_attempted ? "yes" : "no"} | cooldown=${entry.cooldown_applied ? "yes" : "no"} | duplicate_guard=${entry.duplicate_guard_applied ? "yes" : "no"} | stage=${esc(entry.failure_stage || "n/a")}</div><div>${esc(entry.reason || "")} ${entry.order_send_retcode ? `(retcode=${esc(entry.order_send_retcode)} ${esc(entry.order_send_retcode_text || "")})` : ""}</div></div>`).join("") || `<div class="text-secondary">No recent blocked execution attempts.</div>`}</div></div></div>
-                    <div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Valid But Not Executed</h2><div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Time</th><th>Setup</th><th>Outcome</th><th>Spread</th><th>Send</th><th>Cooldown</th></tr></thead><tbody>${validNotExecuted.map((row) => `<tr><td>${esc(row.timestamp || "")}</td><td>${esc(row.setup_family || "")} ${esc(row.side || "")}<div class="small text-secondary">${esc(row.session_name || "")} | ${esc(row.regime_name || "")}</div></td><td>${esc(row.final_outcome_reason || row.reason_code || "")}<div class="small text-secondary">${esc(row.reason || "")}</div></td><td>${num(row.spread_points).toFixed(1)} / ${num(row.spread_limit_used).toFixed(1)}<div class="small text-secondary">${esc(row.spread_limit_source || "default")}</div></td><td>${row.order_send_attempted ? `yes${row.order_send_retcode ? ` (${esc(row.order_send_retcode)})` : ""}` : "no"}</td><td>${row.cooldown_applied ? "yes" : "no"} / ${row.duplicate_guard_applied ? "yes" : "no"}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No recent valid-but-not-executed attempts.</td></tr>`}</tbody></table></div></div></div>
+                    <div class="card border-0 shadow-sm mb-3"><div class="card-body"><h2 class="h5">Audit Trail</h2><div class="sticky-log">${(state.audit || []).map((entry) => `<div class="mb-3 border-bottom border-secondary-subtle pb-2"><div><span class="text-secondary">${formatTime(entry.timestamp || "")}</span> <span class="badge text-bg-secondary">${esc(entry.actor || "")}</span></div><div><strong>${esc(entry.action || "")}</strong></div><div>${esc(entry.target || "")}</div></div>`).join("")}</div></div></div>
+                    <div class="card border-0 shadow-sm mb-3"><div class="card-body"><h2 class="h5">Blocked Execution Detail</h2><div class="sticky-log">${blocked.map((entry) => `<div class="mb-3 border-bottom border-secondary-subtle pb-2"><div><span class="text-secondary">${formatTime(entry.timestamp || "")}</span> <span class="badge text-bg-secondary">${esc(entry.reason_code || "")}</span></div><div><strong>${esc(entry.setup_family || "")}</strong> ${esc(entry.side || "")}</div><div class="small text-secondary">${esc(entry.session_name || "")} | ${esc(entry.regime_name || "")} | spread ${num(entry.spread_points).toFixed(1)} / ${num(entry.spread_limit_used).toFixed(1)} (${esc(entry.spread_limit_source || "default")})</div><div class="small text-secondary">send_attempted=${entry.order_send_attempted ? "yes" : "no"} | cooldown=${entry.cooldown_applied ? "yes" : "no"} | duplicate_guard=${entry.duplicate_guard_applied ? "yes" : "no"} | stage=${esc(entry.failure_stage || "n/a")}</div><div>${esc(entry.reason || "")} ${entry.order_send_retcode ? `(retcode=${esc(entry.order_send_retcode)} ${esc(entry.order_send_retcode_text || "")})` : ""}</div></div>`).join("") || `<div class="text-secondary">No recent blocked execution attempts.</div>`}</div></div></div>
+                    <div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Valid But Not Executed</h2><div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Time</th><th>Setup</th><th>Outcome</th><th>Spread</th><th>Send</th><th>Cooldown</th></tr></thead><tbody>${validNotExecuted.map((row) => `<tr><td>${formatTime(row.timestamp || "")}</td><td>${esc(row.setup_family || "")} ${esc(row.side || "")}<div class="small text-secondary">${esc(row.session_name || "")} | ${esc(row.regime_name || "")}</div></td><td>${esc(row.final_outcome_reason || row.reason_code || "")}<div class="small text-secondary">${esc(row.reason || "")}</div></td><td>${num(row.spread_points).toFixed(1)} / ${num(row.spread_limit_used).toFixed(1)}<div class="small text-secondary">${esc(row.spread_limit_source || "default")}</div></td><td>${row.order_send_attempted ? `yes${row.order_send_retcode ? ` (${esc(row.order_send_retcode)})` : ""}` : "no"}</td><td>${row.cooldown_applied ? "yes" : "no"} / ${row.duplicate_guard_applied ? "yes" : "no"}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No recent valid-but-not-executed attempts.</td></tr>`}</tbody></table></div></div></div>
                 </div>
             </div>`;
         document.getElementById("refresh-logs").onclick = () => refreshLogs();
@@ -1140,9 +1131,9 @@ const brokerEntries = asArray(status.broker_entries);
         const worker = currentWorkerStatus();
         document.getElementById("section-health").innerHTML = `
             <div class="row g-3">
-                <div class="col-12 col-lg-6"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">System Health</h2><pre>${esc(JSON.stringify(state.status.control || {}, null, 2))}</pre></div></div></div>
-                <div class="col-12 col-lg-6"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Worker</h2><div class="mb-2">${badge(workerStateLabel(worker), workerTone(worker))}</div><pre>${esc(JSON.stringify(worker, null, 2))}</pre></div></div></div>
-                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Runtime Snapshot</h2><pre>${esc(JSON.stringify(state.status.runtime || {}, null, 2))}</pre></div></div></div>
+                <div class="col-12 col-lg-6"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">System Health</h2><details><summary>View diagnostic data</summary><pre>${esc(JSON.stringify(state.status.control || {}, null, 2))}</pre></details></div></div></div>
+                <div class="col-12 col-lg-6"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Worker</h2><div class="mb-2">${badge(workerStateLabel(worker), workerTone(worker))}</div><details><summary>View diagnostic data</summary><pre>${esc(JSON.stringify(worker, null, 2))}</pre></details></div></div></div>
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Runtime Snapshot</h2><details><summary>View diagnostic data</summary><pre>${esc(JSON.stringify(state.status.runtime || {}, null, 2))}</pre></details></div></div></div>
                 <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body"><h2 class="h5">Recent Jobs</h2><div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>ID</th><th>Type</th><th>State</th><th>Progress</th><th>Run</th><th>Failure</th></tr></thead><tbody>${jobs.map((job) => `<tr><td>${esc(job.id)}</td><td>${esc(job.job_type)}</td><td>${esc(job.state)}</td><td>${esc(job.progress_current || 0)} / ${esc(job.progress_total || 0)}</td><td>${esc(job.related_run_type || "")} ${esc(job.related_run_id || "")}</td><td>${esc(job.failure_reason || job.interrupted_reason || "")}</td></tr>`).join("") || `<tr><td colspan="6" class="text-secondary">No jobs yet.</td></tr>`}</tbody></table></div></div></div></div>
             </div>`;
     }
@@ -1245,6 +1236,7 @@ const brokerEntries = asArray(status.broker_entries);
         } catch (error) {
             state.indicatorLab.error = error.message;
             state.indicatorLabUi.error = error.message;
+            throw error;
         }
         renderAll();
     }
@@ -1817,6 +1809,12 @@ const brokerEntries = asArray(status.broker_entries);
 
     function activateSection(section) {
         const sectionName = textOr(section, "overview");
+        if (sectionName !== state.activeSection && dirtySections.has(state.activeSection)) {
+            if (!window.confirm("Discard unsaved changes before leaving this tab?")) return false;
+            dirtySections.delete(state.activeSection);
+            document.getElementById(`section-${state.activeSection}`).innerHTML = "";
+            renderSignatures.clear();
+        }
         if (state.activeSection === "strategies" && sectionName !== "strategies" && state.strategiesUi.dirty) {
             if (!window.confirm("You have unsaved LebPrime changes. Leave Strategies and discard them?")) return false;
             state.strategiesUi.dirty = false;
@@ -1832,6 +1830,10 @@ const brokerEntries = asArray(status.broker_entries);
         document.querySelectorAll("#dashboard-tabs .nav-link").forEach((item) => item.classList.toggle("active", item.dataset.section === sectionName));
         document.querySelectorAll(".dashboard-section").forEach((node) => node.classList.add("d-none"));
         target.classList.remove("d-none");
+        document.getElementById("dashboard-tabs").classList.remove("mobile-open");
+        const menu = document.getElementById("mobile-navigation");
+        menu.textContent = `Menu · ${sectionName}`; menu.setAttribute("aria-expanded","false");
+        renderAll();
         dashboardLog("tabs", "mounted section", { section: sectionName, container: target.id });
         return true;
     }
@@ -1843,54 +1845,120 @@ const brokerEntries = asArray(status.broker_entries);
         activateSection(state.activeSection);
     }
 
-    function safeRenderSection(sectionId, label, renderer) {
-        try {
-            renderer();
-            dashboardLog("render", `${label} mounted`, { container: sectionId });
-        } catch (error) {
-            dashboardLog("render", `${label} failed`, { error: error.message, container: sectionId }, "error");
-            const container = ensureContainer(sectionId);
-            if (container) {
-                container.innerHTML = renderErrorState(`${label} Failed To Render`, error.message);
-            }
+    const renderSignatures = new Map();
+    const dirtySections = new Set();
+    const numberRules = {"risk-percent":[0,5], "risk-min-lot":[Number.MIN_VALUE,Infinity], "risk-max-lot":[Number.MIN_VALUE,Infinity], "dashboard-refresh":[1,Infinity], "dashboard-stale":[1,Infinity]};
+    function validateNumbers(sectionId) {
+        const root = document.getElementById(sectionId);
+        if (!root) return true;
+        let valid = true;
+        root.querySelectorAll('input[type="number"]:not(:disabled)').forEach(node => {
+            const [min,max] = numberRules[node.id] || [0,Infinity];
+            node.setCustomValidity("");
+            const n = Number(node.value);
+            if (!node.value.trim() || !Number.isFinite(n) || n < min || n > max || !node.checkValidity()) {
+                node.setCustomValidity(`Enter a valid number between ${min === Number.MIN_VALUE ? "greater than zero" : min} and ${Number.isFinite(max) ? max : "the allowed maximum"}.`);
+                node.classList.add("is-invalid"); node.setAttribute("aria-invalid","true");
+                if (valid) { node.reportValidity(); node.focus(); } valid = false;
+            } else { node.classList.remove("is-invalid"); node.removeAttribute("aria-invalid"); }
+        });
+        if (valid && sectionId === "section-risk" && Number(val("risk-min-lot")) > Number(val("risk-max-lot"))) {
+            setFeedback("Minimum lot cannot exceed maximum lot.", true); return false;
         }
+        return valid;
     }
-
+    function safeRenderSection(sectionId, label, renderer) {
+        const root = document.getElementById(sectionId);
+        if (!root) return;
+        const data = {
+            "section-overview":[state.status.control,state.lebprimeLive,state.lebprimeTrades],
+            "section-strategies":[state.config.lebprime_v3_4_0,state.lebprimeLive],
+            "section-risk":[state.config.risk,state.config.exit],
+            "section-config":[state.config.dashboard,state.configMetadata,state.status.control?.last_config_apply,isReadonly()],
+            "section-trades":[state.lebprimeTrades,state.positions],
+            "section-performance":[state.status.runtime?.daily_performance,state.lebprimeTrades],
+            "section-indicator-lab":[state.indicatorLab,state.jobs,state.indicatorLabUi.message,state.indicatorLabUi.error],
+            "section-health":[state.status.control,state.status.runtime,state.jobs,state.workerStatus],
+            "section-alerts":[state.config.telegram], "section-logs":[state.logs,state.audit]
+        };
+        const signature = JSON.stringify(data[sectionId]);
+        if (renderSignatures.get(sectionId) === signature) return;
+        const editing = root.contains(document.activeElement) && document.activeElement.matches("input,textarea,select,[contenteditable]");
+        if (editing || dirtySections.has(state.activeSection)) return;
+        const scrolls = Array.from(root.querySelectorAll(".table-responsive,.sticky-log"), n => [n.scrollTop,n.scrollLeft]);
+        const details = Array.from(root.querySelectorAll("details"), n => n.open);
+        try {
+            renderer(); renderSignatures.set(sectionId, signature);
+            window.LebPrimeUI.cards(root);
+            root.querySelectorAll(".table-responsive,.sticky-log").forEach((n,i)=>{ if(scrolls[i]) [n.scrollTop,n.scrollLeft]=scrolls[i]; });
+            root.querySelectorAll("details").forEach((n,i)=>{ n.open=details[i] || false; });
+        } catch (error) { setFeedback(`${label}: ${error.message}`, true); }
+    }
     function renderAll(options = {}) {
         captureIndicatorLabDraft();
         const preserveIndicatorLabEditing = !options.force && indicatorLabInteractionLocked();
-        captureUiState();
-        renderTopStatusBar();
-        renderQuickActions();
-        safeRenderSection("section-overview", "Overview", renderOverview);
-        safeRenderSection("section-strategies", "Strategies", renderStrategies);
-        safeRenderSection("section-risk", "Risk Management", renderRisk);
-        safeRenderSection("section-trades", "Trades", renderTrades);
-        safeRenderSection("section-performance", "Performance", renderPerformance);
-        if (!preserveIndicatorLabEditing) {
-            safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab);
+        renderTopStatusBar(); renderQuickActions();
+        switch (state.activeSection) {
+            case "overview": safeRenderSection("section-overview", "Overview", renderOverview); break;
+            case "strategies": safeRenderSection("section-strategies", "Strategies", renderStrategies); break;
+            case "risk": safeRenderSection("section-risk", "Risk Management", renderRisk); break;
+            case "config": safeRenderSection("section-config", "Settings", renderConfig); break;
+            case "trades": safeRenderSection("section-trades", "Trades", renderTrades); break;
+            case "performance": safeRenderSection("section-performance", "Performance", renderPerformance); break;
+            case "indicator-lab": if (!preserveIndicatorLabEditing) safeRenderSection("section-indicator-lab", "Indicator Lab", renderIndicatorLab); break;
+            case "system":
+                safeRenderSection("section-health", "Health", renderHealth);
+                safeRenderSection("section-alerts", "Alerts", renderAlerts);
+                safeRenderSection("section-logs", "Logs", renderLogs); break;
         }
-        safeRenderSection("section-config", "Settings", renderConfig);
-        // System tab: health, Telegram alerts and logs stacked on one page.
-        safeRenderSection("section-health", "System Health", renderHealth);
-        safeRenderSection("section-alerts", "Alerts", renderAlerts);
-        safeRenderSection("section-logs", "Logs", renderLogs);
-        restoreUiState();
-        activateSection(state.activeSection);
-        if (isReadonly()) {
-            document.querySelectorAll("#section-strategies input, #section-strategies select, #section-strategies button, #section-risk input, #section-risk button, #section-alerts input, #section-alerts button, #section-trades input, #section-trades button, #section-performance input, #section-performance button, #section-indicator-lab input, #section-indicator-lab select, #section-indicator-lab button, #section-config input, #section-config button, #section-config textarea").forEach((node) => {
-                if (node.id !== "dashboard-readonly-mode" && node.id !== "apply-runtime-control") {
-                    node.disabled = true;
-                }
-            });
-            document.querySelectorAll("#import-config-button").forEach((node) => { node.disabled = true; });
+        document.querySelectorAll(".dashboard-section input,.dashboard-section select,.dashboard-section textarea,.dashboard-section button").forEach(node => {
+            if (["dashboard-readonly-toggle","export-config-button"].includes(node.id) || node.classList.contains("card-details")) return;
+            if (isReadonly() && !node.disabled) { node.dataset.readonlyDisabled="true"; node.disabled=true; }
+            else if (!isReadonly() && node.dataset.readonlyDisabled) { node.disabled=false; delete node.dataset.readonlyDisabled; }
+        });
+    }
+    let pollTimer = null, polling = false;
+    const pollDue = new Map(), pollErrors = new Map();
+    async function poll() {
+        if (polling || document.hidden) return;
+        polling = true;
+        const seconds = Math.max(2,num(state.config.dashboard?.refresh_seconds,5));
+        const jobs = [[refreshStatus,seconds],[refreshPositions,Math.max(5,seconds)],[fetchLebprimeTrades,20],[refreshLogs,15],[fetchJobs,5],[fetchWorkerStatus,5],[fetchIndicatorLab,10]];
+        try {
+            for (const [load,delay] of jobs) {
+                if (document.hidden) break;
+                if (load === fetchIndicatorLab && state.activeSection !== "indicator-lab") continue;
+                if (load === refreshLogs && state.activeSection !== "system") continue;
+                if ((pollDue.get(load) || 0) > Date.now()) continue;
+                try { await load(); pollErrors.delete(load); }
+                catch (error) { pollErrors.set(load,error.message); }
+                finally { pollDue.set(load,Date.now()+delay*1000); }
+            }
+            const banner = document.getElementById("connection-banner");
+            banner.hidden = !pollErrors.size;
+            banner.textContent = pollErrors.size ? "Connection lost, retrying… Last successful data remains visible." : "";
+        } finally {
+            polling = false;
+            if (!document.hidden) pollTimer = setTimeout(poll,1000);
         }
     }
 
     async function boot() {
+        document.getElementById("open-controls").onclick = () => document.getElementById("controls-sheet").showModal();
+        document.getElementById("close-controls").onclick = () => document.getElementById("controls-sheet").close();
+        document.getElementById("mobile-navigation").onclick = event => {
+            const open = document.getElementById("dashboard-tabs").classList.toggle("mobile-open");
+            event.currentTarget.setAttribute("aria-expanded",String(open));
+        };
+        document.addEventListener("input", event => {
+            const section = event.target.closest("[data-dashboard-section]");
+            if (!section) return;
+            if (event.target.setCustomValidity) event.target.setCustomValidity("");
+            if (["config","risk","system"].includes(section.dataset.dashboardSection)) dirtySections.add(section.dataset.dashboardSection);
+        });
         bindTabs();
         window.addEventListener("beforeunload", (event) => {
-            if (!state.strategiesUi.dirty) return;
+            if (!state.strategiesUi.dirty && !dirtySections.size) return;
             event.preventDefault();
             event.returnValue = "";
         });
@@ -1912,14 +1980,11 @@ const brokerEntries = asArray(status.broker_entries);
                 setFeedback(`Dashboard loaded with partial data: ${error.message}`, true);
             }
         }
-        const refreshSeconds = Math.max(2, num(state.config.dashboard?.refresh_seconds || 5, 5));
-        setInterval(refreshStatus, refreshSeconds * 1000);
-        setInterval(refreshPositions, Math.max(5, refreshSeconds) * 1000);
-        setInterval(fetchLebprimeTrades, 20000);
-        setInterval(refreshLogs, 15000);
-        setInterval(fetchJobs, 5000);
-        setInterval(fetchWorkerStatus, 5000);
-        setInterval(fetchIndicatorLab, 10000);
+        document.addEventListener("visibilitychange", () => {
+            clearTimeout(pollTimer);
+            if (!document.hidden) { pollDue.clear(); poll(); }
+        });
+        poll();
     }
 
     document.addEventListener("DOMContentLoaded", boot);

@@ -29,6 +29,7 @@ from services.job_service import JobService  # noqa: E402
 from services.lebprime_live import LebPrimeLiveService  # noqa: E402
 from services.manual_trade_service import ManualTradeService  # noqa: E402
 from services.operator_service import OperatorService  # noqa: E402
+from services.telegram_trade_watcher import TelegramTradeWatcher
 from services.telegram_command_service import TelegramCommandService  # noqa: E402
 from utils import load_runtime_config  # noqa: E402
 
@@ -62,8 +63,9 @@ def create_app() -> FastAPI:
         password=config.get("dashboard", {}).get("password") or None,
     )
 
-    app = FastAPI(title="Trading Bot Control Dashboard", version="1.0.0")
+    app = FastAPI(title="Trading Bot Control Dashboard", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.telegram_command_service = telegram_command_service
+    app.state.telegram_trade_watcher = TelegramTradeWatcher(PROJECT_ROOT, config_manager.load_runtime, manual_trade_service.trade_history)
     templates = Jinja2Templates(directory=str(PROJECT_ROOT / "dashboard" / "templates"))
     app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "dashboard" / "static")), name="static")
     app.include_router(
@@ -94,10 +96,12 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup_remote_control() -> None:
         app.state.telegram_command_service.start()
+        app.state.telegram_trade_watcher.start()
 
     @app.on_event("shutdown")
     async def shutdown_remote_control() -> None:
         app.state.telegram_command_service.stop()
+        app.state.telegram_trade_watcher.stop()
 
     return app
 

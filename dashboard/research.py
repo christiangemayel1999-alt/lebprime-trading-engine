@@ -172,6 +172,8 @@ class ResearchReports:
 
     def trade_detail(self, relative: str, group: str) -> dict[str, Any]:
         path = self.resolve(relative)
+        if not self.is_trades_file(path):
+            raise HTTPException(status_code=400, detail="not a trades file (needs net_r and a time or year column)")
         analysis = self._analysis(path)
         detail = analysis["groups"].get(group)
         if detail is None:

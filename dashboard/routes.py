@@ -78,7 +78,7 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         )
 
     @router.get("/health")
-    async def health() -> dict[str, Any]:
+    async def health(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return {"ok": True, "service": "trading-dashboard", "base_dir": str(base_dir)}
 
     @router.get("/api/config")
