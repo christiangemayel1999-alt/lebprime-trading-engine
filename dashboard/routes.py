@@ -402,19 +402,21 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # MT5-backed routes are plain "def" so FastAPI runs them in its thread pool: a slow or
+    # failing MT5 call must never block the event loop (it froze the whole dashboard).
     @router.get("/api/manual/positions")
-    async def manual_positions(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+    def manual_positions(_: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         return manual_trade_service.list_positions("dashboard", "dashboard")
 
     @router.get("/api/lebprime/trades")
-    async def lebprime_trades(days: int = 30, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+    def lebprime_trades(days: int = 30, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         try:
             return manual_trade_service.trade_history(days)
         except Exception as exc:  # MT5 unavailable: show the message instead of failing the page
             return {"ok": False, "message": str(exc), "trades": [], "summary": {}}
 
     @router.post("/api/control/close-all")
-    async def control_close_all(payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+    def control_close_all(payload: ToggleRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         return manual_trade_service.close_all_positions(payload.actor, "dashboard")
 
@@ -425,7 +427,7 @@ def create_router(services: dict[str, Any], templates: Jinja2Templates) -> APIRo
         return {"ok": True, "datasets": indicator_lab_service.dataset_service.list_datasets()}
 
     @router.post("/api/indicator-lab/datasets/mt5")
-    async def indicator_lab_create_dataset(payload: IndicatorDatasetCreateRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
+    def indicator_lab_create_dataset(payload: IndicatorDatasetCreateRequest, _: None = Depends(dashboard_auth.dependency)) -> dict[str, Any]:
         assert_not_readonly()
         if indicator_lab_service is None:
             raise HTTPException(status_code=503, detail="Indicator Lab service not configured")

@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from logger import BotLogger
-from mt5_connector import MT5Connector, mt5
+import threading
+import time
+
+from mt5_connector import MT5_IMPORT_ERROR, MT5Connector, mt5
 from services.audit_service import AuditService
 from services.config_manager import ConfigManager
 from services.control_state import ControlStateService
@@ -33,6 +36,11 @@ class ManualActionResult:
         return {"ok": self.ok, "message": self.message, **self.data}
 
 
+# After a failed MT5 connection, answer "unavailable" straight away for this long instead of
+# running the connector's reconnect loop (3 attempts with 5 s pauses) on every dashboard poll.
+MT5_FAILURE_COOLDOWN_SECONDS = 60.0
+
+
 class ManualTradeService:
     """Execute validated manual trade actions for dashboard and Telegram."""
 
@@ -50,6 +58,9 @@ class ManualTradeService:
         self.logger = BotLogger(self.base_dir, self.config_manager.load_runtime())
         self.database = DatabaseService(self.base_dir / self.config_manager.load_runtime()["storage"]["database_path"])
         self.trade_journal = TradeJournalService(self.base_dir, self.database, self.logger, self.config_manager.load_runtime())
+        self._mt5_lock = threading.Lock()
+        self._mt5_failed_at: float | None = None
+        self._mt5_failure_reason = ""
 
     def list_positions(self, actor: str, source: str) -> dict[str, Any]:
         """Return current bot-managed positions for the configured symbol."""
@@ -376,7 +387,34 @@ class ManualTradeService:
         return ExecutionService(MT5Broker(connector))
 
     def _ensure_connection(self, connector: MT5Connector) -> dict[str, Any]:
-        """Ensure MT5 is connected and the configured symbol is ready."""
+        """Ensure MT5 is connected and the configured symbol is ready.
+
+        Fails fast when this process has no MT5 at all (the VPS dashboard runs without the
+        gateway) or when a connection failed less than a minute ago, and lets only one caller
+        at a time run the slow reconnect, so dashboard polls cannot pile up behind it.
+        """
+        if MT5_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                "MT5 is not available in this process: the dashboard on this server has no MT5 "
+                "connection of its own (the live bot has its own, separate one)"
+            )
+        if not self._mt5_lock.acquire(timeout=1.0):
+            raise RuntimeError("MT5 connection check already in progress, try again shortly")
+        try:
+            if self._mt5_failed_at is not None and time.monotonic() - self._mt5_failed_at < MT5_FAILURE_COOLDOWN_SECONDS:
+                raise RuntimeError(f"MT5 connection unavailable (cached): {self._mt5_failure_reason}")
+            try:
+                report = self._ensure_connection_uncached(connector)
+            except Exception as exc:
+                self._mt5_failed_at = time.monotonic()
+                self._mt5_failure_reason = str(exc)
+                raise
+            self._mt5_failed_at = None
+            return report
+        finally:
+            self._mt5_lock.release()
+
+    def _ensure_connection_uncached(self, connector: MT5Connector) -> dict[str, Any]:
         connection_stage = connector.connection_health_check(reconnect_if_needed=True)
         if not bool(connection_stage.get("ok")):
             raise RuntimeError(f"MT5 connection unavailable: {connection_stage.get('reason_code')}")
