@@ -746,3 +746,30 @@ def test_strategy_runtime_controls_are_present_and_configured():
     assert "Families" in source
     assert "Duplicate Suppressed" in source
     assert "/api/strategies/lebprime-v3-4-0/status" in source
+
+
+def test_live_service_defaults_to_tradingview_v340_chart_parity(tmp_path):
+    service = _service(tmp_path)
+    params = service.contexts["XAUUSD-M1"].engine.parameters
+    assert params["tv_zone_parity"] is True
+    assert params["zone_window_bars"] == 500
+    assert params.get("exit_mode", "Targets") == "Targets"  # trailing exit stays off
+
+    config = _config()
+    config["lebprime_v3_4_0"]["parameters"].update({"tv_zone_parity": False, "zone_window_bars": 0})
+    explicit = LebPrimeLiveService(config, tmp_path / "explicit.db", risk_state={})
+    params = explicit.contexts["XAUUSD-M1"].engine.parameters
+    assert params["tv_zone_parity"] is False and params["zone_window_bars"] == 0
+
+
+def test_fetch_covers_zone_window_plus_warmup(tmp_path):
+    asked = []
+
+    class CountingConnector(_FakeConnector):
+        def fetch_rates(self, timeframe, bars, min_rows=1):
+            asked.append((timeframe, bars))
+            return super().fetch_rates(timeframe, bars, min_rows)
+
+    service = _service(tmp_path, enabled=True, mode="DRY", connector_factory=lambda mapping: CountingConnector(mapping))
+    service._fetch_frame(service.contexts["XAUUSD-M5"], datetime(2026, 9, 17, 0, 45, tzinfo=timezone.utc))
+    assert asked[-1] == ("M5", 800)  # 500-candle chart window + 300 warm-up, not the 360 default

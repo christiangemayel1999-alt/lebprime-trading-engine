@@ -53,6 +53,11 @@ AUDIT_EVENTS = {
 }
 
 
+# TradingView chart parity for LebPrime Signals v3.4.0 (see _parameters).
+V340_CHART_DEFAULTS = {"tv_zone_parity": True, "zone_window_bars": 500}
+WINDOW_WARMUP_BARS = 300
+
+
 # Engine events that end a trade (the bot closes whatever is still open at the broker).
 TRADE_EXIT_EVENTS = {"TP2_HIT", "TP1_FINAL", "SL_HIT", "BE_EXIT", "TRAIL_EXIT", "EARLY_EXIT"}
 
@@ -133,6 +138,11 @@ class LebPrimeLiveService:
         configured = self._strategy_config().get("parameters", {})
         parameters = dict(configured) if isinstance(configured, dict) else {}
         parameters.update({"gold_buffer": 1.0, "us30_buffer": 30.0, "nas_buffer": 15.0})
+        # Trade the zones TradingView shows for LebPrime Signals v3.4.0: zones live and die by the Pine
+        # lifecycle (not by the bot's trades) and only the last 500 candles create zones, like a freshly
+        # loaded chart ("Recent history bars" = 500). An explicit value in the config still wins.
+        for name, value in V340_CHART_DEFAULTS.items():
+            parameters.setdefault(name, value)
         return parameters
 
     def _selected_symbols(self) -> list[str]:
@@ -245,6 +255,10 @@ class LebPrimeLiveService:
     def _fetch_frame(self, context: LiveContext, now_utc: datetime) -> pd.DataFrame:
         connector = self._connector(context.logical_symbol)
         bars = max(120, int(self._strategy_config().get("bars_to_fetch", 360)))
+        window = int(context.engine.parameters.get("zone_window_bars", 0) or 0)
+        if window > 0:
+            # The zone window needs its own candles plus warm-up for ATR, average body and swings.
+            bars = max(bars, window + WINDOW_WARMUP_BARS)
         if context.timeframe == "M45":
             source = connector.fetch_rates("M15", bars * 3 + 6, min_rows=3)
             return aggregate_m45(source, now_utc=now_utc).tail(bars).reset_index(drop=True)
