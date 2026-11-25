@@ -35,6 +35,7 @@
     <div id="section-strategies" class="dashboard-section d-none" data-dashboard-section="strategies"></div>
     <div id="section-indicator-lab" class="dashboard-section d-none" data-dashboard-section="indicator-lab"></div>
     <div id="strategy-test-panel" class="d-none"></div>
+    <div id="time-machine-panel" class="d-none"></div>
     <div id="section-trades" class="dashboard-section d-none" data-dashboard-section="trades"></div>
     <div id="section-performance" class="dashboard-section d-none" data-dashboard-section="performance"></div>
     <div id="section-risk" class="dashboard-section d-none" data-dashboard-section="risk"></div>
@@ -46,4 +47,5 @@
     </div>
 </main>
 <script src="{{ url_for('static', path='/strategy_tests.js') }}" defer></script>
+<script src="{{ url_for('static', path='/time_machine.js') }}" defer></script>
 {% endblock %}

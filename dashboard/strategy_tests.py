@@ -93,6 +93,11 @@ class StrategyTests:
         summary = self._json(folder / "summary.json") if (folder / "summary.json").is_file() else {}
         if summary:
             item["total"] = (summary.get("symbols", {}).get("ALL") or {}).get("total")
+            if "analogs" in summary:  # Time Machine run: headline odds for the list
+                analogs = summary.get("analogs") or {}
+                head = next((t for t in analogs.get("tiers", []) if t.get("key") == analogs.get("headline")), {})
+                item["odds"] = {"trades": head.get("trades"), "win_pct": head.get("win_pct"), "avg_r": head.get("avg_r"),
+                                "mc_tp_pct": (summary.get("monte_carlo") or {}).get("p_tp_first")}
         if full:
             item["progress"] = status.get("progress", [])
             item["summary"] = summary or None
@@ -100,11 +105,19 @@ class StrategyTests:
             item["traceback"] = status.get("traceback")
         return item
 
-    def list(self, limit: int = 30) -> list[dict[str, Any]]:
+    def list(self, limit: int = 30, kind: str | None = "strategy") -> list[dict[str, Any]]:
+        """Newest first. kind "strategy" = strategy tests, "time_machine" = Time Machine runs, None = every queued job."""
         if not self.root.is_dir():
             return []
         folders = sorted((p for p in self.root.iterdir() if p.is_dir() and (p / "request.json").is_file()), reverse=True)
-        return [self.describe(p) for p in folders[:limit]]
+        out = []
+        for folder in folders:
+            if len(out) >= limit:
+                break
+            item = self.describe(folder)
+            if kind is None or (item["request"].get("kind") or "strategy") == kind:
+                out.append(item)
+        return out
 
     def dispatcher_alive(self) -> bool:
         try:
@@ -149,7 +162,7 @@ class StrategyTests:
             validate_parameters("LEBPRIME", payload.parameters)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        waiting = [t for t in self.list(limit=50) if t["state"] in {"QUEUED", "RUNNING"}]
+        waiting = [t for t in self.list(limit=50, kind=None) if t["state"] in {"QUEUED", "RUNNING"}]
         if len(waiting) >= MAX_WAITING:
             raise HTTPException(status_code=429, detail=f"{len(waiting)} tests are already queued or running; wait for one to finish")
         test_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
