@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Start strategy tests that the dashboard queued (Indicator Lab tab) inside the capped research sandbox.
+# Runs as root from lebprime-research-dispatch.timer every ~15 s. The dashboard only writes
+#   /var/lib/lebprime/reports/dashboard_tests/<id>/request.json
+# and this script only ever runs one fixed command for it:
+#   lebprime-research --detach python /opt/lebprime/app/scripts/strategy_test.py <that folder>
+# so the request content is parsed by the sandboxed job (as lebprime, no secrets), never by root.
+# One test at a time. A "cancel" file in the folder stops a running test or drops a queued one.
+# Root keeps its own bookkeeping in /var/lib/lebprime-dispatch (root-owned, readable by the dashboard).
+set -euo pipefail
+QUEUE=/var/lib/lebprime/reports/dashboard_tests
+STATE=/var/lib/lebprime-dispatch
+SCRIPT=/opt/lebprime/app/scripts/strategy_test.py
+install -d -m 755 -o root -g root "$STATE"
+[[ -d "$QUEUE" && ! -L "$QUEUE" ]] || exit 0
+
+running=""
+for f in "$STATE"/*.unit; do
+  [[ -e "$f" ]] || continue
+  id=$(basename "$f" .unit); unit=$(<"$f")
+  [[ "$unit" =~ ^lebprime-research-[0-9]{8}-[0-9]{6}$ ]] || { rm -f "$f"; continue; }
+  if systemctl is-active --quiet "$unit"; then
+    if [[ -e "$QUEUE/$id/cancel" ]]; then
+      systemctl stop "$unit" || true
+      echo "canceled $(date -u +%FT%TZ)" > "$STATE/$id.done"; rm -f "$f"
+    else
+      running="$id"
+    fi
+  else
+    result=$(systemctl show -p Result --value "$unit" 2>/dev/null || echo unknown)
+    echo "${result:-unknown} $(date -u +%FT%TZ)" > "$STATE/$id.done"; rm -f "$f"
+    systemctl reset-failed "$unit" 2>/dev/null || true
+  fi
+done
+[[ -z "$running" ]] || exit 0
+
+for dir in "$QUEUE"/*; do
+  id=$(basename "$dir")
+  [[ "$id" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$ ]] || continue
+  [[ -d "$dir" && ! -L "$dir" && -f "$dir/request.json" && ! -L "$dir/request.json" ]] || continue
+  [[ -e "$STATE/$id.done" || -e "$STATE/$id.unit" ]] && continue
+  if [[ -e "$dir/cancel" ]]; then echo "canceled $(date -u +%FT%TZ)" > "$STATE/$id.done"; continue; fi
+  out=$(/opt/lebprime/deploy/bin/lebprime-research --detach /opt/lebprime/venv/bin/python "$SCRIPT" "$dir")
+  unit=$(sed -n 's/^started \(lebprime-research-[0-9]\{8\}-[0-9]\{6\}\)\..*/\1/p' <<<"$out")
+  if [[ -n "$unit" ]]; then echo "$unit" > "$STATE/$id.unit"; else echo "start_failed $(date -u +%FT%TZ)" > "$STATE/$id.done"; fi
+  logger -t lebprime-research-dispatch "dashboard test $id -> ${unit:-start failed}"
+  exit 0  # one at a time; unit names are per-second, so never start two in one run
+done
