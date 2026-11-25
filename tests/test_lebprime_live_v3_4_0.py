@@ -773,3 +773,18 @@ def test_fetch_covers_zone_window_plus_warmup(tmp_path):
     service = _service(tmp_path, enabled=True, mode="DRY", connector_factory=lambda mapping: CountingConnector(mapping))
     service._fetch_frame(service.contexts["XAUUSD-M5"], datetime(2026, 9, 17, 0, 45, tzinfo=timezone.utc))
     assert asked[-1] == ("M5", 800)  # 500-candle chart window + 300 warm-up, not the 360 default
+
+
+def test_v340_forward_snippet_is_one_entry_fixed_sl_trailing(tmp_path):
+    snippet = json.loads(Path("deploy/lebprime_v3_4_0.v340_forward.json").read_text())["lebprime_v3_4_0"]
+    config = _config()
+    config["lebprime_v3_4_0"]["parameters"].update(snippet["parameters"])
+    service = LebPrimeLiveService(config, tmp_path / "fwd.db", risk_state={})
+    context = service.contexts["XAUUSD-M5"]
+    zone = _zone("XAU-5M-B-0917-LEB01", "DEMAND", "XAUUSD", "M5", 100.0, 102.0)
+    assert [label for _, label, _ in service._entry_specs(zone)] == ["ENTRY1"]
+    assert service._broker_stop(context, zone) == float(zone.sl_price)   # fixed broker SL, no emergency stop
+    assert service._broker_target(context, zone) == 0.0                 # no fixed TP: the trailing stop exits
+    params = context.engine.parameters
+    assert params["be_trigger_r"] == 0.0 and params["trail_start_r"] == 1.0
+    assert params["trail_mode"] == "ATR" and params["trail_atr_mult"] == 1.0

@@ -1,0 +1,17 @@
+{
+  "_comment": "Christian's v3.4.0 forward-test exit (25 Nov 2026, 13:01): TradingView v3.4.0 zones, 1 entry at Entry 1, fixed broker SL at the Pine structural SL (1R), no fixed TP. From +1R a profit stop follows the best price 1.0 x ATR(14) behind it, moved at candle closes, applied from the next candle. No early break-even. Merge into the live config (storage/config.json -> lebprime_v3_4_0) only after PR #9 is merged, with Christian's OK. Backtest 2020-19 Nov 2026, 6 symbols, M1-M45, real costs: -11,639R (44.4% win, avg win +1.10R, avg loss -1.03R), the best of the trails that start at +1R but negative in every year.",
+  "lebprime_v3_4_0": {
+    "bars_to_fetch": 800,
+    "parameters": {
+      "tv_zone_parity": true,
+      "zone_window_bars": 500,
+      "entry2_mode": "Off",
+      "stop_rule": "Price touch",
+      "exit_mode": "Trail",
+      "be_trigger_r": 0.0,
+      "trail_start_r": 1.0,
+      "trail_mode": "ATR",
+      "trail_atr_mult": 1.0
+    }
+  }
+}
