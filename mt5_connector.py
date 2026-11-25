@@ -292,7 +292,9 @@ class MT5Connector:
             raise ValueError("Order blocked: entry price is missing or invalid")
         if sl <= 0.0 and not managed_body_stop:
             raise ValueError("Order blocked: SL is missing or zero")
-        if tp <= 0.0:
+        # LebPrime v3.4.0 trailing exit: no broker TP by design, the bot-managed trailing stop is the exit.
+        # Such an order still must carry a real SL.
+        if tp <= 0.0 and not (managed_body_stop and sl > 0.0):
             raise ValueError("Order blocked: TP is missing or zero")
         dist = abs(price - sl)
         if sl > 0.0 and dist < min_sl_price:
