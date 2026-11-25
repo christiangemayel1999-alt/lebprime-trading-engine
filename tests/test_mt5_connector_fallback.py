@@ -118,3 +118,22 @@ def test_initialize_waits_for_transient_ipc_recovery_without_credentials(monkeyp
 
     assert connector.initialize() is True
     assert connector.connected is True
+
+
+def _validator() -> MT5Connector:
+    connector = MT5Connector({"mt5": {"symbol": "XAUUSD", "timeout": 1}, "logging": {}}, _FakeLogger())
+    connector.symbol_spec = {"point": 0.01, "digits": 2, "stops_level": 0, "pip_size": 0.01}
+    return connector
+
+
+def test_lebprime_trailing_order_may_have_no_tp_but_needs_sl() -> None:
+    import pytest
+    connector = _validator()
+    # LebPrime v3.4.0 trailing exit: SL at the zone stop, no broker TP.
+    connector._validate_order_request({"action": 5, "price": 3500.0, "sl": 3490.0, "tp": 0.0, "comment": "LP340-ABC-ENTRY1"})
+    # Every other order still needs a TP.
+    with pytest.raises(ValueError, match="TP is missing"):
+        connector._validate_order_request({"action": 5, "price": 3500.0, "sl": 3490.0, "tp": 0.0, "comment": "other"})
+    # Without a TP it must carry a real SL.
+    with pytest.raises(ValueError, match="TP is missing"):
+        connector._validate_order_request({"action": 5, "price": 3500.0, "sl": 0.0, "tp": 0.0, "comment": "LP340-ABC-ENTRY1"})
