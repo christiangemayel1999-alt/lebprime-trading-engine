@@ -1,0 +1,17 @@
+{
+  "_comment": "Christian's v3.4.0 forward-test exit (25 Nov 2026): TradingView v3.4.0 zones, 1 entry at Entry 1, fixed broker SL at the Pine structural SL, no fixed TP, trailing stop from +2R kept 0.5R behind the best price (moves at candle closes), no early break-even. Merge into the live config (storage/config.json -> lebprime_v3_4_0) only with Christian's OK; without it the bot keeps 2 entries, candle-close SL and TP1/TP2. Backtest 2020-19 Nov 2026, 6 symbols, M1-M45, real costs: -11,511R (29.8% win, avg win +2.16R, avg loss -1.04R), the best of 15 trailing variants but negative in every year.",
+  "lebprime_v3_4_0": {
+    "bars_to_fetch": 800,
+    "parameters": {
+      "tv_zone_parity": true,
+      "zone_window_bars": 500,
+      "entry2_mode": "Off",
+      "stop_rule": "Price touch",
+      "exit_mode": "Trail",
+      "be_trigger_r": 0.0,
+      "trail_start_r": 2.0,
+      "trail_mode": "Distance R",
+      "trail_distance_r": 0.5
+    }
+  }
+}
