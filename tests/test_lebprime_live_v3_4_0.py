@@ -786,4 +786,5 @@ def test_v340_forward_snippet_is_one_entry_fixed_sl_trailing(tmp_path):
     assert service._broker_stop(context, zone) == float(zone.sl_price)   # fixed broker SL, no emergency stop
     assert service._broker_target(context, zone) == 0.0                 # no fixed TP: the trailing stop exits
     params = context.engine.parameters
-    assert params["be_trigger_r"] == 0.0 and params["trail_start_r"] == 2.0 and params["trail_distance_r"] == 0.5
+    assert params["be_trigger_r"] == 0.0 and params["trail_start_r"] == 1.0
+    assert params["trail_mode"] == "ATR" and params["trail_atr_mult"] == 1.0
