@@ -1715,13 +1715,15 @@ class MT5Connector:
             return normalize_price(round(float(value) / tick_size) * tick_size, digits)
         entry = _tick_price(float(entry_price))
         stop = _tick_price(float(sl))
-        target = _tick_price(float(tp))
-        if str(direction).upper() == "LONG" and not (stop < entry < target):
+        # tp <= 0 means no take profit (MT5 tp = 0), used by the trailing-stop exit.
+        no_target = float(tp or 0.0) <= 0.0
+        target = 0.0 if no_target else _tick_price(float(tp))
+        if str(direction).upper() == "LONG" and not (stop < entry and (no_target or entry < target)):
             return None, "invalid_protective_levels", {}
-        if str(direction).upper() == "SHORT" and not (target < entry < stop):
+        if str(direction).upper() == "SHORT" and not (entry < stop and (no_target or target < entry)):
             return None, "invalid_protective_levels", {}
         minimum_distance = float(symbol_spec.get("stops_level", 0) or 0) * float(symbol_spec.get("point", 10 ** -digits))
-        if minimum_distance > 0 and (abs(entry - stop) + 1e-12 < minimum_distance or abs(target - entry) + 1e-12 < minimum_distance):
+        if minimum_distance > 0 and (abs(entry - stop) + 1e-12 < minimum_distance or (not no_target and abs(target - entry) + 1e-12 < minimum_distance)):
             return None, "invalid_stops_minimum_distance", {
                 "entry": entry, "sl": stop, "tp": target, "minimum_distance": minimum_distance,
             }
