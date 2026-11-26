@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from dashboard.strategy_tests import StrategyTests
 from dashboard.time_machine import KIND, live_zones, queue_run, telegram_message
 from services.indicator_lab.time_machine import SYMBOLS, TIMEFRAMES
+from services import time_machine_decisions as decisions
 from utils import load_json, save_json_atomic
 
 POLL_SECONDS = 60
@@ -107,6 +108,29 @@ class TimeMachineWatcher:
                 self.cursor[name] = dict(list(items.items())[-2000:])
         return started
 
+    # ------------------------------------------------------------------ 2. decision per zone
+    def record_decisions(self) -> list[str]:
+        """Write each finished run's decision against its live zone id (and twin zone ids) for the dashboard/Telegram."""
+        recorded: list[str] = self.cursor.setdefault("recorded", [])
+        new = []
+        runs_to_zones: dict[str, list[str]] = {}
+        for key, run_id in (self.cursor.get("queued") or {}).items():
+            if run_id:
+                runs_to_zones.setdefault(run_id, []).append(key.split("|", 1)[0])
+        for item in self.tests.list(limit=200, kind=KIND):
+            if item["id"] in recorded or item["state"] != "COMPLETED":
+                continue
+            summary = self.tests._json(self.tests.root / item["id"] / "summary.json")
+            if not summary:
+                continue
+            zone_ids = {(item.get("request") or {}).get("live_zone_id"), *runs_to_zones.get(item["id"], [])} - {None, ""}
+            if zone_ids:
+                decisions.record(self.root, sorted(zone_ids), decisions.compact(summary, item["id"]))
+            recorded.append(item["id"])
+            new.append(item["id"])
+        self.cursor["recorded"] = recorded[-2000:]
+        return new
+
     # ------------------------------------------------------------------ 2. telegram
     def send_finished(self, telegram: dict[str, Any]) -> list[str]:
         since = self.cursor.setdefault("since", datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -142,6 +166,7 @@ class TimeMachineWatcher:
         now = now or datetime.now(timezone.utc)
         if cfg.get("auto_odds", True):
             self.queue_new_zones(cfg, now)
+        self.record_decisions()
         if cfg.get("telegram", True) and telegram.get("enabled"):
             self.send_finished(telegram)
         else:

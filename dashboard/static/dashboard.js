@@ -1035,8 +1035,8 @@ const brokerEntries = asArray(status.broker_entries);
                 <h2 class="h5 mb-1">LebPrime Trades (last ${num(history.days, 30).toFixed(0)} days)</h2>
                 <div class="small text-secondary mb-3">From MT5 deals on this account (bot magic number), P&amp;L after commission and swap. Each row is one entry (Entry 1 or Entry 2).${history.ok === false ? ` <span class="text-warning">MT5: ${esc(history.message || "unavailable")}</span>` : ""}</div>
                 ${lebprimeTradeSummaryCards(summary)}
-                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Opened (local)</th><th>Closed (local)</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Lot</th><th>Open</th><th>Close</th><th>P&amp;L</th><th>Result</th><th>Exit</th><th>Zone</th></tr></thead>
-                <tbody>${trades.map((t) => `<tr><td>${formatTime(t.open_time)}</td><td>${formatTime(t.close_time)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${esc(t.entry_label || "")}</td><td>${num(t.volume).toFixed(2)}</td><td>${esc(t.open_price)}</td><td>${t.close_price == null ? "-" : num(t.close_price).toFixed(2)}</td><td class="${num(t.pnl) >= 0 ? "text-success" : "text-danger"}">${num(t.pnl).toFixed(2)}</td><td>${t.result ? badge(t.result, t.result === "WIN" ? "success" : t.result === "LOSS" ? "danger" : "secondary") : badge(t.status, "warning")}</td><td>${esc(t.exit_reason || "-")}</td><td class="small">${esc(t.zone_id || (t.tracked_by_bot ? "" : "not in bot records"))}</td></tr>`).join("") || `<tr><td colspan="12" class="text-secondary">No LebPrime trades yet.</td></tr>`}</tbody></table></div>
+                <div class="table-responsive"><table class="table table-sm strategy-table"><thead><tr><th>Opened (local)</th><th>Closed (local)</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Lot</th><th>Open</th><th>Close</th><th>P&amp;L</th><th>Result</th><th>Exit</th><th>Zone</th><th>Time Machine</th></tr></thead>
+                <tbody>${trades.map((t) => `<tr><td>${formatTime(t.open_time)}</td><td>${formatTime(t.close_time)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${esc(t.entry_label || "")}</td><td>${num(t.volume).toFixed(2)}</td><td>${esc(t.open_price)}</td><td>${t.close_price == null ? "-" : num(t.close_price).toFixed(2)}</td><td class="${num(t.pnl) >= 0 ? "text-success" : "text-danger"}">${num(t.pnl).toFixed(2)}</td><td>${t.result ? badge(t.result, t.result === "WIN" ? "success" : t.result === "LOSS" ? "danger" : "secondary") : badge(t.status, "warning")}</td><td>${esc(t.exit_reason || "-")}</td><td class="small">${esc(t.zone_id || (t.tracked_by_bot ? "" : "not in bot records"))}</td><td class="small text-nowrap">${tmDecisionCell(t.zone_id)}</td></tr>`).join("") || `<tr><td colspan="13" class="text-secondary">No LebPrime trades yet.</td></tr>`}</tbody></table></div>
             </div></div>
             <div class="card border-0 shadow-sm"><div class="card-body">
                 <h2 class="h5">Open Positions</h2>
@@ -1174,7 +1174,17 @@ const brokerEntries = asArray(status.broker_entries);
     }
     async function fetchLebprimeTrades() {
         state.lebprimeTrades = await api("/api/lebprime/trades?days=30");
+        try { state.tmDecisions = (await api("/api/time-machine/decisions")).decisions || {}; } catch { state.tmDecisions = state.tmDecisions || {}; }
         renderAll();
+    }
+    // The Time Machine's decision for a trade's zone (display only; the bot does not use it).
+    function tmDecisionCell(zoneId) {
+        const d = zoneId ? (state.tmDecisions || {})[zoneId] : null;
+        if (!d) return zoneId ? '<span class="text-secondary">–</span>' : "";
+        const icon = { positive: "✅", negative: "❌", few: "⚠️", mixed: "🟡", none: "⚪" }[d.verdict] || "";
+        const word = { positive: "Positive", negative: "Negative", few: "Too few", mixed: "Mixed", none: "No history" }[d.verdict] || d.verdict;
+        const stats = d.trades ? ` · ${num(d.win_pct).toFixed(0)}% · ${num(d.avg_r) > 0 ? "+" : ""}${num(d.avg_r).toFixed(2)}R` : "";
+        return `${icon} ${esc(word)}${stats}`;
     }
     async function refreshPositions() {
         const positionsPayload = await api("/api/manual/positions");

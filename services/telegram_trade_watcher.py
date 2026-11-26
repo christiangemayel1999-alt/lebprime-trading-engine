@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
+from services.time_machine_decisions import line as time_machine_line, load as load_time_machine_decisions
 from services.telegram_notifier import TelegramNotifier, price
 from utils import load_json, save_json_atomic
 
@@ -45,6 +46,7 @@ class TelegramTradeWatcher:
         # Baseline once, so enabling the observer doesn't announce historical orders.
         baseline = not self.cursor.get("initialized")
         seen = self.cursor.setdefault("entries", {})
+        tm_index = load_time_machine_decisions(self.root)   # display only: the Time Machine's decision per zone
         for row in rows:
             key, status = row["idempotency_key"], row["broker_status"]
             if baseline or status not in {"PENDING","FILLED","CLOSED"}:
@@ -53,11 +55,12 @@ class TelegramTradeWatcher:
             if seen.get(key) == status: continue
             data = {"symbol":row.get("broker_symbol"), "side":row.get("side"), "zone_id":row.get("zone_id"),
                     "entry_label":f"Entry {row.get('entry_number')} of 2", "ticket":row.get("mt5_position_ticket") or row.get("mt5_order_ticket"),
-                    "entry":row.get("normalized_price") or row.get("entry_price"), "sl":row.get("sl"), "tp":row.get("tp"), "volume":row.get("volume")}
+                    "entry":row.get("normalized_price") or row.get("entry_price"), "sl":row.get("sl"), "tp":row.get("tp"), "volume":row.get("volume"),
+                    "time_machine": time_machine_line(tm_index.get(str(row.get("zone_id"))))}
             if status == "PENDING":
                 sent = notifier._send(f"📍 LIMIT placed · {data['symbol']} {data['side']}", [
                     f"Price {price(data['entry'],data)} · SL {price(data['sl'],data)} · TP {price(data['tp'],data)}",
-                    f"Zone {data['zone_id']} · {data['entry_label']} · #{data['ticket']}"])
+                    f"Zone {data['zone_id']} · {data['entry_label']} · #{data['ticket']}", data["time_machine"]])
             elif status == "FILLED":
                 sent = notifier.send_trade_open(data)
             else:

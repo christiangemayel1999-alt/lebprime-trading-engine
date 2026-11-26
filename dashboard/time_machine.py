@@ -188,6 +188,52 @@ def telegram_message(summary: dict[str, Any]) -> tuple[str, list[str]]:
     return title, lines[:4]
 
 
+def zone_outcomes(db_path: Path, since: str, limit: int = 2000) -> list[dict[str, Any]]:
+    """Live zones since `since` (not replays) with the bot's recorded outcome and whether a broker trade filled (read-only)."""
+    if not db_path or not Path(db_path).is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT z.zone_id, z.logical_symbol, z.timeframe, z.side, z.entry1, z.stop_loss, z.execution_status, z.theoretical_state, z.created_at, "
+                "json_extract(z.metadata_json, '$.limit_time') AS limit_time, json_extract(z.metadata_json, '$.result_r') AS result_r, "
+                "(SELECT COUNT(*) FROM lebprime_broker_entries b WHERE b.zone_id = z.zone_id AND b.historical = 0 AND b.broker_filled_at IS NOT NULL) AS filled "
+                "FROM lebprime_live_zones z WHERE z.created_at >= ? AND z.execution_status != 'HISTORICAL_REPLAY' ORDER BY z.created_at DESC LIMIT ?",
+                (since, int(limit))).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    closed = {"SL_HIT", "TP1_FINAL", "TP2_HIT", "TRAIL_EXIT", "BE_EXIT", "EARLY_EXIT"}
+    out = []
+    for r in rows:
+        state = str(r["theoretical_state"] or "")
+        out.append({"zone_id": r["zone_id"], "symbol": canonical_symbol(r["logical_symbol"]), "timeframe": r["timeframe"],
+                    "side": "BUY" if str(r["side"]).upper() in {"BUY", "DEMAND"} else "SELL", "entry1": r["entry1"], "sl": r["stop_loss"],
+                    "created_at": r["created_at"], "limit_time": r["limit_time"], "state": state, "execution_status": r["execution_status"],
+                    "result_r": r["result_r"] if state in closed else None, "closed": state in closed, "traded": bool(r["filled"])})
+    return out
+
+
+def scorecard(zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Time Machine verdict vs what the zone really did (the bot's recorded R), for zones that have closed."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for z in zones:
+        d = z.get("time_machine")
+        if not d or not z["closed"] or z["result_r"] is None:
+            continue
+        groups.setdefault(d.get("verdict") or "none", []).append(z)
+    out = []
+    for code, items in sorted(groups.items()):
+        rs = [float(z["result_r"]) for z in items]
+        traded = [float(z["result_r"]) for z in items if z["traded"]]
+        out.append({"verdict": code, "zones": len(rs), "win_pct": round(100 * sum(r > 0 for r in rs) / len(rs), 1), "net_r": round(sum(rs), 2),
+                    "avg_r": round(sum(rs) / len(rs), 3), "traded": len(traded), "traded_net_r": round(sum(traded), 2)})
+    return out
+
+
 def create_time_machine_router(base_dir: Path, auth_dependency: Callable[..., Any], audit_service: Any = None, db_path: Path | None = None,
                                dispatch_state: Path = Path("/var/lib/lebprime-dispatch"),
                                mt5_store: Path = Path("/var/lib/lebprime/mt5_data/M1"),
@@ -200,6 +246,25 @@ def create_time_machine_router(base_dir: Path, auth_dependency: Callable[..., An
         return {"ok": True, "runs": tests.list(max(1, min(int(limit), 100)), kind=KIND), "dispatcher_alive": tests.dispatcher_alive(),
                 "symbols": list(SYMBOLS), "timeframes": list(TIMEFRAMES), "data_until": tests.data_coverage(),
                 "watcher": watcher_status() if watcher_status else None}
+
+    @router.get("/api/time-machine/decisions")
+    def get_decisions() -> dict[str, Any]:
+        from services import time_machine_decisions
+
+        return {"ok": True, "decisions": time_machine_decisions.load(Path(base_dir))}
+
+    @router.get("/api/time-machine/zones")
+    def get_zone_decisions(days: int = 7) -> dict[str, Any]:
+        from datetime import timedelta
+
+        from services import time_machine_decisions
+
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 60)))).isoformat(timespec="seconds")
+        index = time_machine_decisions.load(Path(base_dir))
+        zones = zone_outcomes(db_path, since) if db_path else []
+        for z in zones:
+            z["time_machine"] = index.get(z["zone_id"])
+        return {"ok": True, "since": since, "zones": zones, "scorecard": scorecard(zones)}
 
     @router.get("/api/time-machine/live-zones")
     def get_live_zones(limit: int = 60) -> dict[str, Any]:

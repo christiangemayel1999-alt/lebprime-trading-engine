@@ -152,7 +152,8 @@ class TelegramNotifier:
         return self._send(f"🟢 {data.get('side') or 'Trade'} filled · {data.get('symbol') or 'Unknown symbol'} {data.get('timeframe') or ''}", [
             f"Entry {price(data.get('entry'), data)} · SL {price(data.get('sl'), data)} · TP {price(data.get('tp'), data)}",
             f"Lot {number(data.get('executed_volume') or data.get('volume'))} · Risk {money(data.get('risk_usd'))}",
-            f"Zone {data.get('zone_id') or data.get('setup_family') or 'not supplied'} · {data.get('entry_label') or ''} · #{data.get('ticket') or '—'}"])
+            f"Zone {data.get('zone_id') or data.get('setup_family') or 'not supplied'} · {data.get('entry_label') or ''} · #{data.get('ticket') or '—'}",
+            *([str(data["time_machine"])] if data.get("time_machine") else [])])
 
     def send_trade_close(self, data: dict[str, Any]) -> bool:
         pnl = data.get("pnl")
@@ -163,7 +164,8 @@ class TelegramNotifier:
         multiple = f" ({number(r, 1, True)}R)" if r is not None else ""
         return self._send(f"{label} {money(pnl)}{multiple} · {data.get('symbol') or 'Unknown symbol'} {data.get('side') or ''}", [
             f"Exit {price(data.get('exit_price'), data)} · {data.get('close_reason') or 'Close reason unavailable'}",
-            f"Zone {data.get('zone_id') or data.get('setup_family') or 'not supplied'} · #{data.get('ticket') or '—'}"])
+            f"Zone {data.get('zone_id') or data.get('setup_family') or 'not supplied'} · #{data.get('ticket') or '—'}",
+            *([str(data["time_machine"])] if data.get("time_machine") else [])])
 
     def send_signal(self, data: dict[str, Any]) -> bool:
         return self._send(f"📍 {data.get('symbol') or 'Unknown symbol'} {data.get('side') or ''} signal", [

@@ -225,7 +225,7 @@ def test_watcher_never_touches_mt5_or_order_code() -> None:
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} | {
         alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
     }
-    assert imported <= {"__future__", "sqlite3", "threading", "pathlib", "typing", "services.telegram_notifier", "utils"}
+    assert imported <= {"__future__", "sqlite3", "threading", "pathlib", "typing", "services.telegram_notifier", "services.time_machine_decisions", "utils"}
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} | {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     for forbidden in ("mt5", "MT5Connector", "trade_history", "order_send", "positions_get", "history_deals_get"):
         assert forbidden not in names, forbidden
