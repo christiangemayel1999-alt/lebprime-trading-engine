@@ -115,12 +115,14 @@ def load_frame(symbol: str, timeframe: str, start: str, end: str) -> tuple[pd.Da
 
 
 # ------------------------------------------------------------------ test
-def run_symbol(symbol: str, timeframe: str, start: str, end: str, parameters: dict) -> tuple[list[dict], str, int]:
+def run_symbol(symbol: str, timeframe: str, start: str, end: str, parameters: dict,
+               chart_folder: Path | None = None) -> tuple[list[dict], str, int]:
     from phase4_search import COMMISSION_PER_LOT, POINT, VALUE_PER_PRICE_PER_LOT
     from services.indicator_lab.lebprime_engine import LebPrimeEngine
 
     frame, source = load_frame(symbol, timeframe, start, end)
-    result = LebPrimeEngine(parameters, symbol=symbol, timeframe=timeframe).run(frame)
+    engine = LebPrimeEngine(parameters, symbol=symbol, timeframe=timeframe)
+    result = engine.run(frame)
     point, value, commission = POINT.get(symbol, 0.0), VALUE_PER_PRICE_PER_LOT.get(symbol, 0.0), COMMISSION_PER_LOT.get(symbol, 0.0)
     single = parameters.get("entry2_mode") == "Off" or parameters.get("entry_mode") == "Close confirmation"
     rows = []
@@ -143,6 +145,14 @@ def run_symbol(symbol: str, timeframe: str, start: str, end: str, parameters: di
             "exit_state": z.terminal_state, "entries_filled": filled, "risk_price": round(risk, 6),
             "gross_r": round(gross, 4), "cost_r": round(spread_r + commission_r, 4), "net_r": round(gross - spread_r - commission_r, 4),
         })
+    if chart_folder is not None:
+        # Display only: candles + zones for the dashboard's trade chart. A failure here never fails the test.
+        try:
+            from strategy_test_chart import write_chart
+
+            write_chart(chart_folder, symbol, timeframe, frame, result, start, rows, trail=engine._trail_exit())
+        except Exception as exc:  # noqa: BLE001
+            print(f"chart files for {symbol} not written: {type(exc).__name__}: {exc}", file=sys.stderr)
     return rows, source, len(frame)
 
 
@@ -203,7 +213,7 @@ def main(folder: Path) -> None:
             job.note(f"{symbol} {timeframe}: loading candles and running the engine")
             params = validate_parameters("LEBPRIME", {**parameters, **(per_symbol.get(symbol) or {})})
             params["apply_history_window"] = False
-            rows, source, bars = run_symbol(symbol, timeframe, start, end, params)
+            rows, source, bars = run_symbol(symbol, timeframe, start, end, params, chart_folder=folder)
             sources[symbol] = {"file": source, "bars": bars}
             all_rows += rows
             job.note(f"{symbol} {timeframe}: {len(rows)} trades, {sum(r['net_r'] for r in rows):+.1f}R net ({time.time() - t0:.0f} s)")

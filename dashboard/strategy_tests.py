@@ -20,6 +20,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from dashboard import strategy_test_chart
+from dashboard.strategy_test_chart import chart_symbols
+
 SYMBOLS = ("XAUUSD", "XAGUSD", "US30", "USTEC", "WTI", "EURUSD")
 TIMEFRAMES = ("M1", "M2", "M3", "M5", "M10", "M15", "M30", "H1", "H4")
 MAX_WAITING = 3
@@ -102,6 +105,7 @@ class StrategyTests:
             item["progress"] = status.get("progress", [])
             item["summary"] = summary or None
             item["has_trades"] = (folder / "trades.csv").is_file()
+            item["chart_symbols"] = chart_symbols(folder)
             item["traceback"] = status.get("traceback")
         return item
 
@@ -222,5 +226,16 @@ def create_strategy_test_router(base_dir: Path, auth_dependency: Callable[..., A
         if not path.is_file():
             raise HTTPException(status_code=404, detail="no trades file yet")
         return FileResponse(path, media_type="text/csv", filename=f"strategy_test_{test_id}.csv")
+
+    @router.get("/api/strategy-tests/{test_id}/chart")
+    def chart_overview(test_id: str, symbol: str) -> dict[str, Any]:
+        """Trade list + candle range of one symbol of a finished test (display only)."""
+        return {"ok": True, **strategy_test_chart.overview(tests.folder(test_id), symbol)}
+
+    @router.get("/api/strategy-tests/{test_id}/chart/bars")
+    def chart_bars(test_id: str, symbol: str, t0: int | None = None, t1: int | None = None,
+                   i0: int | None = None, i1: int | None = None) -> dict[str, Any]:
+        """Candles and the zones that overlap them, for a time span (t0..t1) or bar indexes (i0..i1)."""
+        return {"ok": True, **strategy_test_chart.window(tests.folder(test_id), symbol, t0, t1, i0, i1)}
 
     return router
