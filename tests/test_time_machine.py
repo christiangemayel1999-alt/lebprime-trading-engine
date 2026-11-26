@@ -228,3 +228,46 @@ def test_watcher_ignores_old_zones(tmp_path):
     w = TimeMachineWatcher(tmp_path, lambda: {"time_machine": {}}, db, tmp_path / "dispatch")
     w.poll_once(datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc))              # zone created 24 Nov: too old
     assert client.get("/api/time-machine").json()["runs"] == []
+
+
+# ------------------------------------------------------------------ decisions per zone
+def test_watcher_records_the_decision_for_each_zone_and_the_zones_view_scores_it(tmp_path):
+    from datetime import datetime, timezone
+
+    from dashboard.time_machine_watcher import TimeMachineWatcher
+    from services import time_machine_decisions
+
+    client, root, db = _client(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE lebprime_broker_entries (zone_id TEXT, historical INTEGER, broker_filled_at TEXT)")
+    con.execute("INSERT INTO lebprime_broker_entries VALUES ('NAS-5M-B-1', 0, '2026-11-24T20:20:00+00:00')")
+    con.execute("UPDATE lebprime_live_zones SET theoretical_state='SL_HIT', metadata_json='{\"limit_time\": \"2026-11-24T19:55:00+00:00\", \"result_r\": -1.0}'")
+    con.commit()
+    con.close()
+    w = TimeMachineWatcher(tmp_path, lambda: {"time_machine": {}}, db, tmp_path / "dispatch")
+    w.cursor["since"] = "2000-01-01"
+    run_id = client.post("/api/time-machine", json=ZONE).json()["run"]["id"]
+    summary = {**_summary(), "request": {"limit_time": "2026-11-24T19:55:00+00:00"}}
+    (root / run_id / "summary.json").write_text(json.dumps(summary))
+    (root / run_id / "status.json").write_text(json.dumps({"state": "COMPLETED"}))
+    (tmp_path / "dispatch" / f"{run_id}.done").write_text("success")
+    w.poll_once(datetime(2026, 11, 24, 23, 0, tzinfo=timezone.utc))
+    d = time_machine_decisions.load(tmp_path)["NAS-5M-B-1"]
+    assert d["verdict"] == "positive" and d["exit"] == "trail" and d["trades"] == 40 and d["run_id"] == run_id
+    assert time_machine_decisions.line(d).startswith("🔮 TM ✅ Positive odds · 40 zones 38% win +0.05R · fill 70%")
+    assert client.get("/api/time-machine/decisions").json()["decisions"]["NAS-5M-B-1"]["verdict"] == "positive"
+    view = client.get("/api/time-machine/zones?days=60").json()
+    assert view["zones"][0]["traded"] and view["zones"][0]["result_r"] == -1.0 and view["zones"][0]["time_machine"]["verdict"] == "positive"
+    assert view["scorecard"] == [{"verdict": "positive", "zones": 1, "win_pct": 0.0, "net_r": -1.0, "avg_r": -1.0, "traded": 1, "traded_net_r": -1.0}]
+
+
+def test_trade_telegram_lines_carry_the_time_machine_decision():
+    from services.telegram_notifier import TelegramNotifier
+
+    n = TelegramNotifier(None, None, dry_print=True)
+    n.send_trade_open({"symbol": "XAUUSD", "side": "BUY", "zone_id": "Z1", "time_machine": "🔮 TM ❌ Negative odds"})
+    assert "🔮 TM ❌ Negative odds" in n.last_message
+    n.send_trade_close({"symbol": "XAUUSD", "side": "BUY", "zone_id": "Z1", "pnl": 5, "time_machine": "🔮 TM ✅ Positive odds"})
+    assert "🔮 TM ✅ Positive odds" in n.last_message
+    n.send_trade_open({"symbol": "XAUUSD", "side": "BUY", "zone_id": "Z1"})
+    assert "TM" not in n.last_message

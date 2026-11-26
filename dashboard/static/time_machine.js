@@ -16,7 +16,7 @@
     };
     const tone = (v) => (v === null || v === undefined ? "" : Number(v) > 0 ? "text-success" : Number(v) < 0 ? "text-danger" : "");
     const when = (iso) => (iso ? String(iso).slice(0, 16).replace("T", " ") : "");
-    const state = { runs: [], meta: null, zones: [], selected: null, detail: null, form: null, error: "", message: "", timer: null, busy: false };
+    const state = { decisionZones: null, runs: [], meta: null, zones: [], selected: null, detail: null, form: null, error: "", message: "", timer: null, busy: false };
 
     async function api(path, options = {}) {
         const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -167,12 +167,37 @@
             <div class="small text-secondary mt-2">Zone library: ${esc(lib.zones)} engine zones, ${esc(lib.trades)} filled trades, ${esc(when(lib.data_start))} → ${esc(when(lib.data_end))}, built ${esc(when(lib.built_at))} UTC (rebuilt weekly). ${esc(s.method || "")}</div>`;
     }
 
+    const ICON = { positive: "✅", negative: "❌", few: "⚠️", mixed: "🟡", none: "⚪" };
+    const WORD = { positive: "Positive", negative: "Negative", few: "Too few", mixed: "Mixed", none: "No history" };
+    function decisionsHtml() {
+        const d = state.decisionZones;
+        if (!d || !(d.zones || []).length) return "";
+        const score = (d.scorecard || []).map((g) => `<tr><td>${ICON[g.verdict] || ""} ${esc(WORD[g.verdict] || g.verdict)}</td><td class="text-end">${g.zones}</td>
+            <td class="text-end">${num(g.win_pct)}%</td><td class="text-end ${tone(g.net_r)}">${num(g.net_r, 1, true)}</td><td class="text-end ${tone(g.avg_r)}">${num(g.avg_r, 2, true)}</td>
+            <td class="text-end">${g.traded}</td><td class="text-end ${tone(g.traded_net_r)}">${num(g.traded_net_r, 1, true)}</td></tr>`).join("");
+        const rows = d.zones.slice(0, 150).map((z) => {
+            const tm = z.time_machine;
+            const res = z.result_r == null ? "" : Number(z.result_r);
+            const agree = !tm || res === "" || !["positive", "negative"].includes(tm.verdict) ? "" : ((tm.verdict === "positive") === (res > 0) ? "✔" : "✘");
+            return `<tr><td class="text-nowrap">${esc(when(z.created_at))}</td><td class="text-nowrap">${esc(z.symbol)} ${esc(z.timeframe)} ${esc(z.side)}<div class="small text-secondary">${esc(z.zone_id)}</div></td>
+                <td>${esc(z.state)}<div class="small text-secondary">${esc(z.execution_status)}</div></td><td>${z.traded ? "yes" : ""}</td>
+                <td class="text-nowrap">${tm ? `${ICON[tm.verdict] || ""} ${esc(WORD[tm.verdict] || tm.verdict)}` : `<span class="text-secondary">${z.closed ? "not checked" : "waiting"}</span>`}</td>
+                <td class="text-end">${tm && tm.trades ? `${tm.trades} · ${num(tm.win_pct, 0)}%` : ""}</td><td class="text-end ${tone(tm?.avg_r)}">${tm && tm.trades ? num(tm.avg_r, 2, true) : ""}</td>
+                <td class="text-end">${tm && tm.p_fill != null ? num(tm.p_fill, 0) + "%" : ""}</td>
+                <td class="text-end ${tone(res)}">${res === "" ? "" : num(res, 2, true)}</td><td class="text-center">${agree}</td></tr>`;
+        }).join("");
+        return `<hr><h6 class="mb-1">Every live zone and the Time Machine's decision (last 7 days)</h6>
+            <div class="small text-secondary mb-2">The decision is for the bot's current exit and is made with data from before the LIMIT. "Result" is what the bot recorded for the zone once it closed. ✔ = the verdict matched the result. Display only: the bot does not use it.</div>
+            ${score ? `<div class="table-responsive mb-2"><table class="table table-sm mb-0"><thead><tr><th>Verdict</th><th class="text-end">Closed zones</th><th class="text-end">Won</th><th class="text-end">Net R</th><th class="text-end">Avg R</th><th class="text-end">Traded</th><th class="text-end">Traded net R</th></tr></thead><tbody>${score}</tbody></table></div>` : ""}
+            <div class="table-responsive" style="max-height:28rem;overflow:auto"><table class="table table-sm mb-0"><thead><tr><th>Created (UTC)</th><th>Zone</th><th>State</th><th>Traded</th><th>Time Machine</th><th class="text-end">Similar · win</th><th class="text-end">R/trade</th><th class="text-end">Fill</th><th class="text-end">Result R</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    }
+
     function render(fromState = false) {
         if (!fromState && panel.querySelector("#tm-symbol")) state.form = readForm();
         panel.innerHTML = `<div class="card shadow-sm border-0 mt-3"><div class="card-body">
             <h5 class="card-title mb-1">Time Machine: odds for one zone</h5>
             <div class="small text-secondary mb-3">Before you take a zone, see how zones like it did before and what recent price paths say. Runs in the research sandbox on the server, never in the live bot, and never places trades.</div>
-            ${formHtml()}<hr>${listHtml()}${detailHtml()}</div></div>`;
+            ${formHtml()}<hr>${listHtml()}${detailHtml()}${decisionsHtml()}</div></div>`;
     }
 
     const typing = () => panel.contains(document.activeElement) && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName);
@@ -184,6 +209,7 @@
             state.runs = list.runs || [];
             state.meta = list;
             if (!state.zones.length || force) state.zones = (await api("/api/time-machine/live-zones?limit=80")).zones || [];
+            try { state.decisionZones = await api("/api/time-machine/zones?days=7"); } catch { /* optional section */ }
             if (!state.selected && state.runs.length) state.selected = state.runs[0].id;
             if (state.selected) state.detail = (await api(`/api/time-machine/${encodeURIComponent(state.selected)}`)).run;
         } catch (error) {

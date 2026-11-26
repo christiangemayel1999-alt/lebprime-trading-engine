@@ -58,3 +58,15 @@ Code: `services/indicator_lab/time_machine.py` (rules), `scripts/time_machine_jo
 * Turn things off in config.json: `"time_machine": {"auto_odds": false}` or `{"telegram": false}`;
   `"timeframes": ["M5", "M15"]` limits automatic runs to those timeframes.
 * Nothing runs until the dispatcher is on: `sudo systemctl enable --now lebprime-research-dispatch.timer`.
+
+## The decision on every zone and trade (added 26 Nov 2026)
+
+* When a run finishes, its decision (verdict for the bot's current exit, similar zones, win %, R per trade, Monte Carlo,
+  fill chance) is saved against the live zone id in `storage/time_machine_decisions.json`.
+* **Trades tab**: new "Time Machine" column with the decision for each trade's zone.
+* **Telegram**: "LIMIT placed", "filled" and "closed" messages get a line such as
+  `🔮 TM ❌ Negative odds · 44 zones 36% win -0.12R · fill 99%` (or "no decision yet" if the check is still running).
+* **Time Machine panel**: "Every live zone and the Time Machine's decision (last 7 days)" with each zone's state,
+  whether it was traded, the decision and the result the bot recorded, plus a scorecard of verdict vs result.
+  "not checked" = the zone closed without a check (e.g. it was created before automatic checks started).
+* Display and logging only: the bot never reads these decisions.
