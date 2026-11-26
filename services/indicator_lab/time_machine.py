@@ -211,6 +211,77 @@ def simulate(m: M1, side: int, entry: float, sl: float, tp: float, start: int, e
             "spread_r": float(m.sp[fj]) / risk}
 
 
+@dataclass
+class Trail:
+    """The bot's Trail exit (engine _manage_trail): no TP, the stop starts at the zone SL; at each candle close of the
+    zone's timeframe it may move to break-even and/or trail the best price; the new stop applies from the next candle."""
+    start_r: float = 1.0
+    mode: str = "ATR"            # "ATR" or "Distance R" ("Candle swing" is treated as ATR)
+    atr_mult: float = 1.0
+    distance_r: float = 1.0
+    be_r: float = 0.0
+    be_lock_r: float = 0.0
+
+    @classmethod
+    def from_parameters(cls, p: dict[str, Any]) -> "Trail":
+        return cls(start_r=float(p.get("trail_start_r", 1.0) or 0.0), mode=str(p.get("trail_mode", "ATR")),
+                   atr_mult=float(p.get("trail_atr_mult", 2.0) or 2.0), distance_r=float(p.get("trail_distance_r", 1.0) or 1.0),
+                   be_r=float(p.get("be_trigger_r", 0.0) or 0.0), be_lock_r=float(p.get("be_lock_r", 0.0) or 0.0))
+
+    def label(self) -> str:
+        how = f"{self.distance_r:g}R" if self.mode == "Distance R" else f"{self.atr_mult:g} ATR"
+        be = f", stop to break-even at +{self.be_r:g}R" if self.be_r > 0 else ""
+        return f"trailing stop from +{self.start_r:g}R, {how} behind the best price{be}, no TP"
+
+    def stops(self, side: int, fill: float, sl: float, best: np.ndarray, close: np.ndarray, atr: np.ndarray | float) -> np.ndarray:
+        """Stop in force DURING each candle, given each candle's best-so-far, close and ATR (all at that candle's close)."""
+        risk = (fill - sl) * side
+        mfe = (best - fill) * side / risk
+        u = np.full(best.shape, sl * side, float)
+        if self.be_r > 0:
+            u = np.where(mfe >= self.be_r, np.maximum(u, (fill + side * self.be_lock_r * risk) * side), u)
+        if self.start_r > 0:
+            dist = self.distance_r * risk if self.mode == "Distance R" else self.atr_mult * np.asarray(atr, float)
+            level = best - side * dist
+            ok = (mfe >= self.start_r) & ((close - level) * side > 0)
+            u = np.where(ok, np.maximum(u, level * side), u)
+        after = np.maximum.accumulate(u, axis=-1)                       # the stop only moves in the trade's favour
+        first = np.full(after.shape[:-1] + (1,), sl * side)
+        return np.concatenate([first, after[..., :-1]], axis=-1) * side   # applies from the NEXT candle
+
+
+def exit_trail(m: M1, fj: int, fill: float, side: int, sl: float, minutes: int, ctx: "Context", trail: Trail,
+               commission_price: float) -> dict[str, Any]:
+    """Trail exit for a trade filled at M1 index fj. Touch-triggered on M1 (buys exit on the bid, sells on the ask)."""
+    n = len(m)
+    jend = min(fj + MAX_HOLD_MIN, n - 1)
+    t, o, h, l, c, s = (getattr(m, f)[fj:jend + 1] for f in ("t", "o", "h", "l", "c", "sp"))
+    risk = (fill - sl) * side
+    bucket = t // minutes
+    first = np.r_[0, np.flatnonzero(np.diff(bucket)) + 1]
+    last = np.r_[first[1:] - 1, len(t) - 1]
+    ext = np.maximum.reduceat(h, first) if side > 0 else np.minimum.reduceat(l, first)
+    best = np.maximum.accumulate(ext) if side > 0 else np.minimum.accumulate(ext)
+    k_tf = np.searchsorted(ctx.tf_end, bucket[first] * minutes + minutes, side="right") - 1
+    atr = np.where(k_tf >= 0, ctx.tf_atr[np.maximum(k_tf, 0)], np.nan)
+    stop_b = trail.stops(side, fill, sl, best, c[last], np.nan_to_num(atr, nan=np.inf))
+    stop = np.repeat(stop_b, np.diff(np.r_[first, len(t)]))
+    hit = (l <= stop) if side > 0 else (h + s >= stop)
+    if hit.any():
+        k = int(np.argmax(hit))
+        st = stop[k]
+        px = (st if k == 0 else min(st, o[k])) if side > 0 else (st if k == 0 else max(st, o[k] + s[k]))
+        moved = abs(st - sl) > 1e-12
+        reason = "SL" if not moved else ("BE" if (px - fill) * side <= 0.25 * risk else "TRAIL")
+    else:
+        k = len(t) - 1
+        px = c[k] if side > 0 else c[k] + s[k]
+        reason = "TIME"
+    gross = (px - fill) * side / risk
+    cost = commission_price / risk
+    return {"exit_idx": fj + k, "exit": px, "reason": reason, "gross_r": gross, "net_r": gross - cost}
+
+
 def commission_price(symbol: str) -> float:
     value = VALUE_PER_PRICE_PER_LOT.get(symbol, 0.0)
     return COMMISSION_PER_LOT.get(symbol, 0.0) / value if value else 0.0
@@ -240,8 +311,9 @@ def run_engine_zones(m: M1, symbol: str, timeframe: str, parameters: dict[str, A
                                        "engine_state", "base_bars"])
 
 
-def trade_library(zones: pd.DataFrame, m: M1, symbol: str, timeframe: str) -> pd.DataFrame:
-    """Christian's execution + decision-time features for every library zone."""
+def trade_library(zones: pd.DataFrame, m: M1, symbol: str, timeframe: str, trail: Trail | None = None,
+                  window_bars: int = LIVE_WINDOW_BARS) -> pd.DataFrame:
+    """Christian's execution (TP 1R + extra, and the bot's trailing exit in tr_* columns) + decision-time features."""
     minutes = TIMEFRAMES[timeframe]
     if zones.empty:
         return zones.assign(decision_min=[], net_r=[])
@@ -251,22 +323,26 @@ def trade_library(zones: pd.DataFrame, m: M1, symbol: str, timeframe: str) -> pd
     decision = to_min(z.limit_time) + minutes                 # the LIMIT exists once the candle that made it has closed
     term = z.terminal_time.replace("", np.nan)
     end_min = np.where(term.isna(), m.t[-1], to_min(term.fillna(z.limit_time)) + minutes)
-    end_min = np.minimum(end_min, decision + LIVE_WINDOW_BARS * minutes)
+    end_min = np.minimum(end_min, decision + int(window_bars) * minutes)
     extra = tp_extra(symbol, m)
     tp = entry + side * (np.abs(entry - sl) + extra)
     comm = commission_price(symbol)
     starts = np.searchsorted(m.t, decision)
     expires = np.searchsorted(m.t, end_min, side="right") - 1
-    out = []
+    ctx = Context(m, minutes)
+    trail = trail or Trail()
+    out, tr = [], []
     for k in range(len(z)):
         r = simulate(m, int(side[k]), entry[k], sl[k], tp[k], int(starts[k]), int(expires[k]), comm)
         out.append(r or {})
+        tr.append(exit_trail(m, int(r["fill_idx"]), r["fill"], int(side[k]), sl[k], minutes, ctx, trail, comm) if r else {})
     sim = pd.DataFrame(out, index=z.index).reindex(columns=["fill_idx", "exit_idx", "fill", "exit", "risk", "reason", "gross_r",
                                                              "commission_r", "net_r", "spread_r"])
-    z = pd.concat([z, sim], axis=1)
+    trs = pd.DataFrame(tr, index=z.index).reindex(columns=["exit_idx", "exit", "reason", "gross_r", "net_r"]).add_prefix("tr_")
+    z = pd.concat([z, sim, trs], axis=1)
     z["decision_min"] = decision
     z["tp"] = tp
-    feats = Context(m, minutes).at(decision, side, entry, sl, z.zone_top.to_numpy(float), z.zone_bottom.to_numpy(float))
+    feats = ctx.at(decision, side, entry, sl, z.zone_top.to_numpy(float), z.zone_bottom.to_numpy(float))
     feats.index = z.index
     z = pd.concat([z, feats], axis=1)
     filled = z["fill_idx"].notna() if "fill_idx" in z else pd.Series(False, index=z.index)
@@ -274,7 +350,20 @@ def trade_library(zones: pd.DataFrame, m: M1, symbol: str, timeframe: str) -> pd
     z["exit_min"] = np.where(filled, m.t[z["exit_idx"].fillna(0).astype(np.int64).to_numpy()], -1)
     z["exit_time"] = pd.to_datetime(np.where(filled, z["exit_min"], 0), unit="m", utc=True).strftime("%Y-%m-%dT%H:%M")
     z.loc[~filled, "exit_time"] = ""
+    z["tr_exit_min"] = np.where(filled, m.t[z["tr_exit_idx"].fillna(0).astype(np.int64).to_numpy()], -1)
+    z["tr_exit_time"] = pd.to_datetime(np.where(filled, z["tr_exit_min"], 0), unit="m", utc=True).strftime("%Y-%m-%dT%H:%M")
+    z.loc[~filled, "tr_exit_time"] = ""
     return z
+
+
+def exit_view(lib: pd.DataFrame, exit_name: str) -> pd.DataFrame:
+    """The library seen through one exit: "tp" (1R + extra) or "trail" (the bot's trailing exit)."""
+    if exit_name != "trail" or "tr_net_r" not in lib:
+        return lib
+    view = lib.copy()
+    for col in ("exit_idx", "exit", "reason", "gross_r", "net_r", "exit_min", "exit_time"):
+        view[col] = lib[f"tr_{col}"]
+    return view
 
 
 # ------------------------------------------------------------------ analogs
@@ -302,7 +391,8 @@ def stats(g: pd.DataFrame) -> dict[str, Any]:
            "avg_win_r": round(avg_w, 3) if avg_w is not None else None, "avg_loss_r": round(avg_l, 3) if avg_l is not None else None,
            "breakeven_win_pct": round(100 * -avg_l / (avg_w - avg_l), 1) if avg_w is not None and avg_l is not None and avg_w - avg_l > 0 else None,
            "cost_r": round(float((g["commission_r"] + g["spread_r"]).sum()), 2), "max_dd_r": round(float((np.maximum.accumulate(eq) - eq).max()), 2),
-           "tp": int((g["reason"] == "TP").sum()), "sl": int((g["reason"] == "SL").sum()), "time_exit": int((g["reason"] == "TIME").sum()),
+           "tp": int(g["reason"].isin(["TP", "TRAIL"]).sum()), "be": int((g["reason"] == "BE").sum()), "sl": int((g["reason"] == "SL").sum()),
+           "time_exit": int((g["reason"] == "TIME").sum()),
            "trusted": n >= MIN_TRUST}
     return out
 
@@ -429,6 +519,64 @@ def monte_carlo(m: M1, side: int, entry: float, sl: float, tp: float, commission
             "expected_r": round(exp_r, 3), "tp_r": round(tp_r - comm_r, 3), "sl_r": round(-1 - comm_r, 3),
             "median_minutes_to_outcome": int(np.median(hits)) if len(hits) else None,
             "breakeven_win_pct": round(100 * (1 + comm_r) / (tp_r + 1), 1), "demeaned": demean, "block_minutes": block}
+
+
+def monte_carlo_trail(m: M1, side: int, entry: float, sl: float, commission: float, trail: Trail, minutes: int, atr: float,
+                      paths: int = 10_000, block: int = 60, horizon: int = MAX_HOLD_MIN, seed: int = 7, demean: bool = True) -> dict[str, Any]:
+    """Same block-bootstrap paths as monte_carlo(), traded with the bot's trailing exit (stop moves at each candle close of
+    the zone's timeframe, counted from the fill; the ATR is the zone's ATR when the LIMIT was placed)."""
+    n = len(m)
+    if n < block * 5:
+        raise ValueError("not enough recent candles for the Monte Carlo")
+    rng = np.random.default_rng(seed)
+    prev_close = np.r_[m.o[0], m.c[:-1]]
+    gap = m.o - prev_close
+    dc, dh, dl = m.c - m.o + gap, m.h - m.o + gap, m.l - m.o + gap
+    if demean:
+        mu = dc.mean()
+        dc, dh, dl = dc - mu, dh - mu, dl - mu
+    risk = abs(entry - sl)
+    bid0 = entry - m.sp[-1] if side > 0 else entry
+    horizon = -(-horizon // minutes) * minutes
+    nb = horizon // minutes
+    nblocks = -(-horizon // block)
+    results: list[np.ndarray] = []
+    reasons = {"SL": 0, "BE": 0, "TRAIL": 0, "TIME": 0}
+    for done in range(0, paths, 500):
+        k = min(500, paths - done)
+        starts = rng.integers(0, n - block, size=(k, nblocks))
+        idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(k, -1)[:, :horizon]
+        c_rel = np.cumsum(dc[idx], axis=1)
+        o_rel = np.concatenate([np.zeros((k, 1)), c_rel[:, :-1]], axis=1)
+        op, hi, lo, spr = bid0 + o_rel, bid0 + o_rel + dh[idx], bid0 + o_rel + dl[idx], m.sp[idx]
+        ext = hi.reshape(k, nb, minutes).max(axis=2) if side > 0 else lo.reshape(k, nb, minutes).min(axis=2)
+        best = np.maximum.accumulate(ext, axis=1) if side > 0 else np.minimum.accumulate(ext, axis=1)
+        close = bid0 + c_rel[:, minutes - 1::minutes]
+        stop = np.repeat(trail.stops(side, entry, sl, best, close, atr), minutes, axis=1)
+        hit = (lo <= stop) if side > 0 else (hi + spr >= stop)
+        any_hit = hit.any(axis=1)
+        kk = hit.argmax(axis=1)
+        rows = np.arange(k)
+        st, o_k, s_k = stop[rows, kk], op[rows, kk], spr[rows, kk]
+        px = np.where(kk == 0, st, np.minimum(st, o_k)) if side > 0 else np.where(kk == 0, st, np.maximum(st, o_k + s_k))
+        last_px = (bid0 + c_rel[:, -1]) if side > 0 else (bid0 + c_rel[:, -1] + spr[:, -1])
+        px = np.where(any_hit, px, last_px)
+        r = (px - entry) * side / risk - commission / risk
+        moved = np.abs(st - sl) > 1e-12
+        reasons["TIME"] += int((~any_hit).sum())
+        reasons["SL"] += int((any_hit & ~moved).sum())
+        be = any_hit & moved & ((px - entry) * side <= 0.25 * risk)
+        reasons["BE"] += int(be.sum())
+        reasons["TRAIL"] += int((any_hit & moved & ~be).sum())
+        results.append(r)
+    r = np.concatenate(results)
+    wins = int((r > 0).sum())
+    w, lss = r[r > 0], r[r <= 0]
+    return {"paths": paths, "win_pct": round(100 * wins / paths, 1), "ci95": wilson(wins, paths), "expected_r": round(float(r.mean()), 3),
+            "avg_win_r": round(float(w.mean()), 3) if len(w) else None, "avg_loss_r": round(float(lss.mean()), 3) if len(lss) else None,
+            "p_sl": round(100 * reasons["SL"] / paths, 1), "p_be": round(100 * reasons["BE"] / paths, 1),
+            "p_trail": round(100 * reasons["TRAIL"] / paths, 1), "p_neither_3d": round(100 * reasons["TIME"] / paths, 1),
+            "demeaned": demean, "block_minutes": block}
 
 
 def p_fill(m: M1, side: int, entry: float, spread_now: float, last_close: float, minutes_left: int, paths: int = 4000, block: int = 60, seed: int = 11) -> float | None:

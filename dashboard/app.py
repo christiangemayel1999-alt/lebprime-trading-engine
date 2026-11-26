@@ -19,6 +19,7 @@ from dashboard.research import create_research_router  # noqa: E402
 from dashboard.routes import create_router  # noqa: E402
 from dashboard.strategy_tests import create_strategy_test_router  # noqa: E402
 from dashboard.time_machine import create_time_machine_router  # noqa: E402
+from dashboard.time_machine_watcher import TimeMachineWatcher  # noqa: E402
 from dashboard.services import DashboardDataService  # noqa: E402
 from services.audit_service import AuditService  # noqa: E402
 from services.bot_control_service import BotControlService  # noqa: E402
@@ -68,6 +69,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Trading Bot Control Dashboard", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.telegram_command_service = telegram_command_service
     app.state.telegram_trade_watcher = TelegramTradeWatcher(PROJECT_ROOT, config_manager.load_runtime)
+    # Automatic Time Machine odds for each new live zone + Telegram message (read-only on the bot, queues sandbox runs).
+    app.state.time_machine_watcher = TimeMachineWatcher(PROJECT_ROOT, config_manager.load_runtime, Path(database.db_path))
     templates = Jinja2Templates(directory=str(PROJECT_ROOT / "dashboard" / "templates"))
     app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "dashboard" / "static")), name="static")
     app.include_router(
@@ -96,17 +99,20 @@ def create_app() -> FastAPI:
     app.include_router(create_research_router(PROJECT_ROOT, dashboard_auth.dependency, templates))
     # Strategy tests from the Indicator Lab tab: queued here, run by the root dispatcher in the research sandbox.
     app.include_router(create_strategy_test_router(PROJECT_ROOT, dashboard_auth.dependency, audit_service))
-    app.include_router(create_time_machine_router(PROJECT_ROOT, dashboard_auth.dependency, audit_service, Path(database.db_path)))
+    app.include_router(create_time_machine_router(PROJECT_ROOT, dashboard_auth.dependency, audit_service, Path(database.db_path),
+                                                   watcher_status=app.state.time_machine_watcher.status))
 
     @app.on_event("startup")
     async def startup_remote_control() -> None:
         app.state.telegram_command_service.start()
         app.state.telegram_trade_watcher.start()
+        app.state.time_machine_watcher.start()
 
     @app.on_event("shutdown")
     async def shutdown_remote_control() -> None:
         app.state.telegram_command_service.stop()
         app.state.telegram_trade_watcher.stop()
+        app.state.time_machine_watcher.stop()
 
     return app
 

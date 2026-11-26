@@ -41,3 +41,20 @@ Indicator Lab tab → **Time Machine: odds for one zone** (under the Strategy te
 
 Code: `services/indicator_lab/time_machine.py` (rules), `scripts/time_machine_job.py` (job),
 `dashboard/time_machine.py` (routes), `dashboard/static/time_machine.js` (panel), `tests/test_time_machine.py`.
+
+## Automatic odds and Telegram (added 26 Nov 2026)
+
+* The dashboard checks the live bot's zones every minute (read-only). Each new zone that is waiting or active
+  (not historical replays, created in the last 2 hours) gets a Time Machine run queued automatically. Runs show an
+  **auto** badge in the panel. Two zone ids with the same symbol, timeframe, side, Entry 1 and SL are checked once.
+  Automatic runs can queue up to 12 at a time and never block a run you start yourself.
+* When a run finishes (automatic or yours), one Telegram message goes to the bot's chat: the zone, the odds with
+  the bot's current exit first, the other exit second, a verdict, the fill chance and the conditions.
+* Both exits are now computed: **TP 1R + extra** and the **bot's trailing exit** (from the live config: start at
+  +1R, 1 ATR behind the best price, stop moved at candle closes and applied from the next candle). The panel has
+  a switch; it opens on the exit the bot uses now.
+* Zones come from the engine with the live bot's own parameters (storage/config.json + TradingView zone parity
+  + 500-candle window), so the library contains the same zones the bot trades.
+* Turn things off in config.json: `"time_machine": {"auto_odds": false}` or `{"telegram": false}`;
+  `"timeframes": ["M5", "M15"]` limits automatic runs to those timeframes.
+* Nothing runs until the dispatcher is on: `sudo systemctl enable --now lebprime-research-dispatch.timer`.

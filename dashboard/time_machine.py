@@ -64,21 +64,140 @@ def live_zones(db_path: Path, limit: int = 60) -> list[dict[str, Any]]:
             "timeframe": r["timeframe"], "side": "BUY" if str(r["side"]).upper() in {"BUY", "DEMAND"} else "SELL",
             "entry1": r["entry1"], "sl": r["stop_loss"], "zone_top": r["zone_top"], "zone_bottom": r["zone_bottom"],
             "limit_time": r["limit_time"] or r["created_at"], "state": state, "execution_status": r["execution_status"],
-            "open": state in {"PENDING", "ACTIVE"} and r["execution_status"] != "HISTORICAL_REPLAY",
+            "open": state in {"PENDING", "ACTIVE"} and r["execution_status"] != "HISTORICAL_REPLAY", "created_at": r["created_at"],
         })
     return out
 
 
+AUTO_MAX_WAITING = 12   # automatic runs for new live zones may queue up to this many; they never block manual runs
+
+
+def waiting_runs(tests: StrategyTests) -> tuple[int, int]:
+    """(manual + strategy jobs, automatic Time Machine runs) that are queued or running."""
+    manual = auto = 0
+    for t in tests.list(limit=80, kind=None):
+        if t["state"] in {"QUEUED", "RUNNING"}:
+            if (t["request"] or {}).get("source") == "auto":
+                auto += 1
+            else:
+                manual += 1
+    return manual, auto
+
+
+def queue_run(tests: StrategyTests, fields: dict[str, Any], source: str) -> Path:
+    """Validate one zone and write its request.json (the sandbox dispatcher picks it up). Raises HTTPException on bad input."""
+    symbol = canonical_symbol(fields.get("symbol", ""))
+    side = str(fields.get("side", "")).upper()
+    timeframe = str(fields.get("timeframe", ""))
+    entry1, sl = float(fields.get("entry1") or 0), float(fields.get("sl") or 0)
+    paths, mc_days = int(fields.get("paths") or 10_000), int(fields.get("mc_days") or 20)
+    if symbol not in SYMBOLS:
+        raise HTTPException(status_code=400, detail=f"symbol must be one of {', '.join(SYMBOLS)}")
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of {', '.join(TIMEFRAMES)}")
+    if side not in {"BUY", "SELL"}:
+        raise HTTPException(status_code=400, detail="side must be BUY or SELL")
+    if not (entry1 > 0 and sl > 0) or (entry1 - sl) * (1 if side == "BUY" else -1) <= 0:
+        raise HTTPException(status_code=400, detail="SL must be below Entry 1 for a buy and above it for a sell")
+    if not 1000 <= paths <= 50_000 or not 5 <= mc_days <= 120:
+        raise HTTPException(status_code=400, detail="paths must be 1,000-50,000 and recent days 5-120")
+    limit_time = None
+    if fields.get("limit_time"):
+        try:
+            parsed = datetime.fromisoformat(str(fields["limit_time"]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="limit time must be an ISO date-time") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if not datetime(2020, 6, 1, tzinfo=timezone.utc) <= parsed <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="limit time must be between mid-2020 and now")
+        limit_time = parsed.astimezone(timezone.utc).isoformat()
+    manual, auto = waiting_runs(tests)
+    if source == "auto" and auto >= AUTO_MAX_WAITING:
+        raise HTTPException(status_code=429, detail=f"{auto} automatic runs are already waiting")
+    if source != "auto" and manual >= MAX_WAITING:
+        raise HTTPException(status_code=429, detail=f"{manual} jobs are already queued or running; wait for one to finish")
+    run_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+    folder = tests.root / run_id
+    folder.mkdir(parents=True, exist_ok=False)
+    request = {"id": run_id, "kind": KIND, "actor": str(fields.get("actor") or source)[:40], "symbol": symbol, "timeframe": timeframe,
+               "side": side, "entry1": entry1, "sl": sl, "zone_top": fields.get("zone_top"), "zone_bottom": fields.get("zone_bottom"),
+               "limit_time": limit_time, "live_zone_id": (fields.get("live_zone_id") or "")[:60] or None, "source": source,
+               "zone_state": fields.get("zone_state"), "paths": paths, "mc_days": mc_days,
+               "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    tmp = folder / "request.json.tmp"
+    tmp.write_text(json.dumps(request, indent=1))
+    tmp.replace(folder / "request.json")
+    return folder
+
+
+def _pct(v: Any) -> str:
+    return "–" if v is None else f"{float(v):.0f}%"
+
+
+def _r(v: Any) -> str:
+    return "–" if v is None else f"{float(v):+.2f}R"
+
+
+def headline(summary: dict[str, Any], exit_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    block = (summary.get("exits") or {}).get(exit_name) or ({"analogs": summary.get("analogs"), "monte_carlo": summary.get("monte_carlo")} if exit_name == "tp" else {})
+    analogs = block.get("analogs") or {}
+    head = next((t for t in analogs.get("tiers", []) if t.get("key") == analogs.get("headline")), {}) or {}
+    return head, block.get("monte_carlo") or {}
+
+
+def verdict(head: dict[str, Any], mc: dict[str, Any]) -> str:
+    if not head.get("trades"):
+        return "⚪ No history for zones like this yet"
+    if not head.get("trusted"):
+        return f"⚠️ Only {head['trades']} similar zones: a hint, not a verdict"
+    if (head.get("avg_r") or 0) > 0 and (mc.get("expected_r") or 0) > 0:
+        return "✅ Positive odds"
+    if (head.get("avg_r") or 0) > 0:
+        return "🟡 Past zones positive, recent price paths negative"
+    return "❌ Negative odds"
+
+
+def telegram_message(summary: dict[str, Any]) -> tuple[str, list[str]]:
+    """Title + 4 lines for TelegramNotifier._send (it shows at most 4 lines)."""
+    z, f = summary.get("zone") or {}, summary.get("features") or {}
+    live = summary.get("live_exit") or "tp"
+    other = "tp" if live == "trail" else "trail"
+    title = f"🔮 Zone odds · {z.get('symbol')} {z.get('timeframe')} {z.get('side')}"
+    placed = str(z.get("decision_time") or "")[11:16]
+    lines = [f"E1 {z.get('entry1')} · SL {z.get('sl')} · {z.get('live_zone_id') or 'typed zone'} · LIMIT live from {placed} UTC"]
+    for name in (live, other):
+        head, mc = headline(summary, name)
+        if name not in (summary.get("exits") or {}) and name != "tp":
+            continue
+        tag = "Bot exit" if name == live else "Alt exit"
+        kind = "trail" if name == "trail" else "TP 1R"
+        past = f"{head.get('trades', 0)} similar past zones {_pct(head.get('win_pct'))} win {_r(head.get('avg_r'))}/trade" if head.get("trades") else "no similar past zones"
+        paths = (f"paths {_pct(mc.get('win_pct'))} win {_r(mc.get('expected_r'))}" if name == "trail"
+                 else f"paths TP first {_pct(mc.get('p_tp_first'))} (need {_pct(mc.get('breakeven_win_pct'))})")
+        lines.append(f"{tag} ({kind}): {past} · {paths}")
+    head, mc = headline(summary, live)
+    extra = [verdict(head, mc)]
+    if summary.get("p_fill") is not None:
+        extra.append(f"fill chance {_pct(summary['p_fill'])}")
+    sl_atr = f.get("sl_atr")
+    extra.append(f"H1 trend {f.get('h1_trend')} · {f.get('session')} · SL {float(sl_atr):.2f} ATR" if sl_atr is not None else f"H1 trend {f.get('h1_trend')} · {f.get('session')}")
+    lines.append(" · ".join(extra))
+    return title, lines[:4]
+
+
 def create_time_machine_router(base_dir: Path, auth_dependency: Callable[..., Any], audit_service: Any = None, db_path: Path | None = None,
                                dispatch_state: Path = Path("/var/lib/lebprime-dispatch"),
-                               mt5_store: Path = Path("/var/lib/lebprime/mt5_data/M1")) -> APIRouter:
+                               mt5_store: Path = Path("/var/lib/lebprime/mt5_data/M1"),
+                               watcher_status: Callable[[], dict[str, Any]] | None = None) -> APIRouter:
     tests = StrategyTests(Path(base_dir) / "reports", dispatch_state, mt5_store)
     router = APIRouter(dependencies=[Depends(auth_dependency)])
 
     @router.get("/api/time-machine")
     def list_runs(limit: int = 20) -> dict[str, Any]:
         return {"ok": True, "runs": tests.list(max(1, min(int(limit), 100)), kind=KIND), "dispatcher_alive": tests.dispatcher_alive(),
-                "symbols": list(SYMBOLS), "timeframes": list(TIMEFRAMES), "data_until": tests.data_coverage()}
+                "symbols": list(SYMBOLS), "timeframes": list(TIMEFRAMES), "data_until": tests.data_coverage(),
+                "watcher": watcher_status() if watcher_status else None}
 
     @router.get("/api/time-machine/live-zones")
     def get_live_zones(limit: int = 60) -> dict[str, Any]:
@@ -86,46 +205,10 @@ def create_time_machine_router(base_dir: Path, auth_dependency: Callable[..., An
 
     @router.post("/api/time-machine")
     def queue(payload: TimeMachineRequest) -> dict[str, Any]:
-        symbol = canonical_symbol(payload.symbol)
-        side = payload.side.upper()
-        if symbol not in SYMBOLS:
-            raise HTTPException(status_code=400, detail=f"symbol must be one of {', '.join(SYMBOLS)}")
-        if payload.timeframe not in TIMEFRAMES:
-            raise HTTPException(status_code=400, detail=f"timeframe must be one of {', '.join(TIMEFRAMES)}")
-        if side not in {"BUY", "SELL"}:
-            raise HTTPException(status_code=400, detail="side must be BUY or SELL")
-        if not (payload.entry1 > 0 and payload.sl > 0) or (payload.entry1 - payload.sl) * (1 if side == "BUY" else -1) <= 0:
-            raise HTTPException(status_code=400, detail="SL must be below Entry 1 for a buy and above it for a sell")
-        if not 1000 <= payload.paths <= 50_000 or not 5 <= payload.mc_days <= 120:
-            raise HTTPException(status_code=400, detail="paths must be 1,000-50,000 and recent days 5-120")
-        limit_time = None
-        if payload.limit_time:
-            try:
-                parsed = datetime.fromisoformat(payload.limit_time.replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail="limit time must be an ISO date-time") from exc
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            if not datetime(2020, 6, 1, tzinfo=timezone.utc) <= parsed <= datetime.now(timezone.utc):
-                raise HTTPException(status_code=400, detail="limit time must be between mid-2020 and now")
-            limit_time = parsed.astimezone(timezone.utc).isoformat()
-        waiting = [t for t in tests.list(limit=50, kind=None) if t["state"] in {"QUEUED", "RUNNING"}]
-        if len(waiting) >= MAX_WAITING:
-            raise HTTPException(status_code=429, detail=f"{len(waiting)} jobs are already queued or running; wait for one to finish")
-        run_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
-        folder = tests.root / run_id
-        folder.mkdir(parents=True, exist_ok=False)
-        request = {"id": run_id, "kind": KIND, "actor": payload.actor[:40], "symbol": symbol, "timeframe": payload.timeframe, "side": side,
-                   "entry1": payload.entry1, "sl": payload.sl, "zone_top": payload.zone_top, "zone_bottom": payload.zone_bottom,
-                   "limit_time": limit_time, "live_zone_id": (payload.live_zone_id or "")[:60] or None,
-                   "source": "live" if payload.live_zone_id else "manual", "paths": payload.paths, "mc_days": payload.mc_days,
-                   "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        tmp = folder / "request.json.tmp"
-        tmp.write_text(json.dumps(request, indent=1))
-        tmp.replace(folder / "request.json")
+        folder = queue_run(tests, payload.model_dump(), source="live" if payload.live_zone_id else "manual")
         if audit_service is not None:
             try:
-                audit_service.log_action(payload.actor, "time_machine_queued", run_id, {"symbol": symbol, "timeframe": payload.timeframe, "side": side})
+                audit_service.log_action(payload.actor, "time_machine_queued", folder.name, {"symbol": payload.symbol, "timeframe": payload.timeframe})
             except Exception:  # auditing must never block a run
                 pass
         return {"ok": True, "run": tests.describe(folder), "dispatcher_alive": tests.dispatcher_alive()}

@@ -35,24 +35,41 @@ LIB_FIRST = "2020-01-01"
 MC_DAYS_DEFAULT = 20
 
 
+LIVE_CONFIGS = (Path(os.environ.get("LEBPRIME_LIVE_CONFIG", "/var/lib/lebprime/storage/config.json")),)
+V340_CHART_DEFAULTS = {"tv_zone_parity": True, "zone_window_bars": 500}   # same as services/lebprime_live/service.py
+LIB_VERSION = 2   # bump when the library columns change (2 = trailing exit columns)
+
+
 def live_parameters(root: Path) -> dict[str, Any]:
-    """LEBPRIME parameters as the live bot runs them (defaults + config overrides), read-only."""
+    """LEBPRIME parameters exactly as the live bot builds them (services/lebprime_live/service.py _parameters), read-only.
+
+    The live config lives in storage/config.json on the VPS; the repo copy is the fallback."""
     from services.indicator_lab.parameter_registry import default_parameters, validate_parameters
 
     overrides: dict[str, Any] = {}
-    try:
-        config = json.loads((root / "config.json").read_text())
+    for path in (*LIVE_CONFIGS, root / "config.json"):
+        try:
+            config = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
         overrides = dict((config.get("lebprime_v3_4_0") or {}).get("parameters") or {})
-    except (OSError, ValueError):
-        pass
+        break
+    overrides.update({"gold_buffer": 1.0, "us30_buffer": 30.0, "nas_buffer": 15.0})
+    for name, value in V340_CHART_DEFAULTS.items():
+        overrides.setdefault(name, value)
     try:
         params = validate_parameters("LEBPRIME", {**default_parameters("LEBPRIME"), **overrides})
     except (ValueError, TypeError):
-        params = default_parameters("LEBPRIME")
+        params = {**default_parameters("LEBPRIME"), **V340_CHART_DEFAULTS}
     params["apply_history_window"] = False          # needs the file's last bar: look-ahead
-    if not int(params.get("limit_expiry_bars") or 0):
-        params["limit_expiry_bars"] = tm.LIVE_WINDOW_BARS   # the live bot only sees its last 360 candles
+    if not int(params.get("limit_expiry_bars") or 0) and not int(params.get("zone_window_bars") or 0):
+        params["limit_expiry_bars"] = tm.LIVE_WINDOW_BARS
     return params
+
+
+def window_bars(params: dict[str, Any]) -> int:
+    """How many candles an untouched LIMIT can live (zone window or LIMIT expiry, else the bot's 360-candle scan)."""
+    return int(params.get("zone_window_bars") or params.get("limit_expiry_bars") or tm.LIVE_WINDOW_BARS)
 
 
 def m1_path(symbol: str, root: Path) -> Path:
@@ -69,7 +86,7 @@ def library(job: Any, lib_dir: Path, m: tm.M1, symbol: str, timeframe: str, para
     lib_dir.mkdir(parents=True, exist_ok=True)
     key = f"{symbol}_{timeframe}"
     meta_path, data_path = lib_dir / f"{key}.json", lib_dir / f"{key}.pkl"
-    digest = tm.library_hash(params)
+    digest = tm.library_hash({**params, "_library_version": LIB_VERSION})
     try:
         meta = json.loads(meta_path.read_text())
         fresh = datetime.now(timezone.utc) - datetime.fromisoformat(meta["built_at"]) < LIB_MAX_AGE
@@ -87,7 +104,7 @@ def library(job: Any, lib_dir: Path, m: tm.M1, symbol: str, timeframe: str, para
     t0 = time.time()
     zones = tm.run_engine_zones(part, symbol, timeframe, params)
     job.note(f"zone library: {len(zones)} zones in {time.time() - t0:.0f} s; trading them with your execution")
-    lib = tm.trade_library(zones, m, symbol, timeframe)
+    lib = tm.trade_library(zones, m, symbol, timeframe, tm.Trail.from_parameters(params), window_bars(params))
     meta = {"symbol": symbol, "timeframe": timeframe, "params_hash": digest, "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "data_start": pd.to_datetime(part.t[0], unit="m", utc=True).isoformat(), "data_end": pd.to_datetime(m.t[-1], unit="m", utc=True).isoformat(),
             "zones": int(len(lib)), "trades": int(lib["filled"].sum()) if len(lib) else 0, "engine_seconds": round(time.time() - t0)}
@@ -133,21 +150,31 @@ def run_job(job: Any, root: Path) -> dict[str, Any]:
               "h1_trend": str(feats.h1_trend), "session": str(feats.session), "atr": float(feats.atr)}
     job.note(f"zone at {decision_iso[:16]} UTC: SL {target['sl_atr']:.2f} ATR, H1 trend {target['h1_trend']}, session {target['session']}")
 
-    found = tm.analogs(lib, target)
-    head = next((t for t in found.get("tiers", []) if t["key"] == found.get("headline")), None)
-    if head:
-        job.note(f"analogs: {head['trades']} similar past trades, win {head.get('win_pct')}%, avg {head.get('avg_r')}R ({head['label']})")
-
+    trail = tm.Trail.from_parameters(params)
+    live_exit = "trail" if str(params.get("exit_mode")) == "Trail" else "tp"
     paths = int(req.get("paths") or 10_000)
     mc_days = int(req.get("mc_days") or MC_DAYS_DEFAULT)
     recent = m.slice(None, decision)
     recent = recent.slice(int(recent.t[-1] - mc_days * 1.45 * 1440), None)  # ~mc_days trading days of minutes before the decision
     commission = tm.commission_price(symbol)
-    job.note(f"Monte Carlo: {paths:,} paths from {len(recent):,} recent M1 candles")
-    mc = tm.monte_carlo(recent, side, entry, sl, tp, commission, paths=paths, demean=True)
-    mc_drift = tm.monte_carlo(recent, side, entry, sl, tp, commission, paths=paths, demean=False, seed=8)
+    exits: dict[str, Any] = {}
+    for name in ("tp", "trail"):
+        found = tm.analogs(tm.exit_view(lib, name), target)
+        head = next((t for t in found.get("tiers", []) if t["key"] == found.get("headline")), None)
+        if head:
+            job.note(f"[{name}] analogs: {head['trades']} similar past trades, win {head.get('win_pct')}%, avg {head.get('avg_r')}R ({head['label']})")
+        job.note(f"[{name}] Monte Carlo: {paths:,} paths from {len(recent):,} recent M1 candles")
+        if name == "tp":
+            mc = tm.monte_carlo(recent, side, entry, sl, tp, commission, paths=paths, demean=True)
+            mc_drift = tm.monte_carlo(recent, side, entry, sl, tp, commission, paths=paths, demean=False, seed=8)
+            label = f"TP at 1R + {extra:g}"
+        else:
+            mc = tm.monte_carlo_trail(recent, side, entry, sl, commission, trail, minutes, target["atr"], paths=paths, demean=True)
+            mc_drift = tm.monte_carlo_trail(recent, side, entry, sl, commission, trail, minutes, target["atr"], paths=paths, demean=False, seed=8)
+            label = "Bot's " + trail.label()
+        exits[name] = {"label": label, "analogs": found, "monte_carlo": mc, "monte_carlo_with_drift": mc_drift}
 
-    life_end = (int(tm.to_min(req["limit_time"])[0]) if req.get("limit_time") else decision - minutes) + minutes * (tm.LIVE_WINDOW_BARS + 1)
+    life_end = (int(tm.to_min(req["limit_time"])[0]) if req.get("limit_time") else decision - minutes) + minutes * (window_bars(params) + 1)
     actual = None
     start = int(np.searchsorted(m.t, decision))
     if start < len(m) - 1:
@@ -156,9 +183,12 @@ def run_job(job: Any, root: Path) -> dict[str, Any]:
         horizon_done = m.t[-1] >= life_end if r is None else (r["reason"] != "TIME" or m.t[-1] >= m.t[r["fill_idx"]] + tm.MAX_HOLD_MIN)
         actual = {"filled": r is not None, "final": bool(horizon_done)}
         if r:
+            tr = tm.exit_trail(m, int(r["fill_idx"]), r["fill"], side, sl, minutes, tm.Context(m, minutes), trail, commission)
             actual.update({"fill_time": pd.to_datetime(m.t[r["fill_idx"]], unit="m", utc=True).isoformat(),
                            "exit_time": pd.to_datetime(m.t[r["exit_idx"]], unit="m", utc=True).isoformat(),
-                           "reason": r["reason"], "net_r": round(r["net_r"], 3)})
+                           "reason": r["reason"], "net_r": round(r["net_r"], 3),
+                           "trail": {"exit_time": pd.to_datetime(m.t[tr["exit_idx"]], unit="m", utc=True).isoformat(),
+                                     "reason": tr["reason"], "net_r": round(tr["net_r"], 3)}})
 
     fill = None
     if life_end > data_end and (actual is None or not actual["filled"]):
@@ -171,13 +201,15 @@ def run_job(job: Any, root: Path) -> dict[str, Any]:
                  "tp_extra": round(extra, 6), "risk": abs(entry - sl), "zone_top": top, "zone_bottom": bottom,
                  "decision_time": decision_iso, "source": req.get("source") or "manual", "live_zone_id": req.get("live_zone_id")},
         "features": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in target.items() if k != "decision_min"},
-        "analogs": found, "monte_carlo": mc, "monte_carlo_with_drift": mc_drift, "p_fill": fill, "actual": actual,
+        # top-level analogs/monte_carlo = the TP exit (older panels read these); "exits" holds both, "live_exit" is what the bot uses
+        "analogs": exits["tp"]["analogs"], "monte_carlo": exits["tp"]["monte_carlo"], "monte_carlo_with_drift": exits["tp"]["monte_carlo_with_drift"],
+        "exits": exits, "live_exit": live_exit, "p_fill": fill, "actual": actual,
         "library": lib_meta, "parameters": params,
         "data_until": pd.to_datetime(m.t[-1], unit="m", utc=True).isoformat(), "mc_window": {
             "from": pd.to_datetime(recent.t[0], unit="m", utc=True).isoformat(), "to": pd.to_datetime(recent.t[-1], unit="m", utc=True).isoformat(),
             "candles": int(len(recent))},
-        "method": ("Analogs: the bot's engine (live parameters, LIMIT cancelled after 360 candles) on past candles; one LIMIT at Entry 1, zone SL, "
-                   "TP = 1R + extra (gold $0.20, others 2x median spread), touch-triggered on M1 with the real spread (buys fill on the ask), "
+        "method": ("Analogs: the bot's engine with the live bot's parameters (TradingView zone parity, 500-candle zone window) on past candles; "
+                   "one LIMIT at Entry 1, zone SL, either TP = 1R + extra or the bot's trailing stop (moved at candle closes), TP 1R + extra (gold $0.20, others 2x median spread), touch-triggered on M1 with the real spread (buys fill on the ask), "
                    "SL wins a same-minute tie, closed at market after 3 days, net of round-trip commission. Only trades that had exited before "
                    "this zone's LIMIT existed are counted, and every indicator uses closed candles only. Monte Carlo: block bootstrap (60-minute "
                    "blocks) of the M1 candles before that time into 3-day paths starting at the fill; headline with the recent drift removed."),

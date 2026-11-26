@@ -128,3 +128,103 @@ def test_queue_rejects_bad_zones(tmp_path):
     assert client.post("/api/time-machine", json={**ZONE, "timeframe": "M7"}).status_code == 400
     assert client.post("/api/time-machine", json={**ZONE, "limit_time": "2031-01-01T00:00:00"}).status_code == 400
     assert client.post("/api/time-machine", json={**ZONE, "paths": 10}).status_code == 400
+
+
+# ------------------------------------------------------------------ trailing exit, Telegram, watcher
+def test_trail_stop_moves_only_from_the_next_candle_and_only_forward():
+    t = tm.Trail(start_r=1.0, mode="Distance R", distance_r=1.0)
+    best = np.array([100.5, 102.5, 102.0, 104.0])
+    close = np.array([100.4, 102.2, 101.0, 103.5])
+    stops = t.stops(1, fill=100.0, sl=99.0, best=best, close=close, atr=1.0)
+    # candle 0: stop = SL; candle 1 uses candle 0 (mfe 0.5R, no move); candle 2 uses candle 1 (best 102.5 -> 101.5); candle 3 keeps 101.5
+    assert list(stops) == [99.0, 99.0, 101.5, 101.5]
+
+
+def test_exit_trail_locks_profit_on_m1():
+    closes = [100.6, 100.0, 101.0, 102.0, 103.0] + [103.0] * 10 + [100.5] * 5
+    m = _m1(closes, spread=0.01, wick=0.0)
+    r = tm.simulate(m, 1, entry=100.62, sl=99.6, tp=200.0, start=0, expire=3, commission_price=0.0)
+    ctx = tm.Context(m, 1)
+    out = tm.exit_trail(m, r["fill_idx"], r["fill"], 1, 99.6, 1, ctx, tm.Trail(start_r=1.0, mode="Distance R", distance_r=1.0), 0.0)
+    assert out["reason"] == "TRAIL" and out["net_r"] > 0.5
+
+
+def test_live_parameter_defaults_match_the_live_service():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import time_machine_job
+    from services.lebprime_live.service import V340_CHART_DEFAULTS
+
+    assert time_machine_job.V340_CHART_DEFAULTS == V340_CHART_DEFAULTS
+
+
+def _summary():
+    head = {"key": "sl_only", "trades": 40, "trusted": True, "win_pct": 45.0, "avg_r": -0.1, "label": "x"}
+    trail_head = {**head, "win_pct": 38.0, "avg_r": 0.05}
+    return {"zone": {"symbol": "XAUUSD", "timeframe": "M15", "side": "BUY", "entry1": 3600.0, "sl": 3590.0, "live_zone_id": "XAU-15M-B-1",
+                     "decision_time": "2026-11-26T09:15:00+00:00"},
+            "features": {"h1_trend": "with", "session": "London", "sl_atr": 1.2}, "live_exit": "trail", "p_fill": 70.0,
+            "exits": {"tp": {"analogs": {"headline": "sl_only", "tiers": [head]}, "monte_carlo": {"p_tp_first": 48.0, "breakeven_win_pct": 49.9, "expected_r": -0.04}},
+                      "trail": {"analogs": {"headline": "sl_only", "tiers": [trail_head]}, "monte_carlo": {"win_pct": 41.0, "expected_r": 0.02}}}}
+
+
+def test_telegram_message_leads_with_the_bots_exit():
+    from dashboard.time_machine import telegram_message
+
+    title, lines = telegram_message(_summary())
+    assert title == "🔮 Zone odds · XAUUSD M15 BUY" and len(lines) == 4
+    assert lines[1].startswith("Bot exit (trail): 40 similar past zones 38% win +0.05R/trade")
+    assert lines[2].startswith("Alt exit (TP 1R)") and "fill chance 70%" in lines[3] and "Positive odds" in lines[3]
+
+
+class _Notifier:
+    def __init__(self):
+        self.sent = []
+
+    def _send(self, title, lines):
+        self.sent.append((title, lines))
+        return True
+
+
+def test_watcher_queues_new_live_zones_once_and_sends_finished_odds(tmp_path):
+    from datetime import datetime, timezone
+
+    from dashboard.time_machine_watcher import TimeMachineWatcher
+
+    client, root, db = _client(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO lebprime_live_zones VALUES ('NAS-5M-B-2', 'NAS100', 'M5', 'BUY', 100, 110, 110, 95, 'EXECUTION_SKIPPED', 'PENDING', "
+                "'2026-11-24T20:10:00+00:00', '{\"limit_time\": \"2026-11-24T20:05:00+00:00\"}')")          # same prices as NAS-5M-B-1: a twin
+    con.execute("INSERT INTO lebprime_live_zones VALUES ('XAU-1M-S-9', 'XAUUSD', 'M1', 'SELL', 1, 2, 1, 3, 'HISTORICAL_REPLAY', 'PENDING', "
+                "'2026-11-24T20:10:00+00:00', '{}')")                                                  # replay: never queued
+    con.commit()
+    con.close()
+    notifier = _Notifier()
+    cfg = {"telegram": {"enabled": True}, "time_machine": {}}
+    w = TimeMachineWatcher(tmp_path, lambda: cfg, db, tmp_path / "dispatch", notifier_factory=lambda _: notifier)
+    w.cursor["since"] = "2000-01-01"
+    now = datetime(2026, 11, 24, 20, 30, tzinfo=timezone.utc)
+    w.poll_once(now)
+    runs = client.get("/api/time-machine").json()["runs"]
+    assert len(runs) == 1 and runs[0]["request"]["source"] == "auto" and runs[0]["request"]["symbol"] == "USTEC"
+    w.poll_once(now)
+    assert len(client.get("/api/time-machine").json()["runs"]) == 1          # queued once, twin skipped
+    assert client.post("/api/time-machine", json=ZONE).status_code == 200   # automatic runs never block a manual one
+    run_id = runs[0]["id"]
+    (root / run_id / "summary.json").write_text(json.dumps(_summary()))
+    (root / run_id / "status.json").write_text(json.dumps({"state": "COMPLETED"}))
+    (tmp_path / "dispatch" / f"{run_id}.done").write_text("success")
+    w.poll_once(now)
+    w.poll_once(now)
+    assert len(notifier.sent) == 1 and notifier.sent[0][0].startswith("🔮 Zone odds")
+
+
+def test_watcher_ignores_old_zones(tmp_path):
+    from datetime import datetime, timezone
+
+    from dashboard.time_machine_watcher import TimeMachineWatcher
+
+    client, _, db = _client(tmp_path)
+    w = TimeMachineWatcher(tmp_path, lambda: {"time_machine": {}}, db, tmp_path / "dispatch")
+    w.poll_once(datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc))              # zone created 24 Nov: too old
+    assert client.get("/api/time-machine").json()["runs"] == []
