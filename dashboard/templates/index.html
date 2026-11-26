@@ -46,6 +46,8 @@
         <div id="section-logs"></div>
     </div>
 </main>
+<script src="{{ url_for('static', path='/vendor/lightweight-charts-4.2.0.standalone.production.js') }}" defer></script>
+<script src="{{ url_for('static', path='/strategy_test_chart.js') }}" defer></script>
 <script src="{{ url_for('static', path='/strategy_tests.js') }}" defer></script>
 <script src="{{ url_for('static', path='/time_machine.js') }}" defer></script>
 {% endblock %}

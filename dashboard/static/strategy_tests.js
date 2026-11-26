@@ -14,6 +14,7 @@
         return (signed && n > 0 ? "+" : "") + n.toFixed(digits);
     };
     const tone = (v) => (v === null || v === undefined ? "" : Number(v) > 0 ? "text-success" : Number(v) < 0 ? "text-danger" : "");
+    let chart = null;
     const state = { tests: [], meta: null, selected: null, detail: null, defaults: null, message: "", error: "", timer: null, busy: false };
 
     async function api(path, options = {}) {
@@ -98,7 +99,7 @@
 
     function detailHtml() {
         const t = state.detail;
-        if (!t) return "";
+        if (!t) return { top: "", tables: "" };
         const head = `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
             <div><strong>${esc(t.request?.name || t.id)}</strong> <span class="small text-secondary">${esc((t.request?.symbols || []).join(", "))} ${esc(t.request?.timeframe)} · ${esc(t.request?.start)} → ${esc(t.request?.end)}</span></div>
             <div class="d-flex gap-2">
@@ -121,16 +122,32 @@
             }).join("");
             tables += `<div class="small text-secondary mt-2">${esc(summary.method || "")}</div>`;
         }
-        return `<hr>${head}${paramLine}${error}${progress}${tables}`;
+        return { top: `<hr>${head}${paramLine}${error}${progress}`, tables };
     }
 
     function render() {
         // Keep what the user typed while re-rendering.
         if (panel.querySelector("#st-timeframe")) state.form = currentForm();
-        panel.innerHTML = `<div class="card shadow-sm border-0 mt-3"><div class="card-body">
-            <h5 class="card-title mb-1">Strategy test</h5>
-            <div class="small text-secondary mb-3">Runs the bot's own engine in the capped research sandbox on the server, never in the live bot, and never places trades.</div>
-            ${formHtml()}<hr>${listHtml()}${detailHtml()}</div></div>`;
+        if (!panel.querySelector("#st-top")) {
+            // The trade chart lives in its own element between the two re-rendered parts, so polling
+            // never rebuilds it (zoom and position stay where the user left them).
+            panel.innerHTML = `<div class="card shadow-sm border-0 mt-3"><div class="card-body">
+                <h5 class="card-title mb-1">Strategy test</h5>
+                <div class="small text-secondary mb-3">Runs the bot's own engine in the capped research sandbox on the server, never in the live bot, and never places trades.</div>
+                <div id="st-top"></div><div id="st-chart"></div><div id="st-tables"></div></div></div>`;
+            chart = window.LabTradeChart ? new window.LabTradeChart(panel.querySelector("#st-chart")) : null;
+        }
+        const detail = detailHtml();
+        panel.querySelector("#st-top").innerHTML = `${formHtml()}<hr>${listHtml()}${detail.top}`;
+        panel.querySelector("#st-tables").innerHTML = detail.tables;
+        syncChart();
+    }
+
+    function syncChart() {
+        if (!chart) return;
+        const t = state.detail;
+        if (t && t.state === "COMPLETED" && (t.request?.kind || "strategy") === "strategy") chart.open(t.id, t.chart_symbols || []);
+        else chart.clear();
     }
 
     function currentForm() {
