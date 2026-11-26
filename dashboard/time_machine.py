@@ -164,8 +164,10 @@ def telegram_message(summary: dict[str, Any]) -> tuple[str, list[str]]:
     live = summary.get("live_exit") or "tp"
     other = "tp" if live == "trail" else "trail"
     title = f"🔮 Zone odds · {z.get('symbol')} {z.get('timeframe')} {z.get('side')}"
-    placed = str(z.get("decision_time") or "")[11:16]
-    lines = [f"E1 {z.get('entry1')} · SL {z.get('sl')} · {z.get('live_zone_id') or 'typed zone'} · LIMIT live from {placed} UTC"]
+    # the zone's own LIMIT time (the odds may use candles only up to the last hourly MT5 data pull before it)
+    placed = str((summary.get("request") or {}).get("limit_time") or z.get("decision_time") or "")[11:16]
+    data = str(summary.get("data_until") or "")[11:16]
+    lines = [f"E1 {z.get('entry1')} · SL {z.get('sl')} · {z.get('live_zone_id') or 'typed zone'} · LIMIT {placed} UTC · data to {data} UTC"]
     for name in (live, other):
         head, mc = headline(summary, name)
         if name not in (summary.get("exits") or {}) and name != "tp":
