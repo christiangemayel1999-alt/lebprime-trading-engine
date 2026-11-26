@@ -50,6 +50,7 @@
             <div class="col-6 col-md-2">${input("tm-paths", "Monte Carlo paths", f.paths, "number", 'min="1000" max="50000" step="1000"')}</div>
             <div class="col-12 col-md-3"><button class="btn btn-primary w-100" id="tm-run" ${state.busy ? "disabled" : ""}>Check the odds</button></div>
             <div class="col-12 small text-secondary">TP = Entry 1 + 1R + extra (gold $0.20, others 2× median spread). Real spread and commission. Only candles and trades that existed before the LIMIT was placed are used. The first run for a symbol and timeframe builds its zone library with the bot's engine (about 30 s for M30, 1-2 minutes for M15, about 8-10 minutes for M1). After that a run takes about a minute.</div>
+            ${state.meta && state.meta.watcher ? `<div class="col-12 small">Automatic odds for every new live zone: <strong>${state.meta.watcher.auto_odds ? "on" : "off"}</strong> · Telegram message with the odds: <strong>${state.meta.watcher.telegram ? "on" : "off (Telegram not configured or turned off)"}</strong>${state.meta.watcher.last_error ? ` · <span class="text-danger">${esc(state.meta.watcher.last_error)}</span>` : ""}</div>` : ""}
             ${state.meta && !state.meta.dispatcher_alive ? `<div class="col-12"><div class="alert alert-warning py-2 mb-0 small">The research-sandbox dispatcher has not run in the last 2 minutes, so runs will wait. On the server: <code>sudo systemctl enable --now lebprime-research-dispatch.timer</code></div></div>` : ""}
             ${state.error ? `<div class="col-12"><div class="alert alert-danger py-2 mb-0 small">${esc(state.error)}</div></div>` : ""}
             ${state.message ? `<div class="col-12"><div class="alert alert-info py-2 mb-0 small">${esc(state.message)}</div></div>` : ""}
@@ -80,7 +81,7 @@
             const o = t.odds || {};
             return `<tr class="tm-row ${t.id === state.selected ? "table-active" : ""}" data-id="${esc(t.id)}" role="button">
                 <td class="text-nowrap">${esc(when(r.created_at))}</td>
-                <td>${esc(r.symbol)} ${esc(r.timeframe)} ${esc(r.side)} E1 ${esc(r.entry1)} SL ${esc(r.sl)}<div class="small text-secondary">${esc(r.live_zone_id || "typed zone")}${r.limit_time ? ` · LIMIT ${esc(when(r.limit_time))}` : " · now"}</div></td>
+                <td>${esc(r.symbol)} ${esc(r.timeframe)} ${esc(r.side)} E1 ${esc(r.entry1)} SL ${esc(r.sl)}<div class="small text-secondary">${r.source === "auto" ? '<span class="badge text-bg-info me-1">auto</span>' : ""}${esc(r.live_zone_id || "typed zone")}${r.limit_time ? ` · LIMIT ${esc(when(r.limit_time))}` : " · now"}</div></td>
                 <td><span class="badge text-bg-${badge[t.state] || "secondary"}">${esc(t.state)}</span></td>
                 <td class="text-end">${o.trades ?? "–"}</td>
                 <td class="text-end">${o.win_pct !== undefined && o.win_pct !== null ? num(o.win_pct) + "%" : "–"}</td>
@@ -93,7 +94,7 @@
             <tbody>${rows}</tbody></table></div>`;
     }
 
-    const head = `<thead><tr><th></th><th class="text-end">Trades</th><th class="text-end">Win % (95% range)</th><th class="text-end">Net R</th><th class="text-end">Avg R</th><th class="text-end">Avg win</th><th class="text-end">Avg loss</th><th class="text-end">Break-even win %</th><th class="text-end">Costs R</th><th class="text-end">Max DD R</th><th class="text-end">TP / SL / 3-day</th></tr></thead>`;
+    const head = `<thead><tr><th></th><th class="text-end">Trades</th><th class="text-end">Win % (95% range)</th><th class="text-end">Net R</th><th class="text-end">Avg R</th><th class="text-end">Avg win</th><th class="text-end">Avg loss</th><th class="text-end">Break-even win %</th><th class="text-end">Costs R</th><th class="text-end">Max DD R</th><th class="text-end">Won / SL / 3-day</th></tr></thead>`;
     function row(label, s, strong = false) {
         if (!s || !s.trades) return `<tr><td>${label}</td><td class="text-end">0</td><td colspan="9"></td></tr>`;
         const ci = s.win_ci95 ? ` <span class="text-secondary">(${num(s.win_ci95[0], 0)}–${num(s.win_ci95[1], 0)})</span>` : "";
@@ -105,11 +106,12 @@
     }
     const table = (body) => `<div class="table-responsive" style="overflow-x:auto;max-width:100%"><table class="table table-sm mb-0">${head}<tbody>${body}</tbody></table></div>`;
 
-    function verdict(s, mc) {
+    function verdict(s, mc, trail) {
         if (!s || !s.trades) return "No similar past zones had finished trading before this one, so there is no history to judge it by.";
         const edge = s.avg_r > 0 ? "made money" : "lost money";
         const trust = s.trusted ? "" : ` Only ${s.trades} trades, so treat this as a hint, not a verdict.`;
-        const mcLine = mc ? ` Recent price paths give TP first ${num(mc.p_tp_first)}% of the time (break-even needs ${num(mc.breakeven_win_pct)}%).` : "";
+        const mcLine = !mc ? "" : trail ? ` Recent price paths win ${num(mc.win_pct)}% of the time and average ${num(mc.expected_r, 2, true)}R.`
+            : ` Recent price paths give TP first ${num(mc.p_tp_first)}% of the time (break-even needs ${num(mc.breakeven_win_pct)}%).`;
         return `Zones like this won ${num(s.win_pct)}% of the time and ${edge}: ${num(s.avg_r, 2, true)}R per trade after costs, against a break-even of ${num(s.breakeven_win_pct)}%.${trust}${mcLine}`;
     }
 
@@ -124,7 +126,14 @@
         const progress = (t.progress || []).length && !s ? `<pre class="small bg-body-tertiary p-2 rounded mb-2" style="max-height:10rem;overflow:auto;white-space:pre-wrap">${esc(t.progress.join("\n"))}</pre>` : "";
         const error = t.error ? `<div class="alert alert-danger py-2 small">${esc(t.error)}</div>` : "";
         if (!s || !s.analogs) return `<hr>${top}${error}${progress}`;
-        const a = s.analogs, mc = s.monte_carlo, md = s.monte_carlo_with_drift, z = s.zone, f = s.features;
+        const exits = s.exits || { tp: { label: "TP at 1R + extra", analogs: s.analogs, monte_carlo: s.monte_carlo, monte_carlo_with_drift: s.monte_carlo_with_drift } };
+        const exitName = exits[state.exit] ? state.exit : (exits[s.live_exit] ? s.live_exit : "tp");
+        const trail = exitName === "trail";
+        const blk = exits[exitName];
+        const a = blk.analogs || {}, mc = blk.monte_carlo, md = blk.monte_carlo_with_drift, z = s.zone, f = s.features;
+        const switcher = Object.keys(exits).length > 1 ? `<div class="btn-group btn-group-sm mb-2" role="group">${Object.entries(exits).map(([k, v]) =>
+            `<button class="btn ${k === exitName ? "btn-primary" : "btn-outline-secondary"} tm-exit" data-exit="${k}">${esc(k === "trail" ? "Trailing exit" : "TP 1R + extra")}${k === s.live_exit ? " (bot's exit now)" : ""}</button>`).join("")}</div>
+            <div class="small text-secondary mb-2">${esc(blk.label || "")}</div>` : "";
         const tiers = a.tiers || [];
         const best = tiers.find((x) => x.key === a.headline);
         const c = a.conditions || {};
@@ -132,12 +141,14 @@
         const box = (title, body) => `<div class="col-12 col-lg-6"><div class="border rounded p-2 h-100"><div class="small text-secondary">${title}</div>${body}</div></div>`;
         const analogBox = best ? `<div class="fs-5 fw-semibold">${num(best.win_pct)}% win · <span class="${tone(best.avg_r)}">${num(best.avg_r, 2, true)}R</span> per trade</div>
             <div class="small">${best.trades} similar past trades (${esc(best.label.charAt(0).toLowerCase() + best.label.slice(1))}). 95% range of the win rate ${num(best.win_ci95?.[0], 0)}–${num(best.win_ci95?.[1], 0)}%. Avg win ${num(best.avg_win_r, 2, true)}R, avg loss ${num(best.avg_loss_r, 2)}R.</div>` : `<div class="small">No similar past trades yet.</div>`;
-        const mcBox = mc ? `<div class="fs-5 fw-semibold">${num(mc.p_tp_first)}% TP first · <span class="${tone(mc.expected_r)}">${num(mc.expected_r, 2, true)}R</span> expected</div>
+        const mcBox = mc && trail ? `<div class="fs-5 fw-semibold">${num(mc.win_pct)}% win · <span class="${tone(mc.expected_r)}">${num(mc.expected_r, 2, true)}R</span> expected</div>
+            <div class="small">${Number(mc.paths).toLocaleString()} paths of 3 days built from the ${Number(s.mc_window?.candles || 0).toLocaleString()} M1 candles before the LIMIT, recent drift removed, traded with the trailing stop. Stopped at the first SL ${num(mc.p_sl)}%, trailed out ${num(mc.p_trail)}%, break-even ${num(mc.p_be)}%, still open after 3 days ${num(mc.p_neither_3d)}%. Avg win ${num(mc.avg_win_r, 2, true)}R, avg loss ${num(mc.avg_loss_r, 2)}R.
+            With the recent drift kept: ${num(md?.win_pct)}% win, ${num(md?.expected_r, 2, true)}R.</div>` : mc ? `<div class="fs-5 fw-semibold">${num(mc.p_tp_first)}% TP first · <span class="${tone(mc.expected_r)}">${num(mc.expected_r, 2, true)}R</span> expected</div>
             <div class="small">${Number(mc.paths).toLocaleString()} paths of 3 days built from the ${Number(s.mc_window?.candles || 0).toLocaleString()} M1 candles before the LIMIT (${esc(when(s.mc_window?.from))} → ${esc(when(s.mc_window?.to))}), recent drift removed. SL first ${num(mc.p_sl_first)}%, neither in 3 days ${num(mc.p_neither_3d)}%. Break-even ${num(mc.breakeven_win_pct)}%.
             With the recent drift kept: TP first ${num(md?.p_tp_first)}%, ${num(md?.expected_r, 2, true)}R.</div>` : "";
-        const fill = s.p_fill !== null && s.p_fill !== undefined ? `<div class="small mt-1">Chance price reaches Entry 1 before the LIMIT expires (360 candles): <strong>${num(s.p_fill)}%</strong>.</div>` : "";
+        const fill = s.p_fill !== null && s.p_fill !== undefined ? `<div class="small mt-1">Chance price reaches Entry 1 before the zone leaves the chart: <strong>${num(s.p_fill)}%</strong>.</div>` : "";
         const actual = s.actual ? `<div class="alert alert-secondary py-2 small mt-2 mb-0"><strong>What actually happened</strong> (only shown because this zone is in the past; never used for the odds): ${
-            s.actual.filled ? `filled ${esc(when(s.actual.fill_time))}, ${esc(s.actual.reason)} at ${esc(when(s.actual.exit_time))}, <span class="${tone(s.actual.net_r)}">${num(s.actual.net_r, 2, true)}R</span>${s.actual.final ? "" : " (still open in the data)"}` : (s.actual.final ? "never filled." : "not filled yet.")}</div>` : "";
+            s.actual.filled ? `filled ${esc(when(s.actual.fill_time))}. TP 1R exit: ${esc(s.actual.reason)} at ${esc(when(s.actual.exit_time))}, <span class="${tone(s.actual.net_r)}">${num(s.actual.net_r, 2, true)}R</span>.${s.actual.trail ? ` Trailing exit: ${esc(s.actual.trail.reason)} at ${esc(when(s.actual.trail.exit_time))}, <span class="${tone(s.actual.trail.net_r)}">${num(s.actual.trail.net_r, 2, true)}R</span>.` : ""}${s.actual.final ? "" : " (still open in the data)"}` : (s.actual.final ? "never filled." : "not filled yet.")}</div>` : "";
         const tierRows = tiers.map((x) => row(esc(x.label), x, x.key === a.headline)).join("");
         const years = best ? Object.entries(best.by_year || {}).map(([y, v]) => row(esc(y), v)).join("") + row("Total", best, true) : "";
         const all = a.all_zones || {};
@@ -145,8 +156,8 @@
         const allYears = Object.entries(all.by_year || {}).map(([y, v]) => row(esc(y), v)).join("");
         const examples = (a.closest_examples || []).map((e) => `<tr><td>${esc(when(e.limit_time))}</td><td>${esc(when(e.exit_time))}</td><td class="text-end">${esc(e.entry1)}</td><td class="text-end">${esc(e.sl)}</td><td class="text-end">${num(e.sl_atr, 2)}</td><td>${esc(e.reason)}</td><td class="text-end ${tone(e.net_r)}">${num(e.net_r, 2, true)}</td></tr>`).join("");
         const lib = s.library || {};
-        return `<hr>${top}${error}${zoneLine}
-            <div class="alert ${best && best.avg_r > 0 && best.trusted ? "alert-success" : "alert-warning"} py-2 small">${esc(verdict(best, mc))}</div>
+        return `<hr>${top}${error}${zoneLine}${switcher}
+            <div class="alert ${best && best.avg_r > 0 && best.trusted ? "alert-success" : "alert-warning"} py-2 small">${esc(verdict(best, mc, trail))}</div>
             <div class="row g-2 mb-2">${box("(a) Similar past zones", analogBox)}${box("(b) Monte Carlo of recent price paths", mcBox + fill)}</div>${actual}
             <h6 class="mt-3 mb-1">Similar past zones, from strict to loose</h6>${table(tierRows)}
             <h6 class="mt-3 mb-1">Year by year: ${esc(best?.label || "")}</h6>${table(years)}
@@ -189,6 +200,8 @@
     });
 
     panel.addEventListener("click", async (event) => {
+        const ex = event.target.closest(".tm-exit");
+        if (ex) { state.exit = ex.dataset.exit; render(); return; }
         const tr = event.target.closest(".tm-row");
         if (tr) { state.selected = tr.dataset.id; state.detail = null; await refresh(true); return; }
         if (event.target.id === "tm-cancel") {
