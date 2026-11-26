@@ -1,186 +1,154 @@
-# XAUUSD MT5 Score-Based Scalping Bot
+# LebPrime Trading Engine
 
-## What Changed
-This bot has been refactored into a production-style MT5 system for XAUUSD with:
+Automated MT5 trading bot for the LebPrime v3.4.0 zone strategy, with a web dashboard, Telegram alerts
+and a research lab. It runs on a Linux VPS against a **demo** account (OneRoyal-Demo).
 
-- 15m EMA50 / EMA200 directional bias
-- 3m pullback scoring instead of brittle yes/no setup checks
-- 1m breakout trigger scoring
-- hard risk brakes only for spread, ATR, cooldowns, drawdown, and open-trade limits
-- 0.5% fixed-fractional risk sizing
-- 1R partial TP, 2R final TP, breakeven at 1R, trailing from 1.2R
-- Telegram alerts
-- structured JSON-style cycle logs
-- rotating log files for Windows VPS use
-- safer state persistence for OneDrive / Windows file locking
+- Repository: `github.com/christiangemayel1999-alt/lebprime-trading-engine`
+- Dashboard: `https://bot.lebprimesignals.com` (login required)
+- Live system: Linux VPS, deployed automatically from `main`
 
-## Strategy Summary
-The bot evaluates every cycle in three layers:
+> Never commit secrets. Passwords and tokens live only in `.env` on the PC and `/etc/lebprime/` on the VPS.
 
-1. `15m trend`
-   - scores bullish and bearish trend quality from price vs EMA50 / EMA200, EMA separation, and EMA slope
-2. `3m setup`
-   - scores pullback quality near EMA20 / EMA50, candle rejection, RSI, ADX, and volume stability
-3. `1m trigger`
-   - scores breakout confirmation from candle body, close location, recent micro-range break, and volume expansion
+## How the system fits together
 
-Trades are only allowed when:
+The code is organised in seven sections. Today several of them still share the `services/` folder; a
+cleanup that gives each section its own folder is planned.
 
-- M3 ATR is between `3.0` and `12.0`
-- spread is `<= 25`
-- only one trade is open
-- session is open
-- no blackout window is active
-- cooldown and loss-lock rules are clear
-- combined entry score passes the configured threshold
+| Section | What it does | Where it lives now |
+| --- | --- | --- |
+| 1. Dashboard front end | Pages, buttons, charts | `dashboard/static/`, `dashboard/templates/` |
+| 2. Dashboard back end | API behind the dashboard, bot controls, config editing | `dashboard/*.py`, `services/` (bot_control, control_plane, operator, config_manager, job_service) |
+| 3. Trading engine / MT5 | Signals, risk, orders, positions, MT5 connection | `main.py`, `mt5_connector.py`, `risk_manager.py`, `trading_bot/`, `services/lebprime_live/` |
+| 4. Market data | Candle history and datasets | `services/history_loader.py`, `services/indicator_lab/dataset_service.py` |
+| 5. Research lab | Indicator Lab, strategy tests, Time Machine, backtest scripts | `services/indicator_lab/`, `services/worker.py`, `scripts/` |
+| 6. Notifications / logging | Telegram, logs, audit trail | `services/telegram_*`, `logger.py`, `services/audit_service.py` |
+| 7. Ops | VPS install, systemd services, auto-deploy, backups, sandbox | `deploy/linux/` |
 
-## Core Files
-- `main.py`
-- `strategy.py`
-- `risk_manager.py`
-- `filters.py`
-- `indicators.py`
-- `logger.py`
-- `utils.py`
-- `config.json`
-- `requirements.txt`
+Shared by everything: `utils.py` (config loading), `services/database.py` (SQLite), `trading_bot/core/`, `config.json`.
 
-## Setup
-1. Install Python 3.11 on Windows.
-2. Install MetaTrader 5 desktop terminal.
-3. Copy `.env.example` to `.env`.
-4. Fill in:
-   - `MT5_LOGIN`
-   - `MT5_PASSWORD`
-   - `MT5_SERVER`
-   - `MT5_PATH`
-   - optional `TELEGRAM_BOT_TOKEN`
-   - optional `TELEGRAM_CHAT_ID`
-5. Install dependencies:
-   ```powershell
-   py -3.11 -m pip install -r requirements.txt
-   ```
+## Strategy: LebPrime v3.4.0
 
-## Run Locally
-Visible console:
-```powershell
-.\Start Bot.bat
-```
+- Section `lebprime_v3_4_0` in the config. Each symbol and timeframe pair runs its own engine, the same
+  engine the Indicator Lab uses for backtests (`services/indicator_lab/lebprime_engine.py`). An edit to that
+  file changes live trading.
+- Symbols on the VPS: XAUUSD, US30, NAS100 (broker USTEC), XAGUSD, WTI, EURUSD.
+  Timeframes: M1, M3, M5, M15, M30, M45 (M45 is built from M15 candles when MT5 has no native M45).
+- Zones match TradingView's chart zones (`tv_zone_parity`, `zone_window_bars` 500).
+- Current forward-test exit (since 25 Nov 2026): 1 entry at Entry 1 (`entry2_mode` Off), fixed broker
+  stop loss at the structural SL (1R), no fixed TP. From +1R a trailing stop follows the best price
+  1.0 x ATR(14) behind it, moved at candle closes (`exit_mode` Trail, `trail_start_r` 1.0, `trail_mode` ATR,
+  `trail_atr_mult` 1.0). The snippet is in `deploy/lebprime_v3_4_0.v340_forward.json`.
+- Details: `docs/LEBPRIME_LIVE_V3_4_0.md`, `docs/TV_PARITY_TRAIL_REPORT.md`, `docs/PINE_PARITY_NOTES.md`.
+  Pine references are in `docs/indicator_reference/`.
 
-Direct Python:
-```powershell
-py -3.11 main.py
-```
+## Live system on the VPS
 
-Silent background-style launcher:
-```powershell
-scripts\start_bot.bat
-```
+| Service | Job |
+| --- | --- |
+| `lebprime-bot` | The trading bot (`main.py`). Only this service can reach MT5. |
+| `lebprime-mt5-gateway`, `lebprime-mt5-terminal` | MT5 terminal under Wine and the gateway the bot talks to |
+| `lebprime-dashboard` | Dashboard on 127.0.0.1:8501, published through Caddy (HTTPS, login) |
+| `lebprime-worker` | Background jobs for the Indicator Lab |
+| `lebprime-research-dispatch.timer` | Runs dashboard strategy tests and Time Machine jobs in the research sandbox |
+| `lebprime-autodeploy.timer` | Auto-deploy (below) |
+| `lebprime-watchdog.timer`, `lebprime-backup.timer` | Health watchdog and backups |
 
-Pull the latest code from Git:
-```powershell
-.\Pull from GitHub.bat
-```
+Paths on the VPS:
 
-## Logs And State
-- `logs\bot.log`
-- `logs\errors.log`
-- `logs\signals.csv`
-- `logs\trades.csv`
-- `storage\state.json`
-- `storage\bot.db`
+- Code: `/opt/lebprime/app` (installed by the auto-deploy; do not edit by hand)
+- Live config: `/var/lib/lebprime/storage/config.json` (this one is used, not the repo `config.json`)
+- Live data: `/var/lib/lebprime/storage/` (`bot.db`, `control_state.json`), reports in `/var/lib/lebprime/reports/`
+- Secrets: `/etc/lebprime/` (root only)
 
-`bot.log` now contains structured cycle snapshots with score and reason details.
+Execution can be paused and resumed from the dashboard. That setting is kept in `storage/control_state.json`
+and survives restarts and deploys.
 
-## Windows VPS Deployment
-1. Put the project in a stable local path such as `C:\TradingBot`.
-   Avoid running directly from OneDrive if possible.
-2. Open MT5 once manually and log in.
-3. Enable algorithmic trading inside MT5.
-4. Install Python and run:
-   ```powershell
-   py -3.11 -m pip install -r requirements.txt
-   ```
-5. Configure `.env`.
-6. Test with:
-   ```powershell
-   .\Start Bot.bat
-   ```
-7. If stable, use:
-   ```powershell
-   scripts\install_tasks.ps1
-   ```
-   to create scheduled tasks for MT5, the bot, and the dashboard.
+### Auto-deploy
+
+Every ~2 minutes the VPS checks GitHub `main`. When it changes, it:
+
+1. copies the new commit into a staging folder, compiles it, checks the bot modules import and runs the
+   gateway tests,
+2. stops the bot, worker and dashboard, installs the code, starts them again,
+3. waits 75 s; if a service is down or the bot restarted, it rolls back to the previous version.
+
+The result is sent to Telegram. So **anything merged into `main` goes live within a few minutes.**
+Work on a branch, open a pull request, and merge only when you want it live.
+Setup and runbook: `deploy/linux/README.md`, `deploy/linux/RUNBOOK.md`.
+
+### Research sandbox
+
+Backtests and research jobs run with `sudo lebprime-research [--detach] <command>`: capped CPU and memory,
+lowest priority, no secrets, and no access to MT5 or the live trading controls. Research workspaces live in
+`/var/lib/lebprime/research/`. Known gap: the sandbox can still write `/var/lib/lebprime/storage`;
+a fix is planned.
 
 ## Dashboard
-Run:
-```powershell
-py -3.11 -m uvicorn dashboard.app:app --host 0.0.0.0 --port 8501
-```
 
-Or:
-```powershell
-scripts\start_dashboard.bat
-```
+`https://bot.lebprimesignals.com`. Main things it does:
 
-Or from the project root:
-```powershell
-.\Start Dashboard.bat
-```
-
-Hidden/minimized attempt:
-```powershell
-.\Start Dashboard Hidden.bat
-```
-
-The dashboard is now a FastAPI control plane for the real bot, not a read-only toy monitor. It can:
-
-- start and stop the live bot process
-- pause or resume execution while keeping signal generation active
-- switch between `DRY_RUN`, `DEMO`, `VALIDATION_TEST`, and `LIVE`
-- toggle the kill switch and auto execution
-- open and manage manual MT5 trades from the dashboard
-- edit setup family controls, strategy settings, risk, sessions, symbols, and alerts
-- apply one-click `SAFE_MODE`, `BALANCED_MODE`, and `SCALPING_MODE` presets
-- preview config diffs before saving
-- create timestamped backups in `storage\config_backups\`
-- persist shared runtime controls in `storage\control_state.json`
-- show logs, audit history, heartbeat, and recent execution telemetry
-- optionally require HTTP Basic auth with `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD`
-- run in readonly mode for monitoring-only access
-
-How it works:
-
-- Dashboard writes validated config updates through a safe config manager.
-- Every config save creates a backup before overwrite.
-- Bot runtime reads `storage\control_state.json` every cycle to apply pause, stop, kill-switch, and reload requests.
-- Switching to `LIVE` requires typing `LIVE` in the UI confirmation prompt.
-- Many config changes take effect without restarting; when config is saved, the dashboard also requests a runtime reload.
-- If `dashboard.readonly_mode` is enabled, control and config-mutating routes are blocked server-side.
-- If `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` are set, the dashboard prompts for credentials before loading.
-- Manual dashboard trades and Telegram remote commands share the same backend validation and MT5 execution path.
-- On this Windows setup, the most reliable startup path is still the visible launcher or direct Python command. Hidden/background launchers may depend on local environment behavior.
+- status, open positions and trades (read from an MT5 account snapshot), logs, audit history
+- start/stop the bot, pause/resume execution, kill switch (Start/Resume ask for confirmation)
+- edit strategy, risk, sessions, symbols and alerts, with a diff preview and a backup on every save
+  (`storage/config_backups/`); some settings need a bot restart
+- Indicator Lab: datasets, campaigns, **Strategy test** (runs in the research sandbox)
+- **Time Machine**: odds for a zone from similar past zones plus a Monte Carlo of price paths, run
+  automatically for each new live zone; the decision shows in the Trades tab and on Telegram.
+  See `docs/TIME_MACHINE.md`.
 
 ## Telegram
-If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are present, the bot sends:
 
-- startup alerts
-- scored setup alerts
-- trade open alerts
-- trade close alerts
-- daily summaries
-- critical error alerts
+With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set, the bot sends startup, trade open/close, daily
+summary, error and deploy messages, plus Time Machine odds per new zone. Remote commands (`/status`,
+`/pause`, `/resume`, ...) need `TELEGRAM_REMOTE_CONTROL_ENABLED=1` and admin chat/user ids. Trade commands
+(`/buy`, `/sell`, `/close`, `/closeall`) also need `TELEGRAM_MANUAL_TRADE_COMMANDS_ENABLED=1` (off by default).
+Dangerous commands ask for `/confirm <token>`.
 
-Optional remote control is also available:
+## Working on the PC (Windows)
 
-- set `telegram.remote_control_enabled` to `true`
-- set `telegram.admin_chat_ids` and/or `telegram.admin_user_ids`
-- dangerous commands require `/confirm <token>` within the configured TTL
-- supported commands include `/status`, `/startbot`, `/stopbot`, `/pause`, `/resume`, `/live`, `/dry`, `/killswitch_on`, `/killswitch_off`, `/positions`, `/close <ticket>`, `/closeall`, `/strategy <name> on|off`, `/family <name> on|off`, `/preset <name>`, and optional `/buy` / `/sell`
+The live bot runs on the VPS. The PC copy is for reading, editing and local tests.
 
-## Notes
-- The bot is less strict than before, but not looser on risk.
-- ATR values around `5.9` to `6.2` and spreads around `17` to `19` are now tradable by default.
-- Spread spikes above `25` still block entries.
-- The old 1m trigger timing trap has been removed, so the bot no longer depends on catching a candle within a 2-5 second window.
-So I can do lecking short present way my own shown to start. Yeah, where they showed the character in Propozent, I'm proposed in herItalia is a battle I still look good nice matterhighsort of shannons lake it came rich with the girlsbased in terms of breakfast and then miss to do that in social videos and the comments are funnier than the person for them to tick up Alexander having a girl is there is a flag l'bn serious kept mare kebar natural still maz running maximum maximum maximum tire to coins finally it was so nice can exact bulli matter kills kind of shell near tanking life shall net for a little table and shake ma laid sheep lack a new case match kept my earth I've never died my ear ever I've never died my hair where I might shop she happened he lokes it thought she bought it phase keptit so lacks bachmot keeping it as shark indicats all trama site basically acting hard when myshow than shown shall be kept it matters maybe she would smake it she would sell it going so it's making a snaps he would go and bring short shut kept a camera knew j my third section isspeakers in the active article and sheautonomy asa sailors up to all the studys and marismed. Since the share of the general targets have the served shall show you case in sheet for mest marker, ma case I don't think case it leave kickers entirely as it bakes me to market kept show me shall converse five point five show as most ruf in it it's neal a cani won third amostbrought me to my she model a ft liding scrap to hot skript shows a why so strategy me thought candidate stink to shall meet rading running skript in physon me to fifteen begins skript to alinker driving in a list mazon and keep it to sort of sin it zun capsor molecular set american assiston leave shebser it it's binson stuff in it to ft solid mayor labby stople as penar ten whether he's around it shall fneckor to fit while she never kind of zoned shows in a sharp scarp mez script mathood in the arbour sort of sort of zonity keep it is andil I'd zerbel and bad garb is cober one pin point far third zero point seven scripts scrib than rading views matrike ram basen made it as dryam himself like zones case indicate in bar it's a whynew still hsnelf she am a toilet segnal little in white list skrip zon cole sكde am lotic rizen list half zon whiflet shorfy stop losh le may conditions high rizen reglale sgnel to letting it covered shanktions skript ball showbinas canding it sbers matser kether my sكle me as kirkers collabs
+**Do not use `Pull from GitHub.bat`.** It points at an old repository name and runs `git reset --hard`
+plus `git clean -fdx`, which deletes `.env`, `storage\`, `reports\`, logs and the venv.
+
+First time:
+
+```powershell
+cd "C:\Users\<you>\OneDrive\Desktop\Trading_Bot_Original"
+git clone https://github.com/christiangemayel1999-alt/lebprime-trading-engine.git "Trading Bot"
+cd "Trading Bot"
+py -3.11 -m venv venv
+venv\Scripts\pip install -r requirements.txt
+copy .env.example .env    # then fill in MT5 and Telegram values
+```
+
+Moving from an old folder: keep a backup copy, clone as above into a new folder, then copy `.env`,
+`storage\`, `reports\`, `backtests\`, `LebPrime_Results\` and your venv across.
+
+Update later:
+
+```powershell
+git pull
+```
+
+`git pull` never touches `.env`, `storage\` or other ignored files.
+
+Run locally: `Start Dashboard.bat` (dashboard on http://127.0.0.1:8501) and `Start Bot.bat`.
+Don't run a second bot on the same MT5 account as the VPS.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+On the VPS, run tests in a research copy inside the sandbox, never in `/opt/lebprime/app`.
+Two tests about Windows venv paths (`test_python_resolver_prefers_proven_current_interpreter_over_launcher`,
+`test_resolve_python_executable_prefers_repo_local_venv`) fail on Linux; that is expected.
+
+## Rules
+
+- Demo account only. Live execution stays as Christian sets it.
+- Never push straight to `main`: branch, pull request, then merge.
+- Strategy changes are tested first in the research sandbox: no look-ahead, real broker costs,
+  year-by-year win % and net R per symbol, avg win/avg loss, buys vs sells.
